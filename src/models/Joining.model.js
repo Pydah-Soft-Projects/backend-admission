@@ -32,9 +32,23 @@ const joiningSchema = new Schema(
       index: true,
     },
     courseInfo: {
+      courseId: { type: Schema.Types.ObjectId, ref: 'Course', index: true },
+      branchId: { type: Schema.Types.ObjectId, ref: 'Branch', index: true },
       course: { type: String, trim: true, default: '' },
       branch: { type: String, trim: true, default: '' },
       quota: { type: String, trim: true, default: '' },
+    },
+    paymentSummary: {
+      totalFee: { type: Number, min: 0, default: 0 },
+      totalPaid: { type: Number, min: 0, default: 0 },
+      balance: { type: Number, min: 0, default: 0 },
+      currency: { type: String, default: 'INR', uppercase: true },
+      status: {
+        type: String,
+        enum: ['not_started', 'partial', 'paid'],
+        default: 'not_started',
+      },
+      lastPaymentAt: { type: Date },
     },
     studentInfo: {
       name: { type: String, trim: true, required: true },

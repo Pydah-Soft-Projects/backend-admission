@@ -9,6 +9,8 @@ import { errorHandler } from './middleware/error.middleware.js';
 import communicationRoutes from './routes/communication.routes.js';
 import joiningRoutes from './routes/joining.routes.js';
 import admissionRoutes from './routes/admission.routes.js';
+import courseRoutes from './routes/course.routes.js';
+import paymentRoutes from './routes/payment.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -47,6 +49,8 @@ app.use('/api/leads', leadRoutes);
 app.use('/api/communications', communicationRoutes);
 app.use('/api/joinings', joiningRoutes);
 app.use('/api/admissions', admissionRoutes);
+app.use('/api/courses', courseRoutes);
+app.use('/api/payments', paymentRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

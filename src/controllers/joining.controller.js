@@ -4,6 +4,8 @@ import Lead from '../models/Lead.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import Admission from '../models/Admission.model.js';
 import AdmissionSequence from '../models/AdmissionSequence.model.js';
+import Course from '../models/Course.model.js';
+import Branch from '../models/Branch.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
@@ -94,7 +96,7 @@ const generateAdmissionNumber = async () => {
 export const listJoinings = async (req, res) => {
   try {
     const {
-      status,
+      status: statusParam,
       page = 1,
       limit = 20,
       search = '',
@@ -102,7 +104,18 @@ export const listJoinings = async (req, res) => {
     } = req.query;
 
     const query = {};
-    if (status) query.status = status;
+    if (statusParam) {
+      const statusesRaw = Array.isArray(statusParam) ? statusParam : String(statusParam).split(',');
+      const statuses = statusesRaw
+        .map((value) => String(value).trim())
+        .filter((value) => value.length > 0);
+
+      if (statuses.length === 1) {
+        query.status = statuses[0];
+      } else if (statuses.length > 1) {
+        query.status = { $in: statuses };
+      }
+    }
 
     const paginationLimit = Math.min(Number(limit) || 20, 100);
     const skip = (Number(page) - 1) * paginationLimit;
@@ -274,6 +287,23 @@ const normalizeJoiningPayload = (payload) => {
       safePayload.reservation.other?.map((entry) => sanitizeString(entry)) || [];
   }
 
+  if (safePayload.courseInfo) {
+    safePayload.courseInfo = {
+      ...safePayload.courseInfo,
+      course: sanitizeString(safePayload.courseInfo.course),
+      branch: sanitizeString(safePayload.courseInfo.branch),
+      quota: sanitizeString(safePayload.courseInfo.quota),
+    };
+
+    if (safePayload.courseInfo.courseId === '') {
+      safePayload.courseInfo.courseId = undefined;
+    }
+
+    if (safePayload.courseInfo.branchId === '') {
+      safePayload.courseInfo.branchId = undefined;
+    }
+  }
+
   return safePayload;
 };
 
@@ -283,6 +313,51 @@ export const saveJoiningDraft = async (req, res) => {
     const payload = normalizeJoiningPayload(req.body || {});
 
     const lead = await ensureLeadExists(leadId);
+
+     let courseDoc = null;
+     let branchDoc = null;
+
+     if (payload.courseInfo?.branchId && !payload.courseInfo?.courseId) {
+       branchDoc = await Branch.findById(payload.courseInfo.branchId);
+       if (!branchDoc) {
+         return errorResponse(res, 'Selected branch could not be found', 404);
+       }
+       payload.courseInfo.courseId = branchDoc.courseId.toString();
+     }
+
+     if (payload.courseInfo?.courseId) {
+       courseDoc = await Course.findById(payload.courseInfo.courseId);
+       if (!courseDoc) {
+         return errorResponse(res, 'Selected course could not be found', 404);
+       }
+       payload.courseInfo.courseId = courseDoc._id;
+     }
+
+     if (payload.courseInfo?.branchId) {
+       branchDoc =
+         branchDoc ||
+         (await Branch.findOne({
+           _id: payload.courseInfo.branchId,
+           courseId: payload.courseInfo.courseId || courseDoc?._id,
+         }));
+
+       if (!branchDoc) {
+         return errorResponse(res, 'Selected branch is invalid for the chosen course', 400);
+       }
+
+       payload.courseInfo.branchId = branchDoc._id;
+       if (!payload.courseInfo.branch) {
+         payload.courseInfo.branch = branchDoc.name;
+       }
+
+       if (!payload.courseInfo.courseId) {
+         payload.courseInfo.courseId = branchDoc.courseId;
+       }
+     }
+
+     if (courseDoc && !payload.courseInfo?.course) {
+       payload.courseInfo.course = courseDoc.name;
+     }
 
     const now = new Date();
     const joining =
@@ -458,6 +533,7 @@ export const approveJoining = async (req, res) => {
       documents: joiningObject.documents || {},
       status: 'active',
       updatedBy: req.user._id,
+      paymentSummary: joiningObject.paymentSummary || undefined,
     };
 
     await Admission.findOneAndUpdate(

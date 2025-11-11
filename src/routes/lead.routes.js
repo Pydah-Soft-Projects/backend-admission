@@ -26,6 +26,7 @@ import {
 import {
   assignLeads,
   getUserLeadAnalytics,
+  getOverviewAnalytics,
 } from '../controllers/leadAssignment.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -70,6 +71,7 @@ router.delete('/bulk', isSuperAdmin, bulkDeleteLeads);
 router.post('/assign', isSuperAdmin, assignLeads);
 
 // Analytics routes
+router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
 router.get('/analytics/:userId', getUserLeadAnalytics);
 
 // Activity log routes (must come before /:id routes)

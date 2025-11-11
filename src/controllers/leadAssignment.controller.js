@@ -1,6 +1,9 @@
 import mongoose from 'mongoose';
 import Lead from '../models/Lead.model.js';
 import User from '../models/User.model.js';
+import Joining from '../models/Joining.model.js';
+import Admission from '../models/Admission.model.js';
+import ActivityLog from '../models/ActivityLog.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 
 // @desc    Assign leads to users based on mandal/state
@@ -182,6 +185,297 @@ export const getUserLeadAnalytics = async (req, res) => {
   } catch (error) {
     console.error('Error getting user analytics:', error);
     return errorResponse(res, error.message || 'Failed to get analytics', 500);
+  }
+};
+
+export const getOverviewAnalytics = async (req, res) => {
+  try {
+    if (req.user.roleName !== 'Super Admin') {
+      return errorResponse(res, 'Access denied', 403);
+    }
+
+    const rangeInDays = Number.parseInt(req.query.days, 10) || 14;
+    const timezone = req.query.tz || 'Asia/Kolkata';
+
+    const today = new Date();
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - (rangeInDays - 1));
+    startDate.setHours(0, 0, 0, 0);
+
+    const [
+      totalLeads,
+      confirmedLeads,
+      admittedLeads,
+      leadStatusAgg,
+      joiningStatusAgg,
+      admissionStatusAgg,
+      admissionsTotal,
+      leadsCreatedAgg,
+      statusChangesAgg,
+      joiningTrendAgg,
+      admissionsAgg,
+    ] = await Promise.all([
+      Lead.countDocuments(),
+      Lead.countDocuments({ leadStatus: 'Confirmed' }),
+      Lead.countDocuments({ leadStatus: 'Admitted' }),
+      Lead.aggregate([
+        {
+          $group: {
+            _id: '$leadStatus',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Joining.aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Admission.aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Admission.countDocuments(),
+      Lead.aggregate([
+        { $match: { createdAt: { $gte: startDate } } },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$createdAt',
+                timezone,
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      ActivityLog.aggregate([
+        {
+          $match: {
+            type: 'status_change',
+            createdAt: { $gte: startDate },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              date: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$createdAt',
+                  timezone,
+                },
+              },
+              status: '$newStatus',
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { '_id.date': 1 } },
+      ]),
+      Joining.aggregate([
+        {
+          $match: {
+            updatedAt: { $gte: startDate },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              date: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: '$updatedAt',
+                  timezone,
+                },
+              },
+              status: '$status',
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { '_id.date': 1 } },
+      ]),
+      Admission.aggregate([
+        {
+          $match: {
+            admissionDate: { $gte: startDate },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$admissionDate',
+                timezone,
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+    ]);
+
+    const leadStatusBreakdown = leadStatusAgg.reduce((acc, item) => {
+      const key = item._id || 'Unknown';
+      acc[key] = item.count;
+      return acc;
+    }, {});
+
+    const joiningStatusBreakdown = joiningStatusAgg.reduce((acc, item) => {
+      const key = item._id || 'draft';
+      acc[key] = item.count;
+      return acc;
+    }, {});
+
+    const admissionStatusBreakdown = admissionStatusAgg.reduce((acc, item) => {
+      const key = item._id || 'active';
+      acc[key] = item.count;
+      return acc;
+    }, {});
+
+    const initDailySeries = () => {
+      const series = new Map();
+      for (let i = 0; i < rangeInDays; i += 1) {
+        const date = new Date(startDate);
+        date.setDate(startDate.getDate() + i);
+        const key = date.toISOString().slice(0, 10);
+        series.set(key, { date: key, count: 0 });
+      }
+      return series;
+    };
+
+    const leadsCreatedSeries = initDailySeries();
+    leadsCreatedAgg.forEach((item) => {
+      const entry = leadsCreatedSeries.get(item._id);
+      if (entry) {
+        entry.count = item.count;
+      }
+    });
+
+    const statusChangeSeries = new Map();
+    statusChangesAgg.forEach((item) => {
+      const dateKey = item._id.date;
+      if (!statusChangeSeries.has(dateKey)) {
+        statusChangeSeries.set(dateKey, {
+          date: dateKey,
+          total: 0,
+          statuses: {},
+        });
+      }
+      const bucket = statusChangeSeries.get(dateKey);
+      bucket.total += item.count;
+      if (item._id.status) {
+        bucket.statuses[item._id.status] = (bucket.statuses[item._id.status] || 0) + item.count;
+      }
+    });
+    for (const [dateKey, entry] of statusChangeSeries) {
+      if (!entry.statuses.total) {
+        entry.statuses.total = entry.total;
+      }
+    }
+
+    const joiningSeries = new Map();
+    joiningTrendAgg.forEach((item) => {
+      const dateKey = item._id.date;
+      if (!joiningSeries.has(dateKey)) {
+        joiningSeries.set(dateKey, {
+          date: dateKey,
+          draft: 0,
+          pending_approval: 0,
+          approved: 0,
+        });
+      }
+      const bucket = joiningSeries.get(dateKey);
+      bucket[item._id.status] = (bucket[item._id.status] || 0) + item.count;
+    });
+
+    const admissionsSeries = initDailySeries();
+    admissionsAgg.forEach((item) => {
+      const entry = admissionsSeries.get(item._id);
+      if (entry) {
+        entry.count = item.count;
+      }
+    });
+
+    const serializeSeries = (seriesMap, defaults = {}) => {
+      const buildDefaults = () => {
+        const clone = {};
+        Object.entries(defaults).forEach(([key, value]) => {
+          if (Array.isArray(value)) {
+            clone[key] = [...value];
+          } else if (value && typeof value === 'object') {
+            clone[key] = { ...value };
+          } else {
+            clone[key] = value;
+          }
+        });
+        return clone;
+      };
+
+      const results = [];
+      for (let i = 0; i < rangeInDays; i += 1) {
+        const date = new Date(startDate);
+        date.setDate(startDate.getDate() + i);
+        const key = date.toISOString().slice(0, 10);
+        if (seriesMap instanceof Map) {
+          if (seriesMap.has(key)) {
+            results.push(seriesMap.get(key));
+          } else {
+            results.push({ date: key, ...buildDefaults() });
+          }
+        } else if (seriesMap[key]) {
+          results.push(seriesMap[key]);
+        } else {
+          results.push({ date: key, ...buildDefaults() });
+        }
+      }
+      return results;
+    };
+
+    const overview = {
+      totals: {
+        leads: totalLeads,
+        confirmedLeads,
+        admittedLeads,
+        joinings: {
+          draft: joiningStatusBreakdown.draft || 0,
+          pendingApproval: joiningStatusBreakdown.pending_approval || 0,
+          approved: joiningStatusBreakdown.approved || 0,
+        },
+        admissions: admissionsTotal,
+      },
+      leadStatusBreakdown,
+      joiningStatusBreakdown,
+      admissionStatusBreakdown,
+      daily: {
+        leadsCreated: serializeSeries(leadsCreatedSeries),
+        statusChanges: serializeSeries(statusChangeSeries, { total: 0, statuses: {} }),
+        joiningProgress: serializeSeries(joiningSeries, {
+          draft: 0,
+          pending_approval: 0,
+          approved: 0,
+        }),
+        admissions: serializeSeries(admissionsSeries),
+      },
+    };
+
+    return successResponse(res, overview, 'Overview analytics retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error getting overview analytics:', error);
+    return errorResponse(res, error.message || 'Failed to get overview analytics', 500);
   }
 };
 
