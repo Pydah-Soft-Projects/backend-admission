@@ -295,8 +295,8 @@ export const createCashfreeOrder = async (req, res) => {
       },
     };
 
-    const clientId = config.get('clientId');
-    const clientSecret = config.get('clientSecret');
+    const clientId = config.clientId;
+    const clientSecret = config.clientSecret;
 
     if (!clientId || !clientSecret) {
       return errorResponse(
@@ -369,8 +369,8 @@ export const verifyCashfreePayment = async (req, res) => {
       return errorResponse(res, 'Cashfree configuration is not set', 503);
     }
 
-    const clientId = config.get('clientId');
-    const clientSecret = config.get('clientSecret');
+    const clientId = config.clientId;
+    const clientSecret = config.clientSecret;
 
     if (!clientId || !clientSecret) {
       return errorResponse(
