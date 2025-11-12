@@ -2,16 +2,24 @@ import crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96-bit nonce recommended for GCM
-let cachedKeyBuffer = null;
+let cachedKeyBuffer = undefined;
+let encryptionWarningLogged = false;
 
 const getKeyBuffer = () => {
-  if (cachedKeyBuffer) {
+  if (cachedKeyBuffer !== undefined) {
     return cachedKeyBuffer;
   }
 
   const secret = process.env.JOINING_ENCRYPTION_KEY;
   if (!secret) {
-    throw new Error('JOINING_ENCRYPTION_KEY is not configured');
+    if (!encryptionWarningLogged) {
+      console.warn(
+        '[encryption] JOINING_ENCRYPTION_KEY is not configured. Sensitive fields will be stored as plain text.'
+      );
+      encryptionWarningLogged = true;
+    }
+    cachedKeyBuffer = null;
+    return cachedKeyBuffer;
   }
 
   if (secret.length < 32) {
@@ -33,6 +41,10 @@ export const encryptSensitiveValue = (value) => {
   }
 
   const key = getKeyBuffer();
+  if (!key) {
+    return String(value);
+  }
+
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
@@ -50,13 +62,17 @@ export const decryptSensitiveValue = (value) => {
     return value;
   }
 
+  const key = getKeyBuffer();
+  if (!key) {
+    return value;
+  }
+
   try {
     const [ivPart, authTagPart, encryptedPart] = value.split(':');
     if (!ivPart || !authTagPart || !encryptedPart) {
       return value;
     }
 
-    const key = getKeyBuffer();
     const iv = Buffer.from(ivPart, 'base64');
     const authTag = Buffer.from(authTagPart, 'base64');
     const encrypted = Buffer.from(encryptedPart, 'base64');
