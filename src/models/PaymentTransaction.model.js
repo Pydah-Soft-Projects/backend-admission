@@ -72,6 +72,11 @@ const paymentTransactionSchema = new Schema(
       type: String,
       trim: true,
     },
+    isAdditionalFee: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     meta: {
       type: Schema.Types.Mixed,
       default: {},

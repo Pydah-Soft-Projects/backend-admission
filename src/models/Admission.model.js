@@ -123,10 +123,10 @@ const admissionSchema = new Schema(
       ssc: { type: Boolean, default: false },
       interOrDiploma: { type: Boolean, default: false },
       ug: { type: Boolean, default: false },
-      medium: {
-        type: String,
-        enum: ['english', 'telugu', 'other', ''],
-        default: '',
+      mediums: {
+        type: [String],
+        enum: ['english', 'telugu', 'other'],
+        default: [],
       },
       otherMediumLabel: { type: String, trim: true, default: '' },
     },

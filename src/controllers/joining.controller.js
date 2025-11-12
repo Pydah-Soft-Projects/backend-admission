@@ -28,34 +28,114 @@ const ensureLeadExists = async (leadId) => {
 };
 
 const applyLeadDefaultsToJoining = (joiningDoc, lead) => {
-  if (!joiningDoc.courseInfo || !joiningDoc.courseInfo.course) {
+  if (!joiningDoc.courseInfo) {
+    joiningDoc.courseInfo = {};
+  }
+  if (!joiningDoc.courseInfo.course) {
     joiningDoc.courseInfo.course = lead.courseInterested || '';
   }
-  if (!joiningDoc.courseInfo || !joiningDoc.courseInfo.quota) {
+  if (!joiningDoc.courseInfo.quota) {
     joiningDoc.courseInfo.quota = lead.quota || '';
   }
 
-  joiningDoc.studentInfo = {
-    ...joiningDoc.studentInfo,
-    name: lead.name,
-    phone: lead.phone,
-    gender: lead.gender || '',
-    notes: joiningDoc.studentInfo?.notes || 'As per SSC for no issues',
-  };
+  if (!joiningDoc.studentInfo) {
+    joiningDoc.studentInfo = {};
+  }
+  if (!joiningDoc.studentInfo.name) {
+    joiningDoc.studentInfo.name = lead.name;
+  }
+  if (!joiningDoc.studentInfo.phone) {
+    joiningDoc.studentInfo.phone = lead.phone;
+  }
+  if (!joiningDoc.studentInfo.gender) {
+    joiningDoc.studentInfo.gender = lead.gender || '';
+  }
+  if (!joiningDoc.studentInfo.notes) {
+    joiningDoc.studentInfo.notes = 'As per SSC for no issues';
+  }
 
-  joiningDoc.parents = {
-    father: {
-      ...(joiningDoc.parents?.father || {}),
-      name: lead.fatherName || '',
-      phone: lead.fatherPhone || '',
-    },
-    mother: {
-      ...(joiningDoc.parents?.mother || {}),
-      name: lead.motherName || '',
-    },
-  };
+  joiningDoc.parents = joiningDoc.parents || {};
+  joiningDoc.parents.father = joiningDoc.parents.father || {};
+  joiningDoc.parents.mother = joiningDoc.parents.mother || {};
+
+  if (!joiningDoc.parents.father.name) {
+    joiningDoc.parents.father.name = lead.fatherName || '';
+  }
+  if (!joiningDoc.parents.father.phone) {
+    joiningDoc.parents.father.phone = lead.fatherPhone || '';
+  }
+  if (!joiningDoc.parents.mother.name) {
+    joiningDoc.parents.mother.name = lead.motherName || '';
+  }
 
   return joiningDoc;
+};
+
+const syncLeadWithJoining = (leadDoc, joiningDoc) => {
+  if (!leadDoc || !joiningDoc) return false;
+
+  let mutated = false;
+
+  const setStringField = (field, value) => {
+    if (typeof value !== 'string') return;
+    const normalized = value.trim();
+    if (!normalized) return;
+    if (leadDoc[field] !== normalized) {
+      leadDoc[field] = normalized;
+      mutated = true;
+    }
+  };
+
+  setStringField('name', joiningDoc.studentInfo?.name);
+  setStringField('phone', joiningDoc.studentInfo?.phone);
+
+  if (
+    typeof joiningDoc.studentInfo?.gender === 'string' &&
+    joiningDoc.studentInfo.gender.trim() &&
+    leadDoc.gender !== joiningDoc.studentInfo.gender.trim()
+  ) {
+    leadDoc.gender = joiningDoc.studentInfo.gender.trim();
+    mutated = true;
+  }
+
+  setStringField('fatherName', joiningDoc.parents?.father?.name);
+  setStringField('fatherPhone', joiningDoc.parents?.father?.phone);
+  setStringField('motherName', joiningDoc.parents?.mother?.name);
+
+  const communication = joiningDoc.address?.communication || {};
+  setStringField('village', communication.villageOrCity);
+  setStringField('mandal', communication.mandal);
+  setStringField('district', communication.district);
+
+  if (
+    typeof joiningDoc.courseInfo?.quota === 'string' &&
+    joiningDoc.courseInfo.quota.trim() &&
+    leadDoc.quota !== joiningDoc.courseInfo.quota.trim()
+  ) {
+    leadDoc.quota = joiningDoc.courseInfo.quota.trim();
+    mutated = true;
+  }
+
+  const courseInterested =
+    typeof joiningDoc.courseInfo?.course === 'string' && joiningDoc.courseInfo.course.trim()
+      ? joiningDoc.courseInfo.course.trim()
+      : typeof joiningDoc.courseInfo?.branch === 'string' && joiningDoc.courseInfo.branch.trim()
+      ? joiningDoc.courseInfo.branch.trim()
+      : null;
+
+  if (courseInterested && leadDoc.courseInterested !== courseInterested) {
+    leadDoc.courseInterested = courseInterested;
+    mutated = true;
+  }
+
+  const interEducation = Array.isArray(joiningDoc.educationHistory)
+    ? joiningDoc.educationHistory.find((entry) => entry.level === 'inter_diploma')
+    : null;
+  if (interEducation?.institutionName) {
+    setStringField('interCollege', interEducation.institutionName);
+  }
+
+  return mutated;
 };
 
 const recordActivity = async ({ leadId, userId, description, statusFrom, statusTo }) => {
@@ -264,6 +344,14 @@ const normalizeJoiningPayload = (payload) => {
     safePayload.studentInfo.dateOfBirth = sanitizeString(
       safePayload.studentInfo.dateOfBirth
     );
+
+    if (safePayload.studentInfo.dateOfBirth) {
+      const dob = safePayload.studentInfo.dateOfBirth;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+        const [year, month, day] = dob.split('-');
+        safePayload.studentInfo.dateOfBirth = `${day}-${month}-${year}`;
+      }
+    }
   }
 
   if (safePayload.parents?.father) {
@@ -389,6 +477,11 @@ export const saveJoiningDraft = async (req, res) => {
 
     await joining.save();
 
+    const leadWasUpdated = syncLeadWithJoining(lead, joining);
+    if (leadWasUpdated) {
+      await lead.save();
+    }
+
     await recordActivity({
       leadId: lead._id,
       userId: req.user._id,
@@ -425,8 +518,15 @@ const validateBeforeSubmit = (joining) => {
 
   if (!joining.studentInfo?.dateOfBirth) {
     errors.push('Date of birth is required');
-  } else if (!/^\d{2}-\d{2}-\d{4}$/.test(joining.studentInfo.dateOfBirth)) {
-    errors.push('Date of birth must be in DD-MM-YYYY format');
+  } else {
+    const dobValue = joining.studentInfo.dateOfBirth;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dobValue)) {
+      const [year, month, day] = dobValue.split('-');
+      joining.studentInfo.dateOfBirth = `${day}-${month}-${year}`;
+    }
+    if (!/^\d{2}-\d{2}-\d{4}$/.test(joining.studentInfo.dateOfBirth)) {
+      errors.push('Date of birth must be in DD-MM-YYYY format');
+    }
   }
 
   if (!joining.reservation?.general) {
@@ -514,6 +614,7 @@ export const approveJoining = async (req, res) => {
     }
 
     if (lead) {
+      syncLeadWithJoining(lead, joining);
       lead.leadStatus = 'Admitted';
       lead.admissionNumber = admissionNumber;
       await lead.save();

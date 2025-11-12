@@ -183,6 +183,7 @@ export const recordCashPayment = async (req, res) => {
       amount,
       currency = 'INR',
       notes,
+      isAdditionalFee = false,
     } = req.body;
 
     if (!leadId) {
@@ -223,7 +224,9 @@ export const recordCashPayment = async (req, res) => {
       verifiedAt: new Date(),
       meta: {
         recordedBy: req.user?._id,
+        isAdditionalFee,
       },
+      isAdditionalFee,
     });
 
     await updatePaymentSummary({
@@ -254,6 +257,7 @@ export const createCashfreeOrder = async (req, res) => {
       currency = 'INR',
       customer = {},
       notes,
+      isAdditionalFee = false,
     } = req.body;
 
     if (!leadId) {
@@ -334,7 +338,9 @@ export const createCashfreeOrder = async (req, res) => {
       notes,
       meta: {
         cashfree: orderResponse,
+        isAdditionalFee,
       },
+      isAdditionalFee,
     });
 
     return successResponse(
