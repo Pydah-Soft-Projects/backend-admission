@@ -295,10 +295,21 @@ export const createCashfreeOrder = async (req, res) => {
       },
     };
 
+    const clientId = config.get('clientId');
+    const clientSecret = config.get('clientSecret');
+
+    if (!clientId || !clientSecret) {
+      return errorResponse(
+        res,
+        'Cashfree credentials are misconfigured. Please update them in Payment Settings.',
+        503
+      );
+    }
+
     const orderResponse = await cashfreeCreateOrder({
       environment: config.environment,
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
+      clientId,
+      clientSecret,
       payload,
     });
 
@@ -358,10 +369,21 @@ export const verifyCashfreePayment = async (req, res) => {
       return errorResponse(res, 'Cashfree configuration is not set', 503);
     }
 
+    const clientId = config.get('clientId');
+    const clientSecret = config.get('clientSecret');
+
+    if (!clientId || !clientSecret) {
+      return errorResponse(
+        res,
+        'Cashfree credentials are misconfigured. Please update them in Payment Settings.',
+        503
+      );
+    }
+
     const order = await cashfreeGetOrder({
       environment: config.environment,
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
+      clientId,
+      clientSecret,
       orderId,
     });
 
