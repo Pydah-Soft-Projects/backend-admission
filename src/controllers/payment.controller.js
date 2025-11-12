@@ -306,8 +306,10 @@ export const createCashfreeOrder = async (req, res) => {
       );
     }
 
+    const environment = 'production';
+
     const orderResponse = await cashfreeCreateOrder({
-      environment: config.environment,
+      environment,
       clientId,
       clientSecret,
       payload,
@@ -380,8 +382,10 @@ export const verifyCashfreePayment = async (req, res) => {
       );
     }
 
+    const environment = 'production';
+
     const order = await cashfreeGetOrder({
-      environment: config.environment,
+      environment,
       clientId,
       clientSecret,
       orderId,
