@@ -26,7 +26,15 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Role name is required'],
       trim: true,
-      enum: ['Super Admin', 'User'], // Only two roles for now
+      enum: ['Super Admin', 'Sub Super Admin', 'User'],
+    },
+    designation: {
+      type: String,
+      trim: true,
+    },
+    permissions: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
     isActive: {
       type: Boolean,

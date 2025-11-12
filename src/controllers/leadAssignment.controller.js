@@ -5,6 +5,7 @@ import Joining from '../models/Joining.model.js';
 import Admission from '../models/Admission.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Assign leads to users based on mandal/state
 // @route   POST /api/leads/assign
@@ -103,7 +104,7 @@ export const getUserLeadAnalytics = async (req, res) => {
     const requestingUserId = req.user._id;
 
     // Users can only view their own analytics, Super Admin can view any user's analytics
-    if (req.user.roleName !== 'Super Admin' && userId !== requestingUserId.toString()) {
+  if (!hasElevatedAdminPrivileges(req.user.roleName) && userId !== requestingUserId.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -190,7 +191,7 @@ export const getUserLeadAnalytics = async (req, res) => {
 
 export const getOverviewAnalytics = async (req, res) => {
   try {
-    if (req.user.roleName !== 'Super Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
       return errorResponse(res, 'Access denied', 403);
     }
 

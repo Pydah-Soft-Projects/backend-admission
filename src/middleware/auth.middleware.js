@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.model.js';
 import { errorResponse } from '../utils/response.util.js';
+import { hasElevatedAdminPrivileges, isTrueSuperAdmin } from '../utils/role.util.js';
 
 export const protect = async (req, res, next) => {
   try {
@@ -45,7 +46,7 @@ export const isSuperAdmin = (req, res, next) => {
     return errorResponse(res, 'Not authenticated', 401);
   }
 
-  if (req.user.roleName !== 'Super Admin') {
+  if (!hasElevatedAdminPrivileges(req.user.roleName)) {
     return errorResponse(res, 'Access denied. Super Admin only', 403);
   }
 
@@ -59,8 +60,7 @@ export const hasPermission = (permission) => {
       return errorResponse(res, 'Not authenticated', 401);
     }
 
-    if (req.user.roleName === 'Super Admin') {
-      // Super Admin has all permissions
+    if (hasElevatedAdminPrivileges(req.user.roleName)) {
       return next();
     }
 

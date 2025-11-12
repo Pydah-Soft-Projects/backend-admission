@@ -3,6 +3,7 @@ import Lead from '../models/Lead.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Get all leads with pagination
 // @route   GET /api/leads
@@ -49,7 +50,7 @@ export const getLeads = async (req, res) => {
     }
 
     // If user is not Super Admin, only show assigned leads
-    if (req.user.roleName !== 'Super Admin' && req.user.roleName !== 'Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       filter.assignedTo = req.user._id;
     }
 
@@ -94,7 +95,7 @@ export const getLead = async (req, res) => {
     }
 
     // Check if user has access (Super Admin or assigned to this lead)
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?._id?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?._id?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -245,12 +246,12 @@ export const updateLead = async (req, res) => {
     }
 
     // Check if user has access
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
     // Regular users can only update status and notes, Super Admin can update everything
-    const isSuperAdmin = req.user.roleName === 'Super Admin';
+    const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     
     // Update fields
     const {
@@ -344,7 +345,7 @@ export const deleteLead = async (req, res) => {
     }
 
     // Only Super Admin can delete
-    if (req.user.roleName !== 'Super Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
       return errorResponse(res, 'Access denied. Super Admin only', 403);
     }
 
@@ -373,7 +374,7 @@ export const bulkDeleteLeads = async (req, res) => {
       return errorResponse(res, 'Please provide an array of lead IDs to delete', 400);
     }
 
-    if (req.user.roleName !== 'Super Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
       return errorResponse(res, 'Access denied. Super Admin only', 403);
     }
 
@@ -506,7 +507,7 @@ export const getAllLeadIds = async (req, res) => {
     }
 
     // If user is not Super Admin, only show assigned leads
-    if (req.user.roleName !== 'Super Admin' && req.user.roleName !== 'Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       filter.assignedTo = req.user._id;
     }
 
@@ -557,7 +558,7 @@ export const getFilterOptions = async (req, res) => {
     const filter = {};
     
     // If user is not Super Admin, only show assigned leads
-    if (req.user.roleName !== 'Super Admin' && req.user.roleName !== 'Admin') {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       filter.assignedTo = req.user._id;
     }
 

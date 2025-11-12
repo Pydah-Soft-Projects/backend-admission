@@ -1,5 +1,6 @@
 import Lead from '../models/Lead.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Update lead status with comment
 // @route   PUT /api/leads/:id/status
@@ -22,7 +23,7 @@ export const updateLeadStatus = async (req, res) => {
     }
 
     // Check if user has access
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -83,7 +84,7 @@ export const getLeadStatusLogs = async (req, res) => {
     }
 
     // Check if user has access
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 

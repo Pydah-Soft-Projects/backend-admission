@@ -1,6 +1,7 @@
 import ActivityLog from '../models/ActivityLog.model.js';
 import Lead from '../models/Lead.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Add comment and/or update status for a lead
 // @route   POST /api/leads/:id/activity
@@ -17,7 +18,7 @@ export const addActivity = async (req, res) => {
     }
 
     // Check if user has access
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?.toString() !== req.user._id.toString()) {
+  if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -104,7 +105,7 @@ export const getActivityLogs = async (req, res) => {
     }
 
     // Check if user has access
-    if (req.user.roleName !== 'Super Admin' && lead.assignedTo?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
       return errorResponse(res, 'Access denied', 403);
     }
 
