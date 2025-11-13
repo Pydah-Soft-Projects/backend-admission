@@ -1,14 +1,23 @@
-import { promises as fsPromises } from 'fs';
+import { createReadStream, promises as fsPromises } from 'fs';
 import { extname } from 'path';
+import Excel from 'exceljs';
 import XLSX from 'xlsx';
 import Papa from 'papaparse';
+import PQueue from 'p-queue';
 import Lead from '../models/Lead.model.js';
+import ImportJob from '../models/ImportJob.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const UPLOAD_SESSION_TTL_MS = 1000 * 60 * 30; // 30 minutes
 const PREVIEW_ROW_LIMIT = 10;
 const PREVIEW_SIZE_LIMIT = 15 * 1024 * 1024; // 15 MB threshold for generating previews
+const MAX_ERROR_DETAILS = 200;
+const DEFAULT_CHUNK_SIZE = Number(process.env.LEAD_IMPORT_CHUNK_SIZE || 2000);
+
+const importQueue = new PQueue({
+  concurrency: Number(process.env.LEAD_IMPORT_CONCURRENCY || 1),
+});
 
 const normalizeKey = (value) => {
   if (value === undefined || value === null) return '';
@@ -205,7 +214,8 @@ const buildPreviewFromObject = (row) => {
 
 const uploadSessionStore = new Map();
 
-const cleanupUploadSession = async (token) => {
+const cleanupUploadSession = async (token, options = {}) => {
+  const { removeFile = true } = options;
   const session = uploadSessionStore.get(token);
   if (!session) return;
 
@@ -214,9 +224,19 @@ const cleanupUploadSession = async (token) => {
     clearTimeout(session.timeout);
   }
 
-  if (session.filePath) {
+  if (removeFile && session.filePath) {
     await fsPromises.unlink(session.filePath).catch(() => {});
   }
+};
+
+const consumeUploadSession = (token) => {
+  const session = uploadSessionStore.get(token);
+  if (!session) return null;
+  if (session.timeout) {
+    clearTimeout(session.timeout);
+  }
+  uploadSessionStore.delete(token);
+  return session;
 };
 
 const createUploadSession = (token, payload) => {
@@ -385,21 +405,20 @@ export const inspectBulkUpload = async (req, res) => {
 // @route   POST /api/leads/bulk-upload
 // @access  Private (Super Admin only)
 export const bulkUploadLeads = async (req, res) => {
-  const startedAt = Date.now();
   let uploadToken = null;
   let filePath = null;
-  let shouldUnlinkFile = false;
   let session = null;
   let fileExtension = '';
+  let originalName = '';
 
   try {
     if (req.file) {
       filePath = req.file.path;
-      shouldUnlinkFile = true;
       fileExtension = extname(req.file.originalname || req.file.filename || '').toLowerCase();
+      originalName = req.file.originalname || req.file.filename || 'upload.xlsx';
     } else if (req.body.uploadToken) {
       uploadToken = String(req.body.uploadToken);
-      session = getUploadSession(uploadToken);
+      session = consumeUploadSession(uploadToken);
 
       if (!session) {
         return errorResponse(res, 'Upload session expired or not found. Please analyze the file again.', 410);
@@ -407,6 +426,7 @@ export const bulkUploadLeads = async (req, res) => {
 
       filePath = session.filePath;
       fileExtension = session.extension || extname(session.originalName || '').toLowerCase();
+      originalName = session.originalName || 'upload.xlsx';
     } else {
       return errorResponse(res, 'Please upload an Excel or CSV file', 400);
     }
@@ -425,10 +445,156 @@ export const bulkUploadLeads = async (req, res) => {
         ? req.body.source.trim()
         : 'Bulk Upload';
 
+    const uploadId = uuidv4();
     const batchId = uuidv4();
+
+    const fileStats = await fsPromises.stat(filePath).catch(() => null);
+    const fileSize =
+      fileStats?.size ||
+      session?.fileSize ||
+      req.file?.size ||
+      0;
+
+    const importJob = await ImportJob.create({
+      uploadId,
+      originalName,
+      filePath,
+      fileSize,
+      extension: fileExtension,
+      selectedSheets,
+      sourceLabel,
+      createdBy: req.user?._id,
+      status: 'queued',
+      uploadBatchId: batchId,
+      uploadToken,
+      message: 'Queued for processing',
+    });
+
+    importQueue
+      .add(() => processImportJob(importJob._id))
+      .catch((error) => {
+        console.error('Failed to enqueue import job', error);
+      });
+
+    return successResponse(
+      res,
+      {
+        jobId: importJob._id,
+        uploadId,
+        batchId,
+        status: importJob.status,
+      },
+      'Bulk upload queued successfully',
+      202
+    );
+  } catch (error) {
+    console.error('Failed to queue bulk upload:', error);
+    if (filePath) {
+      await fsPromises.unlink(filePath).catch(() => {});
+    }
+    if (uploadToken) {
+      await cleanupUploadSession(uploadToken, { removeFile: false }).catch(() => {});
+    }
+    return errorResponse(res, error.message || 'Failed to queue bulk upload', 500);
+  }
+};
+
+const processImportJob = async (jobId) => {
+  const job = await ImportJob.findById(jobId);
+  if (!job) {
+    return;
+  }
+
+  const startedAt = Date.now();
+  const stats = {
+    totalProcessed: 0,
+    totalSuccess: 0,
+    totalErrors: 0,
+    durationMs: 0,
+  };
+  const processedSheets = new Set();
+  const errors = [];
+
+  const toTrimmedString = (value) => {
+    if (value === undefined || value === null) return undefined;
+    const trimmed = String(value).trim();
+    return trimmed.length === 0 ? undefined : trimmed;
+  };
+
+  const normalizeGender = (value) => {
+    if (!value) return undefined;
+    const genderValue = String(value).trim().toLowerCase();
+    if (genderValue.startsWith('m')) return 'Male';
+    if (genderValue.startsWith('f')) return 'Female';
+    if (genderValue.startsWith('o')) return 'Other';
+    return String(value).trim();
+  };
+
+  const getCellValue = (value) => {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'object') {
+      if (value.result !== undefined && value.result !== null) {
+        return value.result;
+      }
+      if (Array.isArray(value.richText)) {
+        return value.richText.map((part) => part.text || '').join('');
+      }
+      if (value.text !== undefined) {
+        return value.text;
+      }
+      if (value.hyperlink) {
+        return value.text || value.hyperlink;
+      }
+      if (value.value !== undefined) {
+        return value.value;
+      }
+    }
+    return value;
+  };
+
+  const pushErrorDetail = (meta, data, message) => {
+    if (errors.length >= MAX_ERROR_DETAILS) return;
+    errors.push({
+      sheet: meta?.sheetName,
+      row: meta?.rowNumber,
+      data,
+      error: message,
+    });
+  };
+
+  const updateJobProgress = async (message, force = false) => {
+    const now = Date.now();
+    if (!force && now - updateJobProgress.lastUpdated < 5000) {
+      return;
+    }
+    updateJobProgress.lastUpdated = now;
+    await ImportJob.findByIdAndUpdate(jobId, {
+      stats: {
+        totalProcessed: stats.totalProcessed,
+        totalSuccess: stats.totalSuccess,
+        totalErrors: stats.totalErrors,
+        durationMs: Date.now() - startedAt,
+        sheetsProcessed: Array.from(processedSheets),
+      },
+      status: 'processing',
+      message,
+    }).catch(() => {});
+  };
+  updateJobProgress.lastUpdated = 0;
+
+  await ImportJob.findByIdAndUpdate(jobId, {
+    status: 'processing',
+    startedAt: new Date(),
+    message: 'Processing file',
+  }).catch(() => {});
+
+  let currentSequence = 1;
+  let enquiryPrefix = '';
+
+  try {
     const currentYear = new Date().getFullYear();
     const yearSuffix = String(currentYear).slice(-2);
-    const enquiryPrefix = `ENQ${yearSuffix}`;
+    enquiryPrefix = `ENQ${yearSuffix}`;
 
     const lastLead = await Lead.findOne({
       enquiryNumber: { $regex: `^${enquiryPrefix}` },
@@ -437,7 +603,6 @@ export const bulkUploadLeads = async (req, res) => {
       .select('enquiryNumber')
       .lean();
 
-    let currentSequence = 1;
     if (lastLead?.enquiryNumber) {
       const lastSequence = lastLead.enquiryNumber.replace(enquiryPrefix, '');
       const lastNumber = parseInt(lastSequence, 10);
@@ -446,35 +611,10 @@ export const bulkUploadLeads = async (req, res) => {
       }
     }
 
-    const rowsPerRead = 5000;
-    const insertChunkSize = 10000;
-
-    const leadsBuffer = [];
-    let totalProcessed = 0;
-    let totalSuccess = 0;
-    let totalErrors = 0;
-    const errors = [];
-    const processedSheets = new Set();
-
-    const toTrimmedString = (value) => {
-      if (value === undefined || value === null) return undefined;
-      const trimmed = String(value).trim();
-      return trimmed.length === 0 ? undefined : trimmed;
-    };
-
     const getNextEnquiryNumber = () => {
       const formattedSequence = String(currentSequence).padStart(6, '0');
       currentSequence += 1;
       return `${enquiryPrefix}${formattedSequence}`;
-    };
-
-    const normalizeGender = (value) => {
-      if (!value) return undefined;
-      const genderValue = String(value).trim().toLowerCase();
-      if (genderValue.startsWith('m')) return 'Male';
-      if (genderValue.startsWith('f')) return 'Female';
-      if (genderValue.startsWith('o')) return 'Other';
-      return String(value).trim();
     };
 
     const buildLeadDocument = (rawLead) => {
@@ -572,9 +712,9 @@ export const bulkUploadLeads = async (req, res) => {
         applicationStatus: toTrimmedString(normalizedLead.applicationStatus) || 'Not Provided',
         notes: toTrimmedString(normalizedLead.notes),
         dynamicFields: cleanedDynamicFields,
-        source: toTrimmedString(normalizedLead.source) || sourceLabel,
-        uploadedBy: req.user._id,
-        uploadBatchId: batchId,
+        source: toTrimmedString(normalizedLead.source) || job.sourceLabel || 'Bulk Upload',
+        uploadedBy: job.createdBy,
+        uploadBatchId: job.uploadBatchId,
         leadStatus: toTrimmedString(normalizedLead.leadStatus) || 'New',
         createdAt: now,
         updatedAt: now,
@@ -587,196 +727,217 @@ export const bulkUploadLeads = async (req, res) => {
       return leadDocument;
     };
 
-    const flushBuffer = async () => {
-      if (leadsBuffer.length === 0) return;
+    const leadsBuffer = [];
+    let pendingFlush = Promise.resolve();
 
-      const documents = leadsBuffer.map((entry) => entry.doc);
+    const flushEntries = async (entries) => {
+      if (!entries || !entries.length) return;
+
+      const documents = entries.map((entry) => entry.doc);
+      let successfulInBatch = 0;
+      let failedInBatch = 0;
 
       try {
         await Lead.collection.insertMany(documents, {
           ordered: false,
           writeConcern: { w: 1 },
         });
-        totalSuccess += documents.length;
+        successfulInBatch = documents.length;
       } catch (error) {
         if (error.writeErrors && Array.isArray(error.writeErrors)) {
           const failedIndexes = new Set();
           error.writeErrors.forEach((writeError) => {
             const failedIndex = writeError.index;
             failedIndexes.add(failedIndex);
-            const meta = leadsBuffer[failedIndex]?.meta;
-            errors.push({
-              sheet: meta?.sheetName,
-              row: meta?.rowNumber,
-              data: leadsBuffer[failedIndex]?.doc,
-              error: writeError.errmsg || writeError.err?.message || 'Insert failed',
-            });
-            totalErrors += 1;
+            const meta = entries[failedIndex]?.meta;
+            pushErrorDetail(
+              meta,
+              entries[failedIndex]?.doc,
+              writeError.errmsg || writeError.err?.message || 'Insert failed'
+            );
           });
-          totalSuccess += documents.length - failedIndexes.size;
+          failedInBatch = failedIndexes.size;
+          successfulInBatch = documents.length - failedInBatch;
         } else if (typeof error.insertedCount === 'number') {
-          totalSuccess += error.insertedCount;
+          successfulInBatch = error.insertedCount;
+          failedInBatch = documents.length - error.insertedCount;
           for (let i = error.insertedCount; i < documents.length; i += 1) {
-            const meta = leadsBuffer[i]?.meta;
-            errors.push({
-              sheet: meta?.sheetName,
-              row: meta?.rowNumber,
-              data: leadsBuffer[i]?.doc,
-              error: error.message || 'Insert failed',
-            });
-            totalErrors += 1;
+            const meta = entries[i]?.meta;
+            pushErrorDetail(meta, entries[i]?.doc, error.message || 'Insert failed');
           }
         } else {
-          leadsBuffer.forEach((entry) => {
-            errors.push({
-              sheet: entry.meta?.sheetName,
-              row: entry.meta?.rowNumber,
-              data: entry.doc,
-              error: error.message || 'Insert failed',
-            });
-            totalErrors += 1;
+          failedInBatch = documents.length;
+          entries.forEach((entry) => {
+            pushErrorDetail(entry.meta, entry.doc, error.message || 'Insert failed');
           });
         }
       }
 
-      leadsBuffer.length = 0;
+      stats.totalSuccess += successfulInBatch;
+      stats.totalErrors += failedInBatch;
+
+      await updateJobProgress(
+        `Processed ${stats.totalProcessed} row(s). Success: ${stats.totalSuccess}, Errors: ${stats.totalErrors}`
+      );
+    };
+
+    const scheduleFlush = async (entries) => {
+      if (!entries || entries.length === 0) return;
+      pendingFlush = pendingFlush.then(() => flushEntries(entries));
+      await pendingFlush;
     };
 
     const processRawLead = async (rawLead, meta) => {
-      const isEmptyRow = Object.values(rawLead || {}).every((value) => value === undefined || value === null || String(value).trim() === '');
+      const isEmptyRow = Object.values(rawLead || {}).every(
+        (value) => value === undefined || value === null || String(value).trim() === ''
+      );
       if (isEmptyRow) {
         return;
       }
 
-      totalProcessed += 1;
+      stats.totalProcessed += 1;
 
       try {
         const leadDoc = buildLeadDocument(rawLead);
         leadsBuffer.push({ doc: leadDoc, meta });
-        if (leadsBuffer.length >= insertChunkSize) {
-          await flushBuffer();
+        if (leadsBuffer.length >= DEFAULT_CHUNK_SIZE) {
+          const entries = leadsBuffer.splice(0, leadsBuffer.length);
+          await scheduleFlush(entries);
         }
       } catch (error) {
-        errors.push({
-          sheet: meta?.sheetName,
-          row: meta?.rowNumber,
-          data: rawLead,
-          error: error.message,
-        });
-        totalErrors += 1;
+        stats.totalErrors += 1;
+        pushErrorDetail(meta, rawLead, error.message || 'Validation failed');
+        await updateJobProgress(
+          `Processed ${stats.totalProcessed} row(s). Success: ${stats.totalSuccess}, Errors: ${stats.totalErrors}`
+        );
       }
     };
 
-    if (fileExtension === '.xlsx' || fileExtension === '.xls') {
-      const workbook = XLSX.readFile(filePath, { dense: true });
-      const availableSheets = workbook.SheetNames || [];
-      const sheetsToProcess = selectedSheets.length > 0
-        ? selectedSheets.filter((sheetName) => availableSheets.includes(sheetName))
-        : availableSheets;
+    const selectedSheets = Array.isArray(job.selectedSheets) ? job.selectedSheets : [];
+    let processedSheetCount = 0;
 
-      if (selectedSheets.length > 0 && sheetsToProcess.length === 0) {
-        throw new Error('Selected worksheets were not found in the uploaded file');
-      }
-
-      if (sheetsToProcess.length === 0) {
-        throw new Error('No worksheets found in the uploaded file');
-      }
-
-      for (const sheetName of sheetsToProcess) {
-        const worksheet = workbook.Sheets[sheetName];
-        if (!worksheet || !worksheet['!ref']) continue;
-
-        processedSheets.add(sheetName);
-
-        const range = XLSX.utils.decode_range(worksheet['!ref']);
-        const headerRange = {
-          s: { r: range.s.r, c: range.s.c },
-          e: { r: range.s.r, c: range.e.c },
-        };
-        const headerRows = XLSX.utils.sheet_to_json(worksheet, {
-          header: 1,
-          range: headerRange,
-          blankrows: false,
-          defval: '',
-          raw: false,
-        });
-
-        if (!headerRows.length) continue;
-
-        const headers = (headerRows[0] || []).map((cell, index) => {
-          const trimmed = cell === undefined || cell === null ? '' : String(cell).trim();
-          return trimmed || `Column${index + 1}`;
-        });
-
-        let dataRowStart = range.s.r + 1;
-
-        while (dataRowStart <= range.e.r) {
-          const dataRowEnd = Math.min(dataRowStart + rowsPerRead - 1, range.e.r);
-          const dataRange = {
-            s: { r: dataRowStart, c: range.s.c },
-            e: { r: dataRowEnd, c: range.e.c },
-          };
-
-          const rows = XLSX.utils.sheet_to_json(worksheet, {
-            header: headers,
-            range: dataRange,
-            blankrows: false,
-            defval: '',
-            raw: false,
-          });
-
-          for (let index = 0; index < rows.length; index += 1) {
-            const rowNumber = dataRange.s.r + index + 1;
-            await processRawLead(rows[index], { sheetName, rowNumber });
-          }
-
-          dataRowStart = dataRowEnd + 1;
-        }
-      }
-    } else if (fileExtension === '.csv') {
-      const csvContent = await fsPromises.readFile(filePath, 'utf8');
-      const parsed = Papa.parse(csvContent, {
-        header: true,
-        skipEmptyLines: true,
+    const processExcelStream = async () => {
+      const workbookReader = new Excel.stream.xlsx.WorkbookReader(job.filePath, {
+        entries: 'emit',
+        sharedStrings: 'cache',
+        hyperlinks: 'cache',
+        styles: 'cache',
+        worksheets: 'emit',
       });
 
-      if (!parsed.data || parsed.data.length === 0) {
-        throw new Error('CSV file is empty');
+      for await (const worksheetReader of workbookReader) {
+        const sheetName = worksheetReader.name || `Sheet${worksheetReader.id}`;
+        if (selectedSheets.length > 0 && !selectedSheets.includes(sheetName)) {
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+
+        processedSheets.add(sheetName);
+        processedSheetCount += 1;
+        let headers = null;
+
+        for await (const row of worksheetReader) {
+          const rowValues = row.values || [];
+          if (!headers) {
+            headers = rowValues
+              .slice(1)
+              .map((cellValue, index) => {
+                const value = getCellValue(cellValue);
+                const trimmed = value === undefined || value === null ? '' : String(value).trim();
+                return trimmed || `Column${index + 1}`;
+              });
+            // eslint-disable-next-line no-continue
+            continue;
+          }
+
+          const rawLead = {};
+          headers.forEach((header, index) => {
+            rawLead[header] = getCellValue(rowValues[index + 1]);
+          });
+
+          await processRawLead(rawLead, { sheetName, rowNumber: row.number });
+        }
       }
 
+      if (processedSheetCount === 0) {
+        throw new Error('Selected worksheets were not found in the uploaded file');
+      }
+    };
+
+    const processCsvStream = async () => {
       processedSheets.add('CSV');
+      let rowNumber = 2;
 
-      for (let index = 0; index < parsed.data.length; index += 1) {
-        const rawLead = parsed.data[index];
-        const rowNumber = index + 2;
-        await processRawLead(rawLead, { sheetName: 'CSV', rowNumber });
-      }
+      await new Promise((resolve, reject) => {
+        const stream = createReadStream(job.filePath);
+        Papa.parse(stream, {
+          header: true,
+          skipEmptyLines: true,
+          step: async (results, parser) => {
+            parser.pause();
+            try {
+              await processRawLead(results.data, { sheetName: 'CSV', rowNumber });
+              rowNumber += 1;
+              parser.resume();
+            } catch (error) {
+              parser.abort();
+              reject(error);
+            }
+          },
+          complete: () => resolve(),
+          error: (error) => reject(error),
+        });
+      });
+    };
+
+    if (['.xlsx', '.xlsm', '.xlsb'].includes(job.extension)) {
+      await processExcelStream();
+    } else if (job.extension === '.csv') {
+      await processCsvStream();
+    } else if (job.extension === '.xls') {
+      throw new Error('Legacy .xls files are not supported. Please convert the file to .xlsx and try again.');
     } else {
-      throw new Error('Unsupported file format. Please upload an Excel or CSV file.');
+      throw new Error('Unsupported file format. Please upload .xlsx or .csv files.');
     }
 
-    await flushBuffer();
+    if (leadsBuffer.length > 0) {
+      const entries = leadsBuffer.splice(0, leadsBuffer.length);
+      await scheduleFlush(entries);
+    }
 
-    const durationMs = Date.now() - startedAt;
+    await pendingFlush;
 
-    return successResponse(res, {
-      batchId,
-      total: totalProcessed,
-      success: totalSuccess,
-      errors: totalErrors,
-      sheetsProcessed: Array.from(processedSheets),
-      errorDetails: errors.slice(0, 100),
-      durationMs,
-    }, `Processed ${totalProcessed} row(s). ${totalSuccess} succeeded, ${totalErrors} failed in ${durationMs} ms`, 200);
+    stats.durationMs = Date.now() - startedAt;
+
+    await ImportJob.findByIdAndUpdate(jobId, {
+      status: 'completed',
+      completedAt: new Date(),
+      stats: {
+        ...stats,
+        sheetsProcessed: Array.from(processedSheets),
+      },
+      errorDetails: errors.slice(0, MAX_ERROR_DETAILS),
+      message: `Imported ${stats.totalSuccess} of ${stats.totalProcessed} row(s).`,
+    }).catch(() => {});
   } catch (error) {
-    console.error('Bulk upload error:', error);
-    return errorResponse(res, error.message || 'Bulk upload failed', 500);
-  } finally {
-    if (uploadToken) {
-      await cleanupUploadSession(uploadToken).catch(() => {});
-    } else if (shouldUnlinkFile && filePath) {
-      await fsPromises.unlink(filePath).catch(() => {});
+    console.error('Import job failed:', error);
+    stats.durationMs = Date.now() - startedAt;
+    if (errors.length < MAX_ERROR_DETAILS) {
+      pushErrorDetail({ sheetName: 'N/A', rowNumber: 0 }, null, error.message || 'Import failed');
     }
+
+    await ImportJob.findByIdAndUpdate(jobId, {
+      status: 'failed',
+      completedAt: new Date(),
+      stats: {
+        ...stats,
+        sheetsProcessed: Array.from(processedSheets),
+      },
+      errorDetails: errors.slice(0, MAX_ERROR_DETAILS),
+      message: error.message || 'Import job failed',
+    }).catch(() => {});
+  } finally {
+    await fsPromises.unlink(job.filePath).catch(() => {});
   }
 };
 
@@ -838,6 +999,44 @@ export const getUploadStats = async (req, res) => {
     }, 'Upload statistics retrieved successfully', 200);
   } catch (error) {
     return errorResponse(res, error.message || 'Failed to get upload stats', 500);
+  }
+};
+
+// @desc    Get bulk import job status
+// @route   GET /api/leads/import-jobs/:jobId
+// @access  Private (Super Admin only)
+export const getImportJobStatus = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!jobId) {
+      return errorResponse(res, 'Job ID is required', 400);
+    }
+
+    const job = await ImportJob.findById(jobId).lean();
+
+    if (!job) {
+      return errorResponse(res, 'Import job not found', 404);
+    }
+
+    return successResponse(
+      res,
+      {
+        jobId: job._id,
+        uploadId: job.uploadId,
+        status: job.status,
+        stats: job.stats,
+        message: job.message,
+        errorDetails: job.errorDetails,
+        createdAt: job.createdAt,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+      },
+      'Import job status retrieved successfully',
+      200
+    );
+  } catch (error) {
+    return errorResponse(res, error.message || 'Failed to get import job status', 500);
   }
 };
 

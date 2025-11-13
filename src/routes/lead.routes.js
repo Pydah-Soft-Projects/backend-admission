@@ -15,6 +15,7 @@ import {
   inspectBulkUpload,
   bulkUploadLeads,
   getUploadStats,
+  getImportJobStatus,
 } from '../controllers/leadUpload.controller.js';
 import multer from 'multer';
 import os from 'os';
@@ -63,6 +64,7 @@ router.get('/ids', getAllLeadIds);
 router.post('/bulk-upload/inspect', isSuperAdmin, upload.single('file'), inspectBulkUpload);
 router.post('/bulk-upload', isSuperAdmin, upload.single('file'), bulkUploadLeads);
 router.get('/upload-stats', isSuperAdmin, getUploadStats);
+router.get('/import-jobs/:jobId', isSuperAdmin, getImportJobStatus);
 
 // Bulk delete route (Super Admin only)
 router.delete('/bulk', isSuperAdmin, bulkDeleteLeads);
