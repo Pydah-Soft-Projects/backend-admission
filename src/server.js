@@ -27,8 +27,8 @@ app.use(cors({
   credentials: true
 }));
 // Increase JSON payload limit for bulk uploads (50MB)
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Request logging middleware (optimized - don't log large request bodies)
 app.use((req, res, next) => {
