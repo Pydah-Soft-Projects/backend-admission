@@ -1,9 +1,16 @@
 import mongoose from 'mongoose';
+import PQueue from 'p-queue';
+import { v4 as uuidv4 } from 'uuid';
 import Lead from '../models/Lead.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
+import DeleteJob from '../models/DeleteJob.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+
+const deleteQueue = new PQueue({
+  concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
+});
 
 // @desc    Get all leads with pagination
 // @route   GET /api/leads
@@ -361,12 +368,131 @@ export const deleteLead = async (req, res) => {
   }
 };
 
-// @desc    Bulk delete leads
+// Process delete job in background
+const processDeleteJob = async (jobId) => {
+  const job = await DeleteJob.findOne({ jobId });
+  if (!job) {
+    console.error(`Delete job ${jobId} not found`);
+    return;
+  }
+
+  if (job.status !== 'queued') {
+    console.warn(`Delete job ${jobId} is not in queued status: ${job.status}`);
+    return;
+  }
+
+  const startTime = Date.now();
+  job.status = 'processing';
+  job.startedAt = new Date();
+  await job.save();
+
+  try {
+    const validIds = job.leadIds.filter((id) => {
+      try {
+        return mongoose.Types.ObjectId.isValid(id);
+      } catch {
+        return false;
+      }
+    });
+
+    if (validIds.length === 0) {
+      job.status = 'completed';
+      job.completedAt = new Date();
+      job.stats = {
+        requestedCount: job.leadIds.length,
+        validCount: 0,
+        deletedLeadCount: 0,
+        deletedLogCount: 0,
+        durationMs: Date.now() - startTime,
+      };
+      job.message = 'No valid lead IDs to delete';
+      await job.save();
+      return;
+    }
+
+    const uniqueValidIds = Array.from(new Set(validIds.map((id) => id.toString())));
+    const chunkSize = uniqueValidIds.length > 20000 ? 10000 : uniqueValidIds.length > 5000 ? 5000 : 1000;
+    const objectIds = uniqueValidIds.map((id) => new mongoose.Types.ObjectId(id));
+
+    let totalLeadDeleted = 0;
+    let totalLogDeleted = 0;
+    const errorDetails = [];
+
+    // Process in chunks without transactions to avoid timeout
+    for (let index = 0; index < objectIds.length; index += chunkSize) {
+      const chunk = objectIds.slice(index, index + chunkSize);
+
+      try {
+        const [logsResult, leadsResult] = await Promise.all([
+          ActivityLog.deleteMany({ leadId: { $in: chunk } }),
+          Lead.deleteMany({ _id: { $in: chunk } }),
+        ]);
+
+        totalLogDeleted += logsResult?.deletedCount || 0;
+        totalLeadDeleted += leadsResult?.deletedCount || 0;
+
+        // Update job progress periodically
+        if ((index + chunkSize) % (chunkSize * 5) === 0 || index + chunkSize >= objectIds.length) {
+          job.stats = {
+            requestedCount: job.leadIds.length,
+            validCount: uniqueValidIds.length,
+            deletedLeadCount: totalLeadDeleted,
+            deletedLogCount: totalLogDeleted,
+            durationMs: Date.now() - startTime,
+          };
+          await job.save();
+        }
+
+        // Yield the event loop to keep the Node.js process responsive
+        await new Promise((resolve) => setImmediate(resolve));
+      } catch (chunkError) {
+        console.error(`Error deleting chunk ${index}-${index + chunkSize}:`, chunkError);
+        // Continue with next chunk even if one fails
+        chunk.forEach((id) => {
+          errorDetails.push({
+            leadId: id,
+            error: chunkError.message || 'Unknown error',
+          });
+        });
+      }
+    }
+
+    const durationMs = Date.now() - startTime;
+
+    job.status = 'completed';
+    job.completedAt = new Date();
+    job.stats = {
+      requestedCount: job.leadIds.length,
+      validCount: uniqueValidIds.length,
+      deletedLeadCount: totalLeadDeleted,
+      deletedLogCount: totalLogDeleted,
+      durationMs,
+    };
+    job.errorDetails = errorDetails.slice(0, 200); // Limit error details
+    job.message = `Deleted ${totalLeadDeleted} lead(s) and ${totalLogDeleted} activity log(s) in ${durationMs} ms`;
+    await job.save();
+
+    console.log(`Delete job ${jobId} completed: ${totalLeadDeleted} leads deleted`);
+  } catch (error) {
+    console.error(`Delete job ${jobId} failed:`, error);
+    job.status = 'failed';
+    job.completedAt = new Date();
+    job.stats = {
+      requestedCount: job.leadIds.length,
+      validCount: 0,
+      deletedLeadCount: 0,
+      deletedLogCount: 0,
+      durationMs: Date.now() - startTime,
+    };
+    job.message = error.message || 'Failed to process delete job';
+    await job.save();
+  }
+};
+
+// @desc    Bulk delete leads (queued)
 // @route   DELETE /api/leads/bulk
 // @access  Private (Super Admin only)
 export const bulkDeleteLeads = async (req, res) => {
-  const startTime = Date.now();
-
   try {
     const { leadIds } = req.body;
 
@@ -391,85 +517,82 @@ export const bulkDeleteLeads = async (req, res) => {
     }
 
     const uniqueValidIds = Array.from(new Set(validIds));
-    const chunkSize = uniqueValidIds.length > 20000 ? 10000 : uniqueValidIds.length > 5000 ? 5000 : 1000;
+    const objectIds = uniqueValidIds.map((id) => new mongoose.Types.ObjectId(id));
 
-    const executeBulkDelete = async (sessionArg = null) => {
-      const options = sessionArg ? { session: sessionArg } : {};
-      let totalLeadDeleted = 0;
-      let totalLogDeleted = 0;
+    // Create delete job
+    const jobId = uuidv4();
+    const job = await DeleteJob.create({
+      jobId,
+      leadIds: objectIds,
+      status: 'queued',
+      deletedBy: req.user._id,
+      stats: {
+        requestedCount: leadIds.length,
+        validCount: uniqueValidIds.length,
+        deletedLeadCount: 0,
+        deletedLogCount: 0,
+        durationMs: 0,
+      },
+    });
 
-      for (let index = 0; index < uniqueValidIds.length; index += chunkSize) {
-        const chunk = uniqueValidIds.slice(index, index + chunkSize);
-        const [logsResult, leadsResult] = await Promise.all([
-          ActivityLog.deleteMany({ leadId: { $in: chunk } }, options),
-          Lead.deleteMany({ _id: { $in: chunk } }, options),
-        ]);
-
-        totalLogDeleted += logsResult?.deletedCount || 0;
-        totalLeadDeleted += leadsResult?.deletedCount || 0;
-
-        // Yield the event loop to keep the Node.js process responsive during very large deletes
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-
-      return {
-        activityResult: { deletedCount: totalLogDeleted },
-        leadResult: { deletedCount: totalLeadDeleted },
-      };
-    };
-
-    let activityResult;
-    let leadResult;
-    let session = null;
-    let transactionAttempted = false;
-
-    try {
-      session = await mongoose.startSession();
-      session.startTransaction();
-      transactionAttempted = true;
-
-      ({ activityResult, leadResult } = await executeBulkDelete(session));
-
-      await session.commitTransaction();
-    } catch (transactionError) {
-      if (session) {
-        await session.abortTransaction().catch(() => {});
-      }
-
-      const illegalTransaction =
-        transactionError?.code === 20 ||
-        String(transactionError?.message || '').toLowerCase().includes('transaction numbers are only allowed');
-
-      if (!illegalTransaction) {
-        throw transactionError;
-      }
-
-      console.warn('Bulk delete fallback to non-transaction mode:', transactionError.message);
-
-      ({ activityResult, leadResult } = await executeBulkDelete());
-    } finally {
-      if (session) {
-        session.endSession();
-      }
-    }
-
-    const durationMs = Date.now() - startTime;
+    // Queue the job for processing
+    deleteQueue.add(() => processDeleteJob(jobId)).catch((error) => {
+      console.error(`Error queuing delete job ${jobId}:`, error);
+    });
 
     return successResponse(
       res,
       {
+        jobId,
+        status: 'queued',
         requestedCount: leadIds.length,
         validCount: uniqueValidIds.length,
-        deletedLeadCount: leadResult.deletedCount,
-        deletedLogCount: activityResult.deletedCount,
-        durationMs,
+        message: 'Delete job queued successfully',
       },
-      `Deleted ${leadResult.deletedCount} lead(s) and ${activityResult.deletedCount} activity log(s) in ${durationMs} ms`,
-      200,
+      'Bulk delete job queued. Use the job ID to check status.',
+      202,
     );
   } catch (error) {
     console.error('Bulk delete error:', error);
-    return errorResponse(res, error.message || 'Failed to bulk delete leads', 500);
+    return errorResponse(res, error.message || 'Failed to queue bulk delete', 500);
+  }
+};
+
+// @desc    Get delete job status
+// @route   GET /api/leads/delete-jobs/:jobId
+// @access  Private (Super Admin only)
+export const getDeleteJobStatus = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Access denied. Super Admin only', 403);
+    }
+
+    const job = await DeleteJob.findOne({ jobId });
+
+    if (!job) {
+      return errorResponse(res, 'Delete job not found', 404);
+    }
+
+    return successResponse(
+      res,
+      {
+        jobId: job.jobId,
+        status: job.status,
+        stats: job.stats,
+        errorDetails: job.errorDetails || [],
+        message: job.message,
+        startedAt: job.startedAt,
+        completedAt: job.completedAt,
+        createdAt: job.createdAt,
+      },
+      'Delete job status retrieved successfully',
+      200,
+    );
+  } catch (error) {
+    console.error('Error getting delete job status:', error);
+    return errorResponse(res, error.message || 'Failed to get delete job status', 500);
   }
 };
 

@@ -7,6 +7,7 @@ import {
   updateLead,
   deleteLead,
   bulkDeleteLeads,
+  getDeleteJobStatus,
   getAllLeadIds,
   getFilterOptions,
   getPublicFilterOptions,
@@ -66,8 +67,9 @@ router.post('/bulk-upload', isSuperAdmin, upload.single('file'), bulkUploadLeads
 router.get('/upload-stats', isSuperAdmin, getUploadStats);
 router.get('/import-jobs/:jobId', isSuperAdmin, getImportJobStatus);
 
-// Bulk delete route (Super Admin only)
+// Bulk delete routes (Super Admin only)
 router.delete('/bulk', isSuperAdmin, bulkDeleteLeads);
+router.get('/delete-jobs/:jobId', isSuperAdmin, getDeleteJobStatus);
 
 // Assignment routes (Super Admin only)
 router.post('/assign', isSuperAdmin, assignLeads);
