@@ -29,36 +29,36 @@ const normalizeKey = (value) => {
     .trim();
 };
 
-const canonicalFields = [
-  'hallTicketNumber',
-  'name',
-  'phone',
-  'email',
-  'fatherName',
+    const canonicalFields = [
+      'hallTicketNumber',
+      'name',
+      'phone',
+      'email',
+      'fatherName',
   'fatherPhone',
-  'motherName',
-  'courseInterested',
-  'village',
-  'district',
-  'mandal',
-  'state',
-  'gender',
-  'rank',
-  'interCollege',
+      'motherName',
+      'courseInterested',
+      'village',
+      'district',
+      'mandal',
+      'state',
+      'gender',
+      'rank',
+      'interCollege',
   'quota',
   'applicationStatus',
   'leadStatus',
   'source',
   'notes',
   'dynamicFields',
-];
+    ];
 
-const canonicalFieldSet = new Set(canonicalFields);
+    const canonicalFieldSet = new Set(canonicalFields);
 
 const aliasPairs = [
   ['candidate name', 'name'],
   ['candidate', 'name'],
-  ['student', 'name'],
+      ['student', 'name'],
   ['student name', 'name'],
   ['studentname', 'name'],
   ['student full name', 'name'],
@@ -77,8 +77,8 @@ const aliasPairs = [
   ['primary phone', 'phone'],
   ['phone1', 'phone'],
   ['phone 1', 'phone'],
-  ['contact1', 'phone'],
-  ['contact 1', 'phone'],
+      ['contact1', 'phone'],
+      ['contact 1', 'phone'],
   ['contact no1', 'phone'],
   ['contact number1', 'phone'],
   ['parent phone', 'fatherPhone'],
@@ -97,8 +97,8 @@ const aliasPairs = [
   ['mother name', 'motherName'],
   ['mothername', 'motherName'],
   ['mname', 'motherName'],
-  ['contact2', 'fatherPhone'],
-  ['contact 2', 'fatherPhone'],
+      ['contact2', 'fatherPhone'],
+      ['contact 2', 'fatherPhone'],
   ['contact no 2', 'fatherPhone'],
   ['contact number 2', 'fatherPhone'],
   ['contact no2', 'fatherPhone'],
@@ -134,14 +134,14 @@ const aliasPairs = [
   ['eamcet qualification', 'applicationStatus'],
   ['eamcet status', 'applicationStatus'],
   ['exam status', 'applicationStatus'],
-  ['status', 'applicationStatus'],
+      ['status', 'applicationStatus'],
   ['lead status', 'leadStatus'],
   ['current status', 'leadStatus'],
   ['present status', 'leadStatus'],
   ['course', 'courseInterested'],
   ['course interested', 'courseInterested'],
   ['course preference', 'courseInterested'],
-  ['inter college', 'interCollege'],
+      ['inter college', 'interCollege'],
   ['college studied', 'interCollege'],
   ['college name', 'interCollege'],
   ['preference', 'courseInterested'],
@@ -173,25 +173,25 @@ canonicalFields.forEach((field) => {
   aliasMap.set(normalizeKey(field), field);
 });
 
-const stringFieldsToTrim = [
-  'hallTicketNumber',
-  'name',
-  'phone',
-  'email',
-  'fatherName',
-  'fatherPhone',
-  'motherName',
-  'courseInterested',
-  'village',
-  'district',
-  'mandal',
-  'state',
+          const stringFieldsToTrim = [
+            'hallTicketNumber',
+            'name',
+            'phone',
+            'email',
+            'fatherName',
+            'fatherPhone',
+            'motherName',
+            'courseInterested',
+            'village',
+            'district',
+            'mandal',
+            'state',
   'gender',
   'interCollege',
-  'quota',
-  'applicationStatus',
+            'quota',
+            'applicationStatus',
   'leadStatus',
-  'source',
+            'source',
   'notes',
 ];
 
@@ -639,11 +639,11 @@ const processImportJob = async (jobId) => {
         }
       });
 
-      stringFieldsToTrim.forEach((field) => {
-        if (normalizedLead[field] !== undefined && normalizedLead[field] !== null && normalizedLead[field] !== '') {
-          normalizedLead[field] = String(normalizedLead[field]).trim();
-        }
-      });
+          stringFieldsToTrim.forEach((field) => {
+            if (normalizedLead[field] !== undefined && normalizedLead[field] !== null && normalizedLead[field] !== '') {
+              normalizedLead[field] = String(normalizedLead[field]).trim();
+            }
+          });
 
       const normalizedVillage = toTrimmedString(normalizedLead.village);
       if (normalizedVillage !== undefined) {
@@ -657,19 +657,19 @@ const processImportJob = async (jobId) => {
         normalizedLead.mandal = normalizedMandal;
       }
 
-      if (normalizedLead.gender) {
+          if (normalizedLead.gender) {
         normalizedLead.gender = normalizeGender(normalizedLead.gender);
       }
 
-      if (normalizedLead.rank !== undefined && normalizedLead.rank !== null && normalizedLead.rank !== '') {
-        const numericRank = Number(normalizedLead.rank);
-        if (!Number.isNaN(numericRank)) {
-          normalizedLead.rank = numericRank;
-        } else {
-          dynamicFieldsFromPayload.Rank = String(normalizedLead.rank).trim();
-          delete normalizedLead.rank;
-        }
-      }
+          if (normalizedLead.rank !== undefined && normalizedLead.rank !== null && normalizedLead.rank !== '') {
+            const numericRank = Number(normalizedLead.rank);
+            if (!Number.isNaN(numericRank)) {
+              normalizedLead.rank = numericRank;
+            } else {
+              dynamicFieldsFromPayload.Rank = String(normalizedLead.rank).trim();
+              delete normalizedLead.rank;
+            }
+          }
 
       const cleanedDynamicFields = {};
       Object.entries(dynamicFieldsFromPayload).forEach(([key, value]) => {
@@ -689,13 +689,13 @@ const processImportJob = async (jobId) => {
       const enquiryNumber = getNextEnquiryNumber();
 
       const leadDocument = {
-        enquiryNumber,
+            enquiryNumber,
         hallTicketNumber: toTrimmedString(normalizedLead.hallTicketNumber) || '',
-        name: String(normalizedLead.name).trim(),
-        phone: String(normalizedLead.phone).trim(),
+            name: String(normalizedLead.name).trim(),
+            phone: String(normalizedLead.phone).trim(),
         email: toTrimmedString(normalizedLead.email)?.toLowerCase(),
-        fatherName: String(normalizedLead.fatherName).trim(),
-        fatherPhone: String(normalizedLead.fatherPhone).trim(),
+            fatherName: String(normalizedLead.fatherName).trim(),
+            fatherPhone: String(normalizedLead.fatherPhone).trim(),
         motherName: toTrimmedString(normalizedLead.motherName),
         courseInterested: toTrimmedString(normalizedLead.courseInterested),
         village: toTrimmedString(normalizedLead.village) || 'Unknown',
@@ -706,7 +706,7 @@ const processImportJob = async (jobId) => {
           'Unknown',
         state: toTrimmedString(normalizedLead.state) || 'Andhra Pradesh',
         gender: toTrimmedString(normalizedLead.gender) || 'Not Specified',
-        rank: normalizedLead.rank !== undefined ? Number(normalizedLead.rank) : undefined,
+            rank: normalizedLead.rank !== undefined ? Number(normalizedLead.rank) : undefined,
         interCollege: toTrimmedString(normalizedLead.interCollege),
         quota: toTrimmedString(normalizedLead.quota) || 'Not Applicable',
         applicationStatus: toTrimmedString(normalizedLead.applicationStatus) || 'Not Provided',
@@ -743,7 +743,7 @@ const processImportJob = async (jobId) => {
           writeConcern: { w: 1 },
         });
         successfulInBatch = documents.length;
-      } catch (error) {
+        } catch (error) {
         if (error.writeErrors && Array.isArray(error.writeErrors)) {
           const failedIndexes = new Set();
           error.writeErrors.forEach((writeError) => {
@@ -804,7 +804,7 @@ const processImportJob = async (jobId) => {
           const entries = leadsBuffer.splice(0, leadsBuffer.length);
           await scheduleFlush(entries);
         }
-      } catch (error) {
+        } catch (error) {
         stats.totalErrors += 1;
         pushErrorDetail(meta, rawLead, error.message || 'Validation failed');
         await updateJobProgress(
