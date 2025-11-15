@@ -907,6 +907,7 @@ export const approveJoining = async (req, res) => {
     delete leadDataSnapshot._id;
     delete leadDataSnapshot.__v;
 
+    // Build update payload - leadId should be in $set (not $setOnInsert) so it can be updated
     const admissionPayload = {
       joiningId: joining._id,
       admissionNumber,
@@ -927,12 +928,15 @@ export const approveJoining = async (req, res) => {
       paymentSummary: joiningObject.paymentSummary || undefined,
     };
 
+    // Use joiningId as primary identifier (it's required and unique)
+    // This works for both joinings with and without leads
+    // leadId is in $set (not $setOnInsert) to avoid MongoDB conflict
     await Admission.findOneAndUpdate(
-      { leadId: joining.leadId },
+      { joiningId: joining._id },
       {
         $set: admissionPayload,
         $setOnInsert: {
-          leadId: joining.leadId,
+          // Only fields that should NEVER be updated after creation go here
           admissionDate: new Date(),
           createdBy: req.user._id,
         },
@@ -940,13 +944,16 @@ export const approveJoining = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    await recordActivity({
-      leadId: joining.leadId,
-      userId: req.user._id,
-      description: 'Joining form approved',
-      statusFrom: previousStatus,
-      statusTo: 'approved',
-    });
+    // Only record activity if lead exists
+    if (joining.leadId) {
+      await recordActivity({
+        leadId: joining.leadId,
+        userId: req.user._id,
+        description: 'Joining form approved',
+        statusFrom: previousStatus,
+        statusTo: 'approved',
+      });
+    }
 
     return successResponse(
       res,
