@@ -21,9 +21,10 @@ const admissionSchema = new Schema(
     leadId: {
       type: Schema.Types.ObjectId,
       ref: 'Lead',
-      required: true,
-      unique: true,
+      required: false, // Made optional to support admissions from joinings without leads
+      unique: false, // Remove unique constraint to allow multiple admissions without leads
       index: true,
+      sparse: true, // Only index documents that have leadId
     },
     enquiryNumber: {
       type: String,

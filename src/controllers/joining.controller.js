@@ -550,7 +550,7 @@ export const saveJoiningDraft = async (req, res) => {
     const payload = normalizeJoiningPayload(req.body || {});
 
     // Handle new joining form without lead
-    const isNewJoining = leadId === 'new' || !leadId;
+    const isNewJoining = leadId === 'new' || !leadId || leadId === 'undefined';
     let lead = null;
     let joiningId = null;
 
@@ -560,8 +560,32 @@ export const saveJoiningDraft = async (req, res) => {
         joiningId = payload._id;
       }
     } else {
-      // Existing flow: ensure lead exists
-      lead = await ensureLeadExists(leadId);
+      // Check if leadId is actually a joining _id (for joinings without leads)
+      if (mongoose.Types.ObjectId.isValid(leadId)) {
+        const existingJoining = await Joining.findById(leadId);
+        if (existingJoining && !existingJoining.leadId) {
+          // This is a joining without a lead, use it directly
+          joiningId = leadId;
+          lead = null;
+        } else if (existingJoining && existingJoining.leadId) {
+          // This is a joining with a lead, use the leadId
+          lead = await ensureLeadExists(existingJoining.leadId.toString());
+        } else {
+          // Try to find lead
+          try {
+            lead = await ensureLeadExists(leadId);
+          } catch (error) {
+            // If lead not found and it's a valid ObjectId, treat as joining _id
+            if (error.statusCode === 404) {
+              return errorResponse(res, 'Invalid joining or lead identifier', 404);
+            }
+            throw error;
+          }
+        }
+      } else {
+        // Existing flow: ensure lead exists
+        lead = await ensureLeadExists(leadId);
+      }
     }
 
      let courseDoc = null;
@@ -612,10 +636,10 @@ export const saveJoiningDraft = async (req, res) => {
     const now = new Date();
     let joining;
 
-    if (isNewJoining) {
+    if (isNewJoining || joiningId) {
       // For new joining without lead, find by _id or create new
       // Extract _id from payload if present
-      const payloadId = payload._id;
+      const payloadId = payload._id || joiningId;
       delete payload._id; // Remove _id from payload before setting
       
       if (payloadId && mongoose.Types.ObjectId.isValid(payloadId)) {
@@ -637,18 +661,29 @@ export const saveJoiningDraft = async (req, res) => {
         });
       }
     } else {
-      // Existing flow: find by leadId
-      joining =
-        (await Joining.findOne({ leadId })) ||
-        new Joining({
-          leadId,
-          status: 'draft',
-          reservation: {
-            general: DEFAULT_GENERAL_RESERVATION,
-            other: [],
-          },
-          createdBy: req.user._id,
-        });
+      // Existing flow: find by leadId or by joining _id if leadId is actually a joining _id
+      if (joiningId) {
+        // We already found the joining above, use it
+        joining = await Joining.findById(joiningId);
+        if (!joining) {
+          return errorResponse(res, 'Joining form not found', 404);
+        }
+      } else {
+        // Try to find by leadId
+        joining = await Joining.findOne({ leadId });
+        if (!joining) {
+          // Create new joining for this lead
+          joining = new Joining({
+            leadId,
+            status: 'draft',
+            reservation: {
+              general: DEFAULT_GENERAL_RESERVATION,
+              other: [],
+            },
+            createdBy: req.user._id,
+          });
+        }
+      }
     }
 
     const previousStatus = joining.status;
@@ -744,7 +779,25 @@ export const submitJoiningForApproval = async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    const joining = await Joining.findOne({ leadId });
+    // Handle joinings without leads - check if leadId is actually a joining _id
+    let joining = null;
+    
+    if (leadId === 'new' || !leadId || leadId === 'undefined') {
+      return errorResponse(res, 'Invalid joining identifier', 400);
+    }
+
+    // Check if leadId is actually a joining _id (for joinings without leads)
+    if (mongoose.Types.ObjectId.isValid(leadId)) {
+      joining = await Joining.findById(leadId);
+      if (!joining) {
+        // Try to find by leadId
+        joining = await Joining.findOne({ leadId });
+      }
+    } else {
+      // Try to find by leadId
+      joining = await Joining.findOne({ leadId });
+    }
+
     if (!joining) {
       return errorResponse(res, 'Joining draft not found', 404);
     }
@@ -761,13 +814,16 @@ export const submitJoiningForApproval = async (req, res) => {
 
     await joining.save();
 
-    await recordActivity({
-      leadId: joining.leadId,
-      userId: req.user._id,
-      description: 'Joining form submitted for approval',
-      statusFrom: previousStatus,
-      statusTo: 'pending_approval',
-    });
+    // Only record activity if lead exists
+    if (joining.leadId) {
+      await recordActivity({
+        leadId: joining.leadId,
+        userId: req.user._id,
+        description: 'Joining form submitted for approval',
+        statusFrom: previousStatus,
+        statusTo: 'pending_approval',
+      });
+    }
 
     return successResponse(
       res,
@@ -789,7 +845,25 @@ export const approveJoining = async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    const joining = await Joining.findOne({ leadId });
+    // Handle joinings without leads - check if leadId is actually a joining _id
+    let joining = null;
+    
+    if (leadId === 'new' || !leadId || leadId === 'undefined') {
+      return errorResponse(res, 'Invalid joining identifier', 400);
+    }
+
+    // Check if leadId is actually a joining _id (for joinings without leads)
+    if (mongoose.Types.ObjectId.isValid(leadId)) {
+      joining = await Joining.findById(leadId);
+      if (!joining) {
+        // Try to find by leadId
+        joining = await Joining.findOne({ leadId });
+      }
+    } else {
+      // Try to find by leadId
+      joining = await Joining.findOne({ leadId });
+    }
+
     if (!joining) {
       return errorResponse(res, 'Joining draft not found', 404);
     }
@@ -811,7 +885,11 @@ export const approveJoining = async (req, res) => {
 
     const joiningObject = joining.toObject({ getters: true });
 
-    const lead = await Lead.findById(joining.leadId);
+    let lead = null;
+    if (joining.leadId) {
+      lead = await Lead.findById(joining.leadId);
+    }
+    
     let admissionNumber = lead?.admissionNumber;
     if (!admissionNumber) {
       admissionNumber = await generateAdmissionNumber();
@@ -832,6 +910,7 @@ export const approveJoining = async (req, res) => {
     const admissionPayload = {
       joiningId: joining._id,
       admissionNumber,
+      ...(joining.leadId && { leadId: joining.leadId }), // Only include leadId if it exists
       enquiryNumber: lead?.enquiryNumber || joining.leadData?.enquiryNumber || '',
       leadData: leadDataSnapshot,
       courseInfo: joiningObject.courseInfo || {},
