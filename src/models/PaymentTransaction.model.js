@@ -12,12 +12,12 @@ const paymentTransactionSchema = new Schema(
     joiningId: {
       type: Schema.Types.ObjectId,
       ref: 'Joining',
+      required: true,
       index: true,
     },
     leadId: {
       type: Schema.Types.ObjectId,
       ref: 'Lead',
-      required: true,
       index: true,
     },
     courseId: {

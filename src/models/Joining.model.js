@@ -21,9 +21,15 @@ const joiningSchema = new Schema(
     leadId: {
       type: Schema.Types.ObjectId,
       ref: 'Lead',
-      required: true,
-      unique: true,
+      required: false, // Made optional to support joining forms without leads
+      unique: false, // Remove unique constraint to allow multiple joinings without leads
       index: true,
+      sparse: true, // Only index documents that have leadId
+    },
+    // Store complete lead data snapshot (not populated)
+    leadData: {
+      type: Schema.Types.Mixed,
+      default: {},
     },
     status: {
       type: String,
@@ -51,7 +57,7 @@ const joiningSchema = new Schema(
       lastPaymentAt: { type: Date },
     },
     studentInfo: {
-      name: { type: String, trim: true, required: true },
+      name: { type: String, trim: true, default: '' }, // Made optional to support new joining forms
       aadhaarNumber: createEncryptedStringField(),
       phone: { type: String, trim: true, default: '' },
       gender: { type: String, trim: true, default: '' },

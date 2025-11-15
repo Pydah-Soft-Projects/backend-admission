@@ -164,6 +164,14 @@ export const listTransactions = async (req, res) => {
       .populate('collectedBy', 'name email roleName')
       .populate('courseId', 'name code')
       .populate('branchId', 'name code')
+      .populate({
+        path: 'joiningId',
+        select: 'leadData courseInfo status',
+      })
+      .populate({
+        path: 'admissionId',
+        select: 'admissionNumber leadData enquiryNumber courseInfo',
+      })
       .lean();
 
     return successResponse(res, transactions);
@@ -186,8 +194,17 @@ export const recordCashPayment = async (req, res) => {
       isAdditionalFee = false,
     } = req.body;
 
-    if (!leadId) {
-      return errorResponse(res, 'leadId is required', 422);
+    if (!joiningId) {
+      return errorResponse(res, 'joiningId is required', 422);
+    }
+    
+    // Get leadId from joining if not provided
+    let finalLeadId = leadId;
+    if (!finalLeadId && joiningId) {
+      const joining = await Joining.findById(joiningId).select('leadId');
+      if (joining) {
+        finalLeadId = joining.leadId;
+      }
     }
 
     if (typeof amount !== 'number' || amount <= 0) {
@@ -209,7 +226,7 @@ export const recordCashPayment = async (req, res) => {
     }
 
     const transaction = await PaymentTransaction.create({
-      leadId,
+      leadId: finalLeadId,
       joiningId,
       admissionId,
       courseId,
@@ -232,7 +249,7 @@ export const recordCashPayment = async (req, res) => {
     await updatePaymentSummary({
       joiningId,
       admissionId,
-      leadId,
+      leadId: finalLeadId,
       courseId,
       branchId,
       amount,
@@ -260,8 +277,17 @@ export const createCashfreeOrder = async (req, res) => {
       isAdditionalFee = false,
     } = req.body;
 
-    if (!leadId) {
-      return errorResponse(res, 'leadId is required', 422);
+    if (!joiningId) {
+      return errorResponse(res, 'joiningId is required', 422);
+    }
+    
+    // Get leadId from joining if not provided
+    let finalLeadId = leadId;
+    if (!finalLeadId && joiningId) {
+      const joining = await Joining.findById(joiningId).select('leadId');
+      if (joining) {
+        finalLeadId = joining.leadId;
+      }
     }
 
     if (typeof amount !== 'number' || amount <= 0) {
@@ -324,7 +350,7 @@ export const createCashfreeOrder = async (req, res) => {
     }
 
     const transaction = await PaymentTransaction.create({
-      leadId,
+      leadId: finalLeadId,
       joiningId,
       admissionId,
       courseId: resolvedCourseId,
@@ -445,6 +471,151 @@ export const verifyCashfreePayment = async (req, res) => {
     );
   } catch (error) {
     return errorResponse(res, error.message || 'Failed to verify payment status', 500);
+  }
+};
+
+export const reconcilePendingTransactions = async (req, res) => {
+  try {
+    const config = await PaymentGatewayConfig.findOne({ provider: 'cashfree', isActive: true });
+    if (!config) {
+      return errorResponse(res, 'Cashfree configuration is not set', 503);
+    }
+
+    const clientId = config.clientId;
+    const clientSecret = config.clientSecret;
+
+    if (!clientId || !clientSecret) {
+      return errorResponse(
+        res,
+        'Cashfree credentials are misconfigured. Please update them in Payment Settings.',
+        503
+      );
+    }
+
+    // Find all pending transactions with cashfreeOrderId
+    const pendingTransactions = await PaymentTransaction.find({
+      status: 'pending',
+      mode: 'online',
+      cashfreeOrderId: { $exists: true, $ne: null },
+    }).lean();
+
+    if (pendingTransactions.length === 0) {
+      return successResponse(
+        res,
+        {
+          checked: 0,
+          updated: 0,
+          failed: 0,
+          results: [],
+        },
+        'No pending transactions to reconcile'
+      );
+    }
+
+    const environment = 'production';
+    const results = [];
+    let updatedCount = 0;
+    let failedCount = 0;
+
+    // Process each transaction
+    for (const transaction of pendingTransactions) {
+      try {
+        const order = await cashfreeGetOrder({
+          environment,
+          clientId,
+          clientSecret,
+          orderId: transaction.cashfreeOrderId,
+        });
+
+        if (!order || !order.order_status) {
+          results.push({
+            transactionId: transaction._id.toString(),
+            orderId: transaction.cashfreeOrderId,
+            status: 'error',
+            message: 'Unable to verify payment status from Cashfree',
+          });
+          failedCount++;
+          continue;
+        }
+
+        const orderStatus = order.order_status.toLowerCase();
+        let transactionStatus = 'pending';
+
+        if (orderStatus === 'paid') {
+          transactionStatus = 'success';
+        } else if (['failed', 'cancelled', 'expired'].includes(orderStatus)) {
+          transactionStatus = 'failed';
+        }
+
+        // Only update if status changed
+        if (transactionStatus !== 'pending') {
+          await PaymentTransaction.updateOne(
+            { _id: transaction._id },
+            {
+              $set: {
+                status: transactionStatus,
+                referenceId: order.cf_payment_id || transaction.referenceId,
+                processedAt: order?.order_completed_time
+                  ? new Date(order.order_completed_time)
+                  : transaction.processedAt,
+                verifiedAt: new Date(),
+                'meta.cashfreeVerification': order,
+              },
+            }
+          );
+
+          // Update payment summary if successful
+          if (transactionStatus === 'success') {
+            await updatePaymentSummary({
+              joiningId: transaction.joiningId,
+              admissionId: transaction.admissionId,
+              leadId: transaction.leadId,
+              courseId: transaction.courseId,
+              branchId: transaction.branchId,
+              amount: transaction.amount,
+              currency: transaction.currency,
+            });
+          }
+
+          updatedCount++;
+          results.push({
+            transactionId: transaction._id.toString(),
+            orderId: transaction.cashfreeOrderId,
+            status: transactionStatus,
+            message: `Status updated to ${transactionStatus}`,
+          });
+        } else {
+          results.push({
+            transactionId: transaction._id.toString(),
+            orderId: transaction.cashfreeOrderId,
+            status: 'pending',
+            message: 'Still pending at Cashfree',
+          });
+        }
+      } catch (error) {
+        console.error(`Error reconciling transaction ${transaction._id}:`, error);
+        results.push({
+          transactionId: transaction._id.toString(),
+          orderId: transaction.cashfreeOrderId,
+          status: 'error',
+          message: error.message || 'Failed to reconcile',
+        });
+        failedCount++;
+      }
+    }
+
+    return successResponse(
+      res,
+      {
+        checked: pendingTransactions.length,
+        updated: updatedCount,
+        failed: failedCount,
+        results: results.slice(0, 100), // Limit results to first 100
+      },
+      `Reconciled ${pendingTransactions.length} pending transactions. ${updatedCount} updated, ${failedCount} failed.`
+    );
+  } catch (error) {
+    return errorResponse(res, error.message || 'Failed to reconcile pending transactions', 500);
   }
 };
 

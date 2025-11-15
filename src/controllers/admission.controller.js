@@ -78,11 +78,20 @@ export const listAdmissions = async (req, res) => {
 
     const [result] = await Admission.aggregate(pipeline);
     const total = result?.totalCount?.[0]?.count || 0;
+    const rawAdmissions = result?.data || [];
+
+    // Convert aggregation results to Mongoose documents to apply getters (decryption)
+    const admissions = await Promise.all(
+      rawAdmissions.map(async (rawAdmission) => {
+        const admission = await Admission.findById(rawAdmission._id);
+        return admission ? admission.toObject({ getters: true }) : rawAdmission;
+      })
+    );
 
     return successResponse(
       res,
       {
-        admissions: result?.data || [],
+        admissions,
         pagination: {
           page: Number(page),
           limit: paginationLimit,
@@ -108,7 +117,7 @@ export const getAdmissionByLead = async (req, res) => {
     const { leadId } = req.params;
     ensureLeadId(leadId);
 
-    const admission = await Admission.findOne({ leadId }).lean();
+    const admission = await Admission.findOne({ leadId });
     if (!admission) {
       return errorResponse(res, 'Admission record not found for this lead', 404);
     }
@@ -120,7 +129,7 @@ export const getAdmissionByLead = async (req, res) => {
     return successResponse(
       res,
       {
-        admission,
+        admission: admission.toObject({ getters: true }),
         lead,
       },
       'Admission record retrieved successfully',

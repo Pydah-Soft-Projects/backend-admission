@@ -11,6 +11,7 @@ import {
   createCashfreeOrder,
   listTransactions,
   recordCashPayment,
+  reconcilePendingTransactions,
   verifyCashfreePayment,
 } from '../controllers/payment.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
@@ -33,6 +34,7 @@ router.get('/transactions', listTransactions);
 router.post('/cash', recordCashPayment);
 router.post('/cashfree/order', createCashfreeOrder);
 router.post('/cashfree/verify', verifyCashfreePayment);
+router.post('/cashfree/reconcile', isSuperAdmin, reconcilePendingTransactions);
 
 export default router;
 

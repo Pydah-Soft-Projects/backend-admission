@@ -25,6 +25,16 @@ const admissionSchema = new Schema(
       unique: true,
       index: true,
     },
+    enquiryNumber: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    // Store complete lead data snapshot (not populated)
+    leadData: {
+      type: Schema.Types.Mixed,
+      default: {},
+    },
     paymentSummary: {
       totalFee: { type: Number, min: 0, default: 0 },
       totalPaid: { type: Number, min: 0, default: 0 },

@@ -210,12 +210,27 @@ export const listJoinings = async (req, res) => {
           as: 'lead',
         },
       },
-      { $unwind: '$lead' },
+      {
+        $addFields: {
+          lead: { 
+            $cond: {
+              if: { $gt: [{ $size: '$lead' }, 0] },
+              then: { $arrayElemAt: ['$lead', 0] },
+              else: null
+            }
+          },
+        },
+      },
     ];
 
     if (leadStatus) {
       aggregationPipeline.push({
-        $match: { 'lead.leadStatus': leadStatus },
+        $match: {
+          $or: [
+            { 'lead.leadStatus': leadStatus },
+            { 'leadData.leadStatus': leadStatus },
+          ],
+        },
       });
     }
 
@@ -227,6 +242,13 @@ export const listJoinings = async (req, res) => {
             { 'lead.name': regex },
             { 'lead.phone': regex },
             { 'lead.hallTicketNumber': regex },
+            { 'lead.enquiryNumber': regex },
+            { 'leadData.name': regex },
+            { 'leadData.phone': regex },
+            { 'leadData.hallTicketNumber': regex },
+            { 'leadData.enquiryNumber': regex },
+            { 'studentInfo.name': regex },
+            { 'studentInfo.phone': regex },
           ],
         },
       });
@@ -246,11 +268,27 @@ export const listJoinings = async (req, res) => {
 
     const [result] = await Joining.aggregate(aggregationPipeline);
     const total = result?.totalCount?.[0]?.count || 0;
+    const joinings = result?.data || [];
+
+    // Debug logging (remove in production)
+    console.log('Joining list query:', {
+      statusParam,
+      query,
+      total,
+      joiningsCount: joinings.length,
+      sampleJoining: joinings[0] ? {
+        _id: joinings[0]._id,
+        status: joinings[0].status,
+        leadId: joinings[0].leadId,
+        hasLead: !!joinings[0].lead,
+        hasLeadData: !!joinings[0].leadData,
+      } : null,
+    });
 
     return successResponse(
       res,
       {
-        joinings: result?.data || [],
+        joinings,
         pagination: {
           page: Number(page),
           limit: paginationLimit,
@@ -275,12 +313,123 @@ export const getJoining = async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    const lead = await ensureLeadExists(leadId);
+    // Handle new joining form without lead - return empty structure, don't create yet
+    if (leadId === 'new' || !leadId || leadId === 'undefined') {
+      // Return empty joining structure - will be created on save/submit
+      const emptyJoining = {
+        _id: null,
+        leadId: undefined,
+        leadData: {},
+        courseInfo: {
+          courseId: undefined,
+          branchId: undefined,
+          course: '',
+          branch: '',
+          quota: '',
+        },
+        studentInfo: {
+          name: '',
+          phone: '',
+          gender: '',
+          dateOfBirth: '',
+          notes: 'As per SSC for no issues',
+          aadhaarNumber: '',
+        },
+        parents: {
+          father: {
+            name: '',
+            phone: '',
+            aadhaarNumber: '',
+          },
+          mother: {
+            name: '',
+            phone: '',
+            aadhaarNumber: '',
+          },
+        },
+        reservation: {
+          general: DEFAULT_GENERAL_RESERVATION,
+          other: [],
+        },
+        address: {
+          communication: {
+            doorOrStreet: '',
+            landmark: '',
+            villageOrCity: '',
+            mandal: '',
+            district: '',
+            pinCode: '',
+          },
+          relatives: [],
+        },
+        qualifications: {
+          ssc: false,
+          interOrDiploma: false,
+          ug: false,
+          mediums: [],
+          otherMediumLabel: '',
+        },
+        educationHistory: [],
+        siblings: [],
+        documents: {},
+        status: 'draft',
+      };
 
-    let joiningDoc = await Joining.findOne({ leadId });
+      return successResponse(
+        res,
+        {
+          joining: emptyJoining,
+          lead: null,
+        },
+        'New joining form template loaded',
+        200
+      );
+    }
+
+    // Check if leadId is actually a joining _id (for joinings without leads)
+    let joiningDoc = null;
+    let lead = null;
+
+    // First, try to find joining by _id (in case it's a joining without a lead)
+    if (mongoose.Types.ObjectId.isValid(leadId)) {
+      joiningDoc = await Joining.findById(leadId);
+      if (joiningDoc && !joiningDoc.leadId) {
+        // This is a joining without a lead, return it
+        return successResponse(
+          res,
+          {
+            joining: joiningDoc.toObject({ getters: true }),
+            lead: null,
+          },
+          'Joining draft retrieved successfully',
+          200
+        );
+      }
+    }
+
+    // If not found by _id, try to find by leadId
     if (!joiningDoc) {
+      try {
+        lead = await ensureLeadExists(leadId);
+        joiningDoc = await Joining.findOne({ leadId });
+      } catch (error) {
+        // If lead doesn't exist and it's not a valid ObjectId, return error
+        if (!mongoose.Types.ObjectId.isValid(leadId)) {
+          return errorResponse(res, 'Invalid joining or lead identifier', 404);
+        }
+        throw error;
+      }
+    }
+
+    if (!joiningDoc) {
+      // Store complete lead data snapshot
+      const leadDataSnapshot = lead.toObject();
+      delete leadDataSnapshot._id;
+      delete leadDataSnapshot.__v;
+      
       const draft = new Joining({
         leadId,
+        leadData: leadDataSnapshot,
         courseInfo: {
           course: lead.courseInterested || '',
           branch: '',
@@ -400,7 +549,20 @@ export const saveJoiningDraft = async (req, res) => {
     const { leadId } = req.params;
     const payload = normalizeJoiningPayload(req.body || {});
 
-    const lead = await ensureLeadExists(leadId);
+    // Handle new joining form without lead
+    const isNewJoining = leadId === 'new' || !leadId;
+    let lead = null;
+    let joiningId = null;
+
+    if (isNewJoining) {
+      // For new joining, get joiningId from payload or create new
+      if (payload._id) {
+        joiningId = payload._id;
+      }
+    } else {
+      // Existing flow: ensure lead exists
+      lead = await ensureLeadExists(leadId);
+    }
 
      let courseDoc = null;
      let branchDoc = null;
@@ -448,17 +610,46 @@ export const saveJoiningDraft = async (req, res) => {
      }
 
     const now = new Date();
-    const joining =
-      (await Joining.findOne({ leadId })) ||
-      new Joining({
-        leadId,
-        status: 'draft',
-        reservation: {
-          general: DEFAULT_GENERAL_RESERVATION,
-          other: [],
-        },
-        createdBy: req.user._id,
-      });
+    let joining;
+
+    if (isNewJoining) {
+      // For new joining without lead, find by _id or create new
+      // Extract _id from payload if present
+      const payloadId = payload._id;
+      delete payload._id; // Remove _id from payload before setting
+      
+      if (payloadId && mongoose.Types.ObjectId.isValid(payloadId)) {
+        joining = await Joining.findById(payloadId);
+        if (!joining) {
+          return errorResponse(res, 'Joining form not found', 404);
+        }
+      } else {
+        // Create new joining form - this is the first save
+        joining = new Joining({
+          leadId: undefined,
+          leadData: {},
+          status: 'draft',
+          reservation: {
+            general: DEFAULT_GENERAL_RESERVATION,
+            other: [],
+          },
+          createdBy: req.user._id,
+        });
+      }
+    } else {
+      // Existing flow: find by leadId
+      joining =
+        (await Joining.findOne({ leadId })) ||
+        new Joining({
+          leadId,
+          status: 'draft',
+          reservation: {
+            general: DEFAULT_GENERAL_RESERVATION,
+            other: [],
+          },
+          createdBy: req.user._id,
+        });
+    }
 
     const previousStatus = joining.status;
 
@@ -473,22 +664,35 @@ export const saveJoiningDraft = async (req, res) => {
       updatedBy: req.user._id,
     });
 
-    applyLeadDefaultsToJoining(joining, lead);
+    // Only apply lead defaults and sync if lead exists
+    if (lead) {
+      applyLeadDefaultsToJoining(joining, lead);
+
+      // Sync changes to lead immediately (not just on submission)
+      const leadWasUpdated = syncLeadWithJoining(lead, joining);
+      if (leadWasUpdated) {
+        await lead.save();
+      }
+
+      // Update lead data snapshot with latest lead data
+      const leadDataSnapshot = lead.toObject();
+      delete leadDataSnapshot._id;
+      delete leadDataSnapshot.__v;
+      joining.leadData = leadDataSnapshot;
+    }
 
     await joining.save();
 
-    const leadWasUpdated = syncLeadWithJoining(lead, joining);
-    if (leadWasUpdated) {
-      await lead.save();
+    // Only record activity if lead exists
+    if (lead) {
+      await recordActivity({
+        leadId: lead._id,
+        userId: req.user._id,
+        description: 'Joining form saved as draft',
+        statusFrom: previousStatus,
+        statusTo: 'draft',
+      });
     }
-
-    await recordActivity({
-      leadId: lead._id,
-      userId: req.user._id,
-      description: 'Joining form saved as draft',
-      statusFrom: previousStatus,
-      statusTo: 'draft',
-    });
 
     return successResponse(
       res,
@@ -620,9 +824,16 @@ export const approveJoining = async (req, res) => {
       await lead.save();
     }
 
+    // Store complete lead data snapshot (not populated)
+    const leadDataSnapshot = lead ? lead.toObject() : (joining.leadData || {});
+    delete leadDataSnapshot._id;
+    delete leadDataSnapshot.__v;
+
     const admissionPayload = {
       joiningId: joining._id,
       admissionNumber,
+      enquiryNumber: lead?.enquiryNumber || joining.leadData?.enquiryNumber || '',
+      leadData: leadDataSnapshot,
       courseInfo: joiningObject.courseInfo || {},
       studentInfo: joiningObject.studentInfo || {},
       parents: joiningObject.parents || {},
