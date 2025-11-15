@@ -198,15 +198,32 @@ export const getOverviewAnalytics = async (req, res) => {
     const rangeInDays = Number.parseInt(req.query.days, 10) || 14;
     const timezone = req.query.tz || 'Asia/Kolkata';
 
+    // Get today's date in the specified timezone
     const today = new Date();
+    // Set to end of today in the timezone
+    const endDate = new Date(today);
+    endDate.setHours(23, 59, 59, 999);
+    
+    // Calculate start date: go back (rangeInDays - 1) days to include today
     const startDate = new Date(today);
     startDate.setDate(startDate.getDate() - (rangeInDays - 1));
     startDate.setHours(0, 0, 0, 0);
+    
+    // Helper to format date in timezone for key matching
+    const formatDateKey = (date) => {
+      // Use the same format as $dateToString in aggregation
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
 
     const [
       totalLeads,
       confirmedLeads,
       admittedLeads,
+      assignedLeads,
+      unassignedLeads,
       leadStatusAgg,
       joiningStatusAgg,
       admissionStatusAgg,
@@ -219,6 +236,8 @@ export const getOverviewAnalytics = async (req, res) => {
       Lead.countDocuments(),
       Lead.countDocuments({ leadStatus: 'Confirmed' }),
       Lead.countDocuments({ leadStatus: 'Admitted' }),
+      Lead.countDocuments({ assignedTo: { $exists: true, $ne: null } }),
+      Lead.countDocuments({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }] }),
       Lead.aggregate([
         {
           $group: {
@@ -245,7 +264,7 @@ export const getOverviewAnalytics = async (req, res) => {
       ]),
       Admission.countDocuments(),
       Lead.aggregate([
-        { $match: { createdAt: { $gte: startDate } } },
+        { $match: { createdAt: { $gte: startDate, $lte: endDate } } },
         {
           $group: {
             _id: {
@@ -264,7 +283,7 @@ export const getOverviewAnalytics = async (req, res) => {
         {
           $match: {
             type: 'status_change',
-            createdAt: { $gte: startDate },
+            createdAt: { $gte: startDate, $lte: endDate },
           },
         },
         {
@@ -287,7 +306,7 @@ export const getOverviewAnalytics = async (req, res) => {
       Joining.aggregate([
         {
           $match: {
-            updatedAt: { $gte: startDate },
+            updatedAt: { $gte: startDate, $lte: endDate },
           },
         },
         {
@@ -310,7 +329,7 @@ export const getOverviewAnalytics = async (req, res) => {
       Admission.aggregate([
         {
           $match: {
-            admissionDate: { $gte: startDate },
+            admissionDate: { $gte: startDate, $lte: endDate },
           },
         },
         {
@@ -352,8 +371,13 @@ export const getOverviewAnalytics = async (req, res) => {
       for (let i = 0; i < rangeInDays; i += 1) {
         const date = new Date(startDate);
         date.setDate(startDate.getDate() + i);
-        const key = date.toISOString().slice(0, 10);
+        const key = formatDateKey(date);
         series.set(key, { date: key, count: 0 });
+      }
+      // Ensure today is included
+      const todayKey = formatDateKey(today);
+      if (!series.has(todayKey)) {
+        series.set(todayKey, { date: todayKey, count: 0 });
       }
       return series;
     };
@@ -427,10 +451,27 @@ export const getOverviewAnalytics = async (req, res) => {
       };
 
       const results = [];
+      const todayKey = formatDateKey(today);
+      
+      // Generate all date keys in the range, ensuring today is included
+      const allDateKeys = [];
       for (let i = 0; i < rangeInDays; i += 1) {
         const date = new Date(startDate);
         date.setDate(startDate.getDate() + i);
-        const key = date.toISOString().slice(0, 10);
+        const key = formatDateKey(date);
+        allDateKeys.push(key);
+      }
+      
+      // Ensure today is in the list
+      if (!allDateKeys.includes(todayKey)) {
+        allDateKeys.push(todayKey);
+      }
+      
+      // Sort to maintain chronological order
+      allDateKeys.sort();
+      
+      // Build results
+      for (const key of allDateKeys) {
         if (seriesMap instanceof Map) {
           if (seriesMap.has(key)) {
             results.push(seriesMap.get(key));
@@ -451,6 +492,8 @@ export const getOverviewAnalytics = async (req, res) => {
         leads: totalLeads,
         confirmedLeads,
         admittedLeads,
+        assignedLeads,
+        unassignedLeads,
         joinings: {
           draft: joiningStatusBreakdown.draft || 0,
           pendingApproval: joiningStatusBreakdown.pending_approval || 0,
@@ -477,6 +520,65 @@ export const getOverviewAnalytics = async (req, res) => {
   } catch (error) {
     console.error('Error getting overview analytics:', error);
     return errorResponse(res, error.message || 'Failed to get overview analytics', 500);
+  }
+};
+
+// @desc    Get user-specific analytics (assigned leads and status breakdown)
+// @route   GET /api/leads/analytics/users
+// @access  Private (Super Admin)
+export const getUserAnalytics = async (req, res) => {
+  try {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Access denied', 403);
+    }
+
+    // Get all users except Super Admin and Sub Super Admin
+    const users = await User.find({
+      roleName: { $nin: ['Super Admin', 'Sub Super Admin'] },
+    })
+      .select('_id name email roleName isActive')
+      .lean();
+
+    // Get analytics for each user
+    const userAnalytics = await Promise.all(
+      users.map(async (user) => {
+        const userId = user._id;
+
+        // Count total assigned leads
+        const totalAssigned = await Lead.countDocuments({ assignedTo: userId });
+
+        // Get status breakdown for assigned leads
+        const statusBreakdown = await Lead.aggregate([
+          { $match: { assignedTo: userId } },
+          {
+            $group: {
+              _id: '$leadStatus',
+              count: { $sum: 1 },
+            },
+          },
+        ]);
+
+        const statusMap = {};
+        statusBreakdown.forEach((item) => {
+          statusMap[item._id || 'Unknown'] = item.count;
+        });
+
+        return {
+          userId: userId.toString(),
+          name: user.name,
+          email: user.email,
+          roleName: user.roleName,
+          isActive: user.isActive,
+          totalAssigned,
+          statusBreakdown: statusMap,
+        };
+      }),
+    );
+
+    return successResponse(res, { users: userAnalytics }, 'User analytics retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error getting user analytics:', error);
+    return errorResponse(res, error.message || 'Failed to get user analytics', 500);
   }
 };
 

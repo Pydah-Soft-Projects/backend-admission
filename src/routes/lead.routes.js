@@ -29,6 +29,7 @@ import {
   assignLeads,
   getUserLeadAnalytics,
   getOverviewAnalytics,
+  getUserAnalytics,
 } from '../controllers/leadAssignment.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -76,6 +77,7 @@ router.post('/assign', isSuperAdmin, assignLeads);
 
 // Analytics routes
 router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
+router.get('/analytics/users', isSuperAdmin, getUserAnalytics);
 router.get('/analytics/:userId', getUserLeadAnalytics);
 
 // Activity log routes (must come before /:id routes)
