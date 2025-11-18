@@ -65,16 +65,52 @@ export const assignLeads = async (req, res) => {
 
     // Assign leads to user
     const leadIds = availableLeads.map((lead) => lead._id);
-    const result = await Lead.updateMany(
-      { _id: { $in: leadIds } },
-      {
+    
+    // Get leads before update to check status
+    const leadsToAssign = await Lead.find({ _id: { $in: leadIds } }).lean();
+    
+    // Update leads and create activity logs
+    const activityLogs = [];
+    const now = new Date();
+    
+    for (const lead of leadsToAssign) {
+      const oldStatus = lead.leadStatus || 'New';
+      const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
+      
+      // Update lead
+      await Lead.findByIdAndUpdate(lead._id, {
         $set: {
           assignedTo: userId,
-          assignedAt: new Date(),
+          assignedAt: now,
           assignedBy: req.user._id,
+          leadStatus: newStatus,
         },
-      }
-    );
+      });
+      
+      // Create activity log
+      activityLogs.push({
+        leadId: lead._id,
+        type: 'status_change',
+        oldStatus: oldStatus,
+        newStatus: newStatus,
+        comment: `Assigned to counsellor ${user.name}`,
+        performedBy: req.user._id,
+        metadata: {
+          assignment: {
+            assignedTo: userId.toString(),
+            assignedBy: req.user._id.toString(),
+          },
+        },
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    
+    if (activityLogs.length > 0) {
+      await ActivityLog.insertMany(activityLogs);
+    }
+    
+    const result = { modifiedCount: activityLogs.length };
 
     return successResponse(
       res,

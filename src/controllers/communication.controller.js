@@ -181,27 +181,8 @@ export const logCallCommunication = async (req, res) => {
 
     await Lead.findByIdAndUpdate(lead._id, { lastFollowUp: new Date() });
 
-    const commentParts = [`Call logged for ${sanitizedNumber}`];
-    if (outcome?.trim()) {
-      commentParts.push(`Outcome: ${outcome.trim()}`);
-    }
-    if (remarks?.trim()) {
-      commentParts.push(`Remarks: ${remarks.trim()}`);
-    }
-
-    await ActivityLog.create({
-      leadId: lead._id,
-      type: 'comment',
-      comment: commentParts.join(' | ') || `Call logged for ${sanitizedNumber}`,
-      performedBy: req.user._id,
-      metadata: {
-        communicationId: communication._id,
-        communicationType: 'call',
-        contactNumber: sanitizedNumber,
-        callOutcome: outcome?.trim() || null,
-        durationSeconds: durationSeconds ? Number(durationSeconds) : null,
-      },
-    });
+    // Note: We don't create an ActivityLog comment here because call logs
+    // are already displayed in the Call History section, avoiding duplication
 
     return successResponse(res, communication, 'Call logged successfully', 201);
   } catch (error) {

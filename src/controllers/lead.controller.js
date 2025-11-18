@@ -260,6 +260,27 @@ export const updateLead = async (req, res) => {
     // Regular users can only update status and notes, Super Admin can update everything
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     
+    // Store original values for comparison
+    const originalLead = {
+      name: lead.name,
+      phone: lead.phone,
+      email: lead.email,
+      fatherName: lead.fatherName,
+      fatherPhone: lead.fatherPhone,
+      motherName: lead.motherName,
+      courseInterested: lead.courseInterested,
+      village: lead.village,
+      district: lead.district,
+      mandal: lead.mandal,
+      state: lead.state,
+      quota: lead.quota,
+      gender: lead.gender,
+      rank: lead.rank,
+      interCollege: lead.interCollege,
+      hallTicketNumber: lead.hallTicketNumber,
+      applicationStatus: lead.applicationStatus,
+    };
+    
     // Update fields
     const {
       hallTicketNumber,
@@ -323,7 +344,39 @@ export const updateLead = async (req, res) => {
       }
       if (applicationStatus !== undefined) lead.applicationStatus = applicationStatus;
       if (dynamicFields) lead.dynamicFields = { ...lead.dynamicFields, ...dynamicFields };
-      if (assignedTo) lead.assignedTo = assignedTo;
+      if (assignedTo) {
+        const oldAssignedTo = lead.assignedTo?.toString();
+        const newAssignedTo = assignedTo.toString();
+        
+        // Only log if assignment is actually changing
+        if (oldAssignedTo !== newAssignedTo) {
+          const oldStatus = lead.leadStatus || 'New';
+          lead.assignedTo = assignedTo;
+          lead.assignedAt = new Date();
+          lead.assignedBy = req.user._id;
+          
+          // If status is "New", automatically change to "Assigned"
+          if (oldStatus === 'New' || !oldStatus) {
+            lead.leadStatus = 'Assigned';
+          }
+          
+          // Create activity log for assignment
+          await ActivityLog.create({
+            leadId: lead._id,
+            type: 'status_change',
+            oldStatus: oldStatus,
+            newStatus: lead.leadStatus,
+            comment: `Assigned to counsellor`,
+            performedBy: req.user._id,
+            metadata: {
+              assignment: {
+                assignedTo: newAssignedTo,
+                assignedBy: req.user._id.toString(),
+              },
+            },
+          });
+        }
+      }
       if (source) lead.source = source;
       if (lastFollowUp) lead.lastFollowUp = lastFollowUp;
     }
@@ -333,6 +386,43 @@ export const updateLead = async (req, res) => {
     if (notes !== undefined) lead.notes = notes;
 
     await lead.save();
+
+    // Log field updates (if any fields were changed by Super Admin)
+    if (isSuperAdmin) {
+      const updatedFields = [];
+      if (name && name !== originalLead.name) updatedFields.push('name');
+      if (phone && phone !== originalLead.phone) updatedFields.push('phone');
+      if (email !== undefined && email !== originalLead.email) updatedFields.push('email');
+      if (fatherName && fatherName !== originalLead.fatherName) updatedFields.push('fatherName');
+      if (fatherPhone && fatherPhone !== originalLead.fatherPhone) updatedFields.push('fatherPhone');
+      if (motherName !== undefined && motherName !== originalLead.motherName) updatedFields.push('motherName');
+      if (courseInterested !== undefined && courseInterested !== originalLead.courseInterested) updatedFields.push('courseInterested');
+      if (village && village !== originalLead.village) updatedFields.push('village');
+      if (district && district !== originalLead.district) updatedFields.push('district');
+      if (mandal && mandal !== originalLead.mandal) updatedFields.push('mandal');
+      if (state !== undefined && state !== originalLead.state) updatedFields.push('state');
+      if (quota && quota !== originalLead.quota) updatedFields.push('quota');
+      if (gender !== undefined && gender !== originalLead.gender) updatedFields.push('gender');
+      if (rank !== undefined && rank !== originalLead.rank) updatedFields.push('rank');
+      if (interCollege !== undefined && interCollege !== originalLead.interCollege) updatedFields.push('interCollege');
+      if (hallTicketNumber !== undefined && hallTicketNumber !== originalLead.hallTicketNumber) updatedFields.push('hallTicketNumber');
+      if (applicationStatus !== undefined && applicationStatus !== originalLead.applicationStatus) updatedFields.push('applicationStatus');
+      
+      // Only create activity log if fields were actually changed (excluding assignment which is already logged)
+      if (updatedFields.length > 0 && !assignedTo) {
+        await ActivityLog.create({
+          leadId: lead._id,
+          type: 'comment',
+          comment: `Student details updated: ${updatedFields.join(', ')}`,
+          performedBy: req.user._id,
+          metadata: {
+            fieldUpdate: {
+              updatedFields,
+            },
+          },
+        });
+      }
+    }
 
     return successResponse(res, lead, 'Lead updated successfully', 200);
   } catch (error) {
