@@ -73,9 +73,15 @@ export const sendPushNotificationToUser = async (userId, notification) => {
       icon: notification.icon || '/icon-192x192.png',
       badge: notification.badge || '/icon-192x192.png',
       url: notification.url || '/',
-      data: notification.data || {},
+      data: {
+        ...(notification.data || {}),
+        url: notification.url || '/',
+      },
+      actions: notification.actions || [], // Include action buttons
       timestamp: Date.now(),
     });
+
+    console.log(`[PushNotification] Sending to ${subscriptions.length} subscription(s) for user ${userId}`);
 
     const results = {
       sent: 0,
@@ -94,19 +100,33 @@ export const sendPushNotificationToUser = async (userId, notification) => {
           },
         };
 
+        console.log(`[PushNotification] Attempting to send to subscription ${subscription._id}, endpoint: ${subscription.endpoint.substring(0, 50)}...`);
+        
         await webpush.sendNotification(pushSubscription, payload);
+        
+        console.log(`[PushNotification] Successfully sent to subscription ${subscription._id}`);
         results.sent++;
         return { success: true, subscriptionId: subscription._id };
       } catch (error) {
         results.failed++;
         const errorMessage = error.message || 'Unknown error';
+        const statusCode = error.statusCode || error.code;
+        
+        console.error(`[PushNotification] Failed to send to subscription ${subscription._id}:`, {
+          error: errorMessage,
+          statusCode,
+          endpoint: subscription.endpoint?.substring(0, 50),
+        });
+        
         results.errors.push({
           subscriptionId: subscription._id,
           error: errorMessage,
+          statusCode,
         });
 
         // If subscription is invalid (410 Gone), mark it as inactive
-        if (error.statusCode === 410) {
+        if (statusCode === 410 || errorMessage.includes('410') || errorMessage.includes('Gone')) {
+          console.log(`[PushNotification] Marking subscription ${subscription._id} as inactive (410 Gone)`);
           await PushSubscription.findByIdAndUpdate(subscription._id, {
             isActive: false,
             deactivatedAt: new Date(),
@@ -196,6 +216,8 @@ export const savePushSubscription = async (userId, subscription) => {
   }
 
   try {
+    console.log(`[PushNotification] Saving subscription for user ${userId}, endpoint: ${subscription.endpoint.substring(0, 50)}...`);
+    
     // Check if subscription already exists for this endpoint
     const existing = await PushSubscription.findOne({
       userId,
@@ -204,14 +226,17 @@ export const savePushSubscription = async (userId, subscription) => {
 
     if (existing) {
       // Update existing subscription
+      console.log(`[PushNotification] Updating existing subscription ${existing._id}`);
       existing.keys = subscription.keys;
       existing.isActive = true;
       existing.updatedAt = new Date();
       await existing.save();
+      console.log(`[PushNotification] Subscription ${existing._id} updated successfully`);
       return existing;
     }
 
     // Create new subscription
+    console.log(`[PushNotification] Creating new subscription for user ${userId}`);
     const newSubscription = await PushSubscription.create({
       userId,
       endpoint: subscription.endpoint,
@@ -220,8 +245,10 @@ export const savePushSubscription = async (userId, subscription) => {
         auth: subscription.keys.auth,
       },
       isActive: true,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
     });
 
+    console.log(`[PushNotification] New subscription ${newSubscription._id} created successfully`);
     return newSubscription;
   } catch (error) {
     console.error('[PushNotification] Error saving subscription:', error);

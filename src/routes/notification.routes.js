@@ -5,6 +5,8 @@ import {
   subscribeToPush,
   unsubscribeFromPush,
   sendTestPush,
+  sendTestNotificationsToAll,
+  getUserSubscriptions,
 } from '../controllers/pushNotification.controller.js';
 import {
   getUserNotifications,
@@ -12,6 +14,11 @@ import {
   markAllNotificationsAsRead,
   deleteNotification,
 } from '../controllers/notification.controller.js';
+import {
+  getNotificationConfig,
+  updateNotificationConfig,
+  testEmailChannels,
+} from '../controllers/notificationConfig.controller.js';
 
 const router = express.Router();
 
@@ -26,9 +33,18 @@ router.delete('/:id', deleteNotification);
 
 // Push notification routes
 router.get('/push/vapid-key', getVapidKey);
+router.get('/push/subscriptions', getUserSubscriptions);
 router.post('/push/subscribe', subscribeToPush);
 router.post('/push/unsubscribe', unsubscribeFromPush);
 router.post('/push/test', sendTestPush);
+
+// Test notifications to all users (Super Admin only)
+router.post('/test-all', sendTestNotificationsToAll);
+
+// Notification configuration routes (Super Admin only)
+router.get('/config', getNotificationConfig);
+router.put('/config', updateNotificationConfig);
+router.post('/config/test-email', testEmailChannels);
 
 export default router;
 

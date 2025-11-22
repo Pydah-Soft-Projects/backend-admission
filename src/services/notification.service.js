@@ -1,5 +1,5 @@
 import { sendSmsThroughBulkSmsApps } from './bulkSms.service.js';
-import { sendEmailViaBrevo } from './brevoEmail.service.js';
+import { sendEmail } from './unifiedEmail.service.js';
 import {
   sendPushNotificationToUser,
   sendPushNotificationToUsers,
@@ -215,13 +215,14 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
           </html>
         `;
 
-        await sendEmailViaBrevo({
+        const emailResult = await sendEmail({
           to: user.email,
           subject: emailSubject,
           htmlContent: emailHtml,
         });
 
-        results.email.sent = true;
+        results.email.sent = emailResult.success;
+        results.email.channels = emailResult.channels;
       } catch (error) {
         console.error('[Notification] Error sending email:', error);
         results.email.error = error.message;
