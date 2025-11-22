@@ -7,6 +7,7 @@ import DeleteJob from '../models/DeleteJob.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { notifyLeadCreated } from '../services/notification.service.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
@@ -170,6 +171,11 @@ export const createPublicLead = async (req, res) => {
       source: source || 'Public Form',
     });
 
+    // Send notification to lead (async, don't wait for it)
+    notifyLeadCreated(lead).catch((error) => {
+      console.error('[Lead] Error sending notification to lead:', error);
+    });
+
     return successResponse(res, lead, 'Lead submitted successfully', 201);
   } catch (error) {
     return errorResponse(res, error.message || 'Failed to submit lead', 500);
@@ -233,6 +239,11 @@ export const createLead = async (req, res) => {
       dynamicFields: dynamicFields || {},
       source: source || 'Manual Entry',
       uploadedBy: req.user._id,
+    });
+
+    // Send notification to lead (async, don't wait for it)
+    notifyLeadCreated(lead).catch((error) => {
+      console.error('[Lead] Error sending notification to lead:', error);
     });
 
     return successResponse(res, lead, 'Lead created successfully', 201);

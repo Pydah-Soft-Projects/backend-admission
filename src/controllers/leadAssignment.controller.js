@@ -6,68 +6,108 @@ import Admission from '../models/Admission.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { notifyLeadAssignment } from '../services/notification.service.js';
 
-// @desc    Assign leads to users based on mandal/state
+// @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, count, assignNow = true } = req.body;
+    const { userId, mandal, state, count, leadIds, assignNow = true } = req.body;
 
     // Validate required fields
-    if (!userId || !count) {
-      return errorResponse(res, 'User ID and count are required', 400);
+    if (!userId) {
+      return errorResponse(res, 'User ID is required', 400);
     }
 
-    // Check if user exists
+    // Check if user exists and is assignable (User or Sub Super Admin, not Super Admin)
     const user = await User.findById(userId);
     if (!user) {
       return errorResponse(res, 'User not found', 404);
     }
 
-    // Build filter for unassigned leads
-    // Unassigned means: assignedTo is null or doesn't exist
-    const filter = {
-      $or: [
-        { assignedTo: { $exists: false } },
-        { assignedTo: null },
-      ],
-    };
-
-    // Add mandal filter if provided
-    if (mandal) {
-      filter.mandal = mandal;
+    // Validate that user can receive assignments (User or Sub Super Admin only)
+    if (user.roleName === 'Super Admin') {
+      return errorResponse(res, 'Cannot assign leads to Super Admin', 400);
     }
 
-    // Add state filter if provided
-    if (state) {
-      filter.state = state;
+    if (!user.isActive) {
+      return errorResponse(res, 'Cannot assign leads to inactive user', 400);
     }
 
-    // Get available unassigned leads matching criteria
-    const availableLeads = await Lead.find(filter)
-      .select('_id')
-      .limit(parseInt(count))
-      .lean();
+    let leadIdsToAssign = [];
+    let filter = {};
 
-    if (availableLeads.length === 0) {
-      return successResponse(
-        res,
-        {
-          assigned: 0,
-          requested: parseInt(count),
-          message: 'No unassigned leads found matching the criteria',
-        },
-        'No leads available for assignment',
-        200
-      );
+    // Single assignment mode: assign specific lead IDs
+    if (leadIds && Array.isArray(leadIds) && leadIds.length > 0) {
+      // Validate lead IDs
+      const validLeadIds = leadIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validLeadIds.length === 0) {
+        return errorResponse(res, 'No valid lead IDs provided', 400);
+      }
+
+      // Check if leads exist
+      const existingLeads = await Lead.find({
+        _id: { $in: validLeadIds },
+      }).select('_id assignedTo').lean();
+
+      if (existingLeads.length === 0) {
+        return errorResponse(res, 'No leads found with the provided IDs', 404);
+      }
+
+      leadIdsToAssign = existingLeads.map((lead) => lead._id);
+    } else {
+      // Bulk assignment mode: assign based on filters and count
+      if (!count || count <= 0) {
+        return errorResponse(res, 'Count is required for bulk assignment', 400);
+      }
+
+      // Build filter for unassigned leads
+      // Unassigned means: assignedTo is null or doesn't exist
+      filter = {
+        $or: [
+          { assignedTo: { $exists: false } },
+          { assignedTo: null },
+        ],
+      };
+
+      // Add mandal filter if provided
+      if (mandal) {
+        filter.mandal = mandal;
+      }
+
+      // Add state filter if provided
+      if (state) {
+        filter.state = state;
+      }
+
+      // Get available unassigned leads matching criteria
+      const availableLeads = await Lead.find(filter)
+        .select('_id')
+        .limit(parseInt(count))
+        .lean();
+
+      if (availableLeads.length === 0) {
+        return successResponse(
+          res,
+          {
+            assigned: 0,
+            requested: parseInt(count),
+            message: 'No unassigned leads found matching the criteria',
+          },
+          'No leads available for assignment',
+          200
+        );
+      }
+
+      leadIdsToAssign = availableLeads.map((lead) => lead._id);
     }
 
-    // Assign leads to user
-    const leadIds = availableLeads.map((lead) => lead._id);
-    
     // Get leads before update to check status
-    const leadsToAssign = await Lead.find({ _id: { $in: leadIds } }).lean();
+    const leadsToAssign = await Lead.find({ _id: { $in: leadIdsToAssign } }).lean();
     
     // Update leads and create activity logs
     const activityLogs = [];
@@ -93,7 +133,7 @@ export const assignLeads = async (req, res) => {
         type: 'status_change',
         oldStatus: oldStatus,
         newStatus: newStatus,
-        comment: `Assigned to counsellor ${user.name}`,
+        comment: `Assigned to ${user.roleName === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`,
         performedBy: req.user._id,
         metadata: {
           assignment: {
@@ -112,22 +152,123 @@ export const assignLeads = async (req, res) => {
     
     const result = { modifiedCount: activityLogs.length };
 
+    // Send notifications (async, don't wait for it)
+    const isBulk = !leadIds || leadIds.length === 0;
+    const assignedLeadCount = result.modifiedCount;
+    
+    // Get full lead details for notification (limit to 50 for email display, but send SMS to all)
+    const leadsForNotification = leadsToAssign.slice(0, 50);
+    
+    notifyLeadAssignment({
+      userId,
+      leadCount: assignedLeadCount,
+      leads: leadsForNotification,
+      isBulk,
+      allLeadIds: leadIdsToAssign, // Pass all lead IDs for SMS sending
+    }).catch((error) => {
+      console.error('[LeadAssignment] Error sending notifications:', error);
+    });
+
     return successResponse(
       res,
       {
         assigned: result.modifiedCount,
-        requested: parseInt(count),
+        requested: leadIds ? leadIds.length : parseInt(count),
         userId,
         userName: user.name,
         mandal: mandal || 'All',
         state: state || 'All',
+        mode: leadIds ? 'single' : 'bulk',
       },
-      `Successfully assigned ${result.modifiedCount} leads to ${user.name}`,
+      `Successfully assigned ${result.modifiedCount} lead${result.modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
       200
     );
   } catch (error) {
     console.error('Error assigning leads:', error);
     return errorResponse(res, error.message || 'Failed to assign leads', 500);
+  }
+};
+
+// @desc    Get assignment statistics (unassigned leads count, etc.)
+// @route   GET /api/leads/assign/stats
+// @access  Private (Super Admin only)
+export const getAssignmentStats = async (req, res) => {
+  try {
+    const { mandal, state } = req.query;
+
+    // Build filter for unassigned leads
+    const unassignedFilter = {
+      $or: [
+        { assignedTo: { $exists: false } },
+        { assignedTo: null },
+      ],
+    };
+
+    // Add mandal filter if provided
+    if (mandal) {
+      unassignedFilter.mandal = mandal;
+    }
+
+    // Add state filter if provided
+    if (state) {
+      unassignedFilter.state = state;
+    }
+
+    // Get unassigned leads count
+    const unassignedCount = await Lead.countDocuments(unassignedFilter);
+
+    // Get total leads count
+    const totalLeads = await Lead.countDocuments();
+
+    // Get assigned leads count
+    const assignedCount = totalLeads - unassignedCount;
+
+    // Get breakdown by mandal (for unassigned leads)
+    const mandalBreakdown = await Lead.aggregate([
+      { $match: unassignedFilter },
+      {
+        $group: {
+          _id: '$mandal',
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 20 },
+    ]);
+
+    // Get breakdown by state (for unassigned leads)
+    const stateBreakdown = await Lead.aggregate([
+      { $match: unassignedFilter },
+      {
+        $group: {
+          _id: '$state',
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    return successResponse(
+      res,
+      {
+        totalLeads,
+        assignedCount,
+        unassignedCount,
+        mandalBreakdown: mandalBreakdown.map((item) => ({
+          mandal: item._id || 'Unknown',
+          count: item.count,
+        })),
+        stateBreakdown: stateBreakdown.map((item) => ({
+          state: item._id || 'Unknown',
+          count: item.count,
+        })),
+      },
+      'Assignment statistics retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting assignment stats:', error);
+    return errorResponse(res, error.message || 'Failed to get assignment statistics', 500);
   }
 };
 

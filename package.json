@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seedSuperAdmin.js",
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
+    "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -28,6 +29,7 @@
     "p-queue": "^8.0.1",
     "papaparse": "^5.5.3",
     "uuid": "^13.0.0",
+    "web-push": "^3.6.7",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

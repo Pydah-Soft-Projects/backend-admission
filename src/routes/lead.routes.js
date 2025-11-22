@@ -27,6 +27,7 @@ import {
 } from '../controllers/activityLog.controller.js';
 import {
   assignLeads,
+  getAssignmentStats,
   getUserLeadAnalytics,
   getOverviewAnalytics,
   getUserAnalytics,
@@ -73,6 +74,7 @@ router.delete('/bulk', isSuperAdmin, bulkDeleteLeads);
 router.get('/delete-jobs/:jobId', isSuperAdmin, getDeleteJobStatus);
 
 // Assignment routes (Super Admin only)
+router.get('/assign/stats', isSuperAdmin, getAssignmentStats);
 router.post('/assign', isSuperAdmin, assignLeads);
 
 // Analytics routes

@@ -11,6 +11,8 @@ import joiningRoutes from './routes/joining.routes.js';
 import admissionRoutes from './routes/admission.routes.js';
 import courseRoutes from './routes/course.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
+import notificationRoutes from './routes/notification.routes.js';
+import reportRoutes from './routes/report.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -51,6 +53,8 @@ app.use('/api/joinings', joiningRoutes);
 app.use('/api/admissions', admissionRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/reports', reportRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check
