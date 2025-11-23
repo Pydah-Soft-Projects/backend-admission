@@ -138,7 +138,20 @@ export const createPublicLead = async (req, res) => {
       interCollege,
       dynamicFields,
       source,
+      // UTM Parameters (can come from body or query params)
+      utm_source,
+      utm_medium,
+      utm_campaign,
+      utm_term,
+      utm_content,
     } = req.body;
+
+    // Also check query parameters for UTM (in case they're passed via URL)
+    const utmSource = utm_source || req.query.utm_source;
+    const utmMedium = utm_medium || req.query.utm_medium;
+    const utmCampaign = utm_campaign || req.query.utm_campaign;
+    const utmTerm = utm_term || req.query.utm_term;
+    const utmContent = utm_content || req.query.utm_content;
 
     // Validate required fields
     if (!name || !phone || !fatherName || !fatherPhone || !village || !district || !mandal) {
@@ -147,6 +160,9 @@ export const createPublicLead = async (req, res) => {
 
     // Generate enquiry number
     const enquiryNumber = await generateEnquiryNumber();
+
+    // If UTM source exists, use it as the lead source
+    const leadSource = utmSource ? String(utmSource).trim() : (source || 'Public Form');
 
     const lead = await Lead.create({
       enquiryNumber,
@@ -168,7 +184,13 @@ export const createPublicLead = async (req, res) => {
       rank: rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : undefined,
       interCollege: interCollege ? String(interCollege).trim() : undefined,
       dynamicFields: dynamicFields || {},
-      source: source || 'Public Form',
+      source: leadSource,
+      // UTM Tracking Parameters
+      utmSource: utmSource ? String(utmSource).trim() : undefined,
+      utmMedium: utmMedium ? String(utmMedium).trim() : undefined,
+      utmCampaign: utmCampaign ? String(utmCampaign).trim() : undefined,
+      utmTerm: utmTerm ? String(utmTerm).trim() : undefined,
+      utmContent: utmContent ? String(utmContent).trim() : undefined,
     });
 
     // Send notification to lead (async, don't wait for it)

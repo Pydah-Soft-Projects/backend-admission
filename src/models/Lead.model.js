@@ -74,8 +74,13 @@ const leadSchema = new mongoose.Schema(
     state: {
       type: String,
       trim: true,
-      default: 'Andhra Pradesh',
+      default: '',
       index: true, // Index for faster filtering
+    },
+    isNRI: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     gender: {
       type: String,
@@ -135,6 +140,30 @@ const leadSchema = new mongoose.Schema(
       ref: 'User',
     },
     source: {
+      type: String,
+      trim: true,
+    },
+    // UTM Tracking Parameters
+    utmSource: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    utmMedium: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    utmCampaign: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    utmTerm: {
+      type: String,
+      trim: true,
+    },
+    utmContent: {
       type: String,
       trim: true,
     },
