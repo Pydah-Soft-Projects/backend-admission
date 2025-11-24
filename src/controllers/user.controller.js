@@ -121,11 +121,42 @@ export const updateUser = async (req, res) => {
       user.email = email;
     }
 
+    // Handle isManager boolean (separate from roleName)
+    // Capture the current state BEFORE modifying
+    const wasManager = user.isManager || false;
+    if (req.body.isManager !== undefined) {
+      user.isManager = Boolean(req.body.isManager);
+    }
+
     if (roleName) {
       if (!VALID_ROLES.includes(roleName)) {
         return errorResponse(res, 'Role name must be Super Admin, Sub Super Admin, or User', 400);
       }
+      // Don't allow setting roleName to 'Manager' - use isManager boolean instead
+      if (roleName === 'Manager') {
+        return errorResponse(res, 'Use isManager boolean field instead of setting roleName to Manager', 400);
+      }
       user.roleName = roleName;
+      // If changing role away from Manager-like role, clear isManager
+      if (roleName !== 'User' && roleName !== 'Sub Super Admin') {
+        user.isManager = false;
+      }
+    }
+
+    // Handle managedBy field for team management
+    if (req.body.managedBy !== undefined) {
+      if (req.body.managedBy === null || req.body.managedBy === '') {
+        user.managedBy = null;
+      } else {
+        const manager = await User.findById(req.body.managedBy);
+        if (!manager) {
+          return errorResponse(res, 'Manager not found', 404);
+        }
+        if (!manager.isManager) {
+          return errorResponse(res, 'Only users with Manager privileges can manage team members', 400);
+        }
+        user.managedBy = req.body.managedBy;
+      }
     }
 
     if (typeof isActive === 'boolean') {
@@ -133,11 +164,25 @@ export const updateUser = async (req, res) => {
     }
 
     if (user.roleName === 'User') {
-      if (designation && designation.trim()) {
-        user.designation = designation.trim();
-      } else if (!user.designation) {
+      // Only validate designation requirement if:
+      // 1. Designation is being explicitly updated (provided in request)
+      // 2. Role is being changed TO User (roleName was provided and is 'User')
+      // Do NOT require designation if we're only updating other fields like managedBy, isManager, isActive, etc.
+      const isRoleChangeToUser = roleName === 'User' && user.roleName !== 'User';
+      const isDesignationUpdate = designation !== undefined;
+      
+      if (isDesignationUpdate) {
+        if (designation && designation.trim()) {
+          user.designation = designation.trim();
+        } else if (!user.designation) {
+          // If designation is explicitly set to empty and user doesn't have one, require it
+          return errorResponse(res, 'Designation is required for users', 400);
+        }
+      } else if (isRoleChangeToUser && !user.designation) {
+        // Only require designation if role is being changed TO User and they don't have one
         return errorResponse(res, 'Designation is required for users', 400);
       }
+      // If user already has designation, keep it (don't require it for other updates)
       user.permissions = {};
     } else if (user.roleName === 'Sub Super Admin') {
       if (permissions && typeof permissions !== 'object') {
@@ -146,11 +191,21 @@ export const updateUser = async (req, res) => {
       user.permissions = sanitizePermissions(permissions);
       user.designation = undefined;
     } else {
+      // Super Admin or other roles
       user.permissions = {};
       user.designation = undefined;
     }
 
     await user.save();
+    
+    // If revoking manager, clear managedBy for all team members
+    if (wasManager && !user.isManager) {
+      await User.updateMany(
+        { managedBy: user._id },
+        { $set: { managedBy: null } }
+      );
+    }
+    
     user.password = undefined;
 
     return successResponse(res, user, 'User updated successfully', 200);

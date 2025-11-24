@@ -28,6 +28,16 @@ const userSchema = new mongoose.Schema(
       trim: true,
       enum: ['Super Admin', 'Sub Super Admin', 'User'],
     },
+    managedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    isManager: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     designation: {
       type: String,
       trim: true,
@@ -50,6 +60,7 @@ const userSchema = new mongoose.Schema(
 userSchema.index({ email: 1 });
 userSchema.index({ roleName: 1 });
 userSchema.index({ isActive: 1 });
+userSchema.index({ managedBy: 1 });
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
