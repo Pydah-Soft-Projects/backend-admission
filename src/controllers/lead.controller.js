@@ -32,6 +32,23 @@ export const getLeads = async (req, res) => {
     if (req.query.leadStatus) filter.leadStatus = req.query.leadStatus;
     if (req.query.applicationStatus) filter.applicationStatus = req.query.applicationStatus;
     if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo;
+    if (req.query.courseInterested) filter.courseInterested = req.query.courseInterested;
+    if (req.query.source) filter.source = req.query.source;
+    
+    // Add date filtering for analytics
+    if (req.query.startDate || req.query.endDate) {
+      filter.createdAt = {};
+      if (req.query.startDate) {
+        const start = new Date(req.query.startDate);
+        start.setHours(0, 0, 0, 0);
+        filter.createdAt.$gte = start;
+      }
+      if (req.query.endDate) {
+        const end = new Date(req.query.endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
     if (req.query.enquiryNumber) {
       // Fast search by enquiry number - handle multiple formats
       const searchTerm = req.query.enquiryNumber.trim();
@@ -138,6 +155,7 @@ export const createPublicLead = async (req, res) => {
       interCollege,
       dynamicFields,
       source,
+      isNRI,
       // UTM Parameters (can come from body or query params)
       utm_source,
       utm_medium,
@@ -185,6 +203,7 @@ export const createPublicLead = async (req, res) => {
       interCollege: interCollege ? String(interCollege).trim() : undefined,
       dynamicFields: dynamicFields || {},
       source: leadSource,
+      isNRI: isNRI === true || isNRI === 'true',
       // UTM Tracking Parameters
       utmSource: utmSource ? String(utmSource).trim() : undefined,
       utmMedium: utmMedium ? String(utmMedium).trim() : undefined,

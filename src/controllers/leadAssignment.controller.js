@@ -4,6 +4,7 @@ import User from '../models/User.model.js';
 import Joining from '../models/Joining.model.js';
 import Admission from '../models/Admission.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
+import Communication from '../models/Communication.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
@@ -709,6 +710,26 @@ export const getUserAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
+    const { startDate, endDate } = req.query;
+    
+    // Set date range for filtering activities (calls, SMS, status changes)
+    // NOTE: We don't filter leads by createdAt because we want to show all leads
+    // assigned to the user, but only count activities within the date range
+    let activityDateFilter = {};
+    if (startDate || endDate) {
+      activityDateFilter = {};
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        activityDateFilter.$gte = start;
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        activityDateFilter.$lte = end;
+      }
+    }
+
     // Get all users except Super Admin and Sub Super Admin
     const users = await User.find({
       roleName: { $nin: ['Super Admin', 'Sub Super Admin'] },
@@ -716,17 +737,21 @@ export const getUserAnalytics = async (req, res) => {
       .select('_id name email roleName isActive')
       .lean();
 
-    // Get analytics for each user
+    // Get analytics for each user with comprehensive data including activity logs
     const userAnalytics = await Promise.all(
       users.map(async (user) => {
         const userId = user._id;
 
+        // Build lead filter WITHOUT date range - show all assigned leads
+        // We'll filter activities by date instead
+        const leadFilter = { assignedTo: userId };
+
         // Count total assigned leads
-        const totalAssigned = await Lead.countDocuments({ assignedTo: userId });
+        const totalAssigned = await Lead.countDocuments(leadFilter);
 
         // Get status breakdown for assigned leads
         const statusBreakdown = await Lead.aggregate([
-          { $match: { assignedTo: userId } },
+          { $match: leadFilter },
           {
             $group: {
               _id: '$leadStatus',
@@ -740,14 +765,249 @@ export const getUserAnalytics = async (req, res) => {
           statusMap[item._id || 'Unknown'] = item.count;
         });
 
+        // Get active leads (leads with status not 'Admitted' or 'Closed')
+        const activeLeads = await Lead.countDocuments({
+          ...leadFilter,
+          leadStatus: { $nin: ['Admitted', 'Closed', 'Cancelled'] },
+        });
+
+        // Get converted leads (leads that have admissions)
+        const convertedLeads = await Admission.countDocuments({
+          leadId: { $in: await Lead.find(leadFilter).distinct('_id') },
+        });
+
+        // Get user's leads for activity tracking
+        const userLeads = await Lead.find(leadFilter).select('_id name phone enquiryNumber').lean();
+        const leadIds = userLeads.map((lead) => lead._id);
+        
+        // Get calls made by this user in the period
+        const callFilter = {
+          sentBy: userId,
+          type: 'call',
+        };
+        if (Object.keys(activityDateFilter).length > 0) {
+          callFilter.sentAt = activityDateFilter;
+        }
+
+        const calls = await Communication.find(callFilter)
+          .populate('leadId', 'name phone enquiryNumber')
+          .select('leadId contactNumber durationSeconds callOutcome remarks sentAt')
+          .lean();
+
+        const totalCalls = calls.length;
+        const totalCallDuration = calls.reduce((sum, call) => sum + (call.durationSeconds || 0), 0);
+        const callsByLead = {};
+        calls.forEach((call) => {
+          const leadId = call.leadId?._id?.toString() || 'unknown';
+          if (!callsByLead[leadId]) {
+            callsByLead[leadId] = {
+              leadId,
+              leadName: call.leadId?.name || 'Unknown',
+              leadPhone: call.leadId?.phone || call.contactNumber,
+              enquiryNumber: call.leadId?.enquiryNumber || '',
+              callCount: 0,
+              totalDuration: 0,
+              calls: [],
+            };
+          }
+          callsByLead[leadId].callCount += 1;
+          callsByLead[leadId].totalDuration += call.durationSeconds || 0;
+          callsByLead[leadId].calls.push({
+            date: call.sentAt,
+            duration: call.durationSeconds || 0,
+            outcome: call.callOutcome || 'N/A',
+            remarks: call.remarks || '',
+          });
+        });
+
+        // Get SMS/texts sent by this user in the period
+        const smsFilter = {
+          sentBy: userId,
+          type: 'sms',
+        };
+        if (Object.keys(activityDateFilter).length > 0) {
+          smsFilter.sentAt = activityDateFilter;
+        }
+
+        const smsMessages = await Communication.find(smsFilter)
+          .populate('leadId', 'name phone enquiryNumber')
+          .select('leadId contactNumber template sentAt status')
+          .lean();
+
+        const totalSMS = smsMessages.length;
+        const smsByLead = {};
+        const templateUsage = {};
+
+        smsMessages.forEach((sms) => {
+          const leadId = sms.leadId?._id?.toString() || 'unknown';
+          if (!smsByLead[leadId]) {
+            smsByLead[leadId] = {
+              leadId,
+              leadName: sms.leadId?.name || 'Unknown',
+              leadPhone: sms.leadId?.phone || sms.contactNumber,
+              enquiryNumber: sms.leadId?.enquiryNumber || '',
+              smsCount: 0,
+              messages: [],
+            };
+          }
+          smsByLead[leadId].smsCount += 1;
+          smsByLead[leadId].messages.push({
+            date: sms.sentAt,
+            template: sms.template?.name || 'Custom',
+            status: sms.status || 'unknown',
+          });
+
+          // Track template usage
+          const templateName = sms.template?.name || 'Custom';
+          if (!templateUsage[templateName]) {
+            templateUsage[templateName] = {
+              name: templateName,
+              count: 0,
+              leads: new Set(),
+            };
+          }
+          templateUsage[templateName].count += 1;
+          if (leadId !== 'unknown') {
+            templateUsage[templateName].leads.add(leadId);
+          }
+        });
+
+        // Convert template usage Set to count
+        const templateUsageArray = Object.values(templateUsage).map((t) => ({
+          name: t.name,
+          count: t.count,
+          uniqueLeads: t.leads.size,
+        }));
+
+        // Get status conversions made by this user in the period
+        const statusChangeFilter = {
+          performedBy: userId,
+          type: 'status_change',
+        };
+        if (Object.keys(activityDateFilter).length > 0) {
+          statusChangeFilter.createdAt = activityDateFilter;
+        }
+
+        const statusChanges = await ActivityLog.find(statusChangeFilter)
+          .populate('leadId', 'name phone enquiryNumber')
+          .select('leadId oldStatus newStatus createdAt')
+          .lean();
+
+        const totalStatusChanges = statusChanges.length;
+        const statusConversions = {};
+        const conversionsByLead = {};
+
+        statusChanges.forEach((change) => {
+          const conversion = `${change.oldStatus || 'Unknown'} → ${change.newStatus || 'Unknown'}`;
+          if (!statusConversions[conversion]) {
+            statusConversions[conversion] = 0;
+          }
+          statusConversions[conversion] += 1;
+
+          const leadId = change.leadId?._id?.toString() || 'unknown';
+          if (!conversionsByLead[leadId]) {
+            conversionsByLead[leadId] = {
+              leadId,
+              leadName: change.leadId?.name || 'Unknown',
+              leadPhone: change.leadId?.phone || '',
+              enquiryNumber: change.leadId?.enquiryNumber || '',
+              conversions: [],
+            };
+          }
+          conversionsByLead[leadId].conversions.push({
+            from: change.oldStatus || 'Unknown',
+            to: change.newStatus || 'Unknown',
+            date: change.createdAt,
+          });
+        });
+
+        // Get activity logs count for this user's leads
+        const activityLogsCount = leadIds.length > 0
+          ? await ActivityLog.countDocuments({
+              leadId: { $in: leadIds },
+            })
+          : 0;
+
+        // Get recent activity (last 7 days)
+        const recentActivityFilter = {
+          leadId: { $in: leadIds },
+          createdAt: {
+            $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+          },
+        };
+        const recentActivityCount = leadIds.length > 0
+          ? await ActivityLog.countDocuments(recentActivityFilter)
+          : 0;
+
+        // Get source breakdown for assigned leads
+        const sourceBreakdown = await Lead.aggregate([
+          { $match: leadFilter },
+          {
+            $group: {
+              _id: '$source',
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 },
+        ]);
+
+        const sourceMap = {};
+        sourceBreakdown.forEach((item) => {
+          sourceMap[item._id || 'Unknown'] = item.count;
+        });
+
+        // Get course breakdown
+        const courseBreakdown = await Lead.aggregate([
+          { $match: leadFilter },
+          {
+            $group: {
+              _id: '$courseInterested',
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 },
+        ]);
+
+        const courseMap = {};
+        courseBreakdown.forEach((item) => {
+          courseMap[item._id || 'Unknown'] = item.count;
+        });
+
         return {
           userId: userId.toString(),
+          userName: user.name,
           name: user.name,
           email: user.email,
           roleName: user.roleName,
           isActive: user.isActive,
           totalAssigned,
+          activeLeads,
+          convertedLeads,
+          conversionRate: totalAssigned > 0 ? parseFloat(((convertedLeads / totalAssigned) * 100).toFixed(2)) : 0,
           statusBreakdown: statusMap,
+          sourceBreakdown: sourceMap,
+          courseBreakdown: courseMap,
+          activityLogsCount,
+          recentActivityCount,
+          // Detailed communication and activity data
+          calls: {
+            total: totalCalls,
+            totalDuration: totalCallDuration,
+            averageDuration: totalCalls > 0 ? Math.round(totalCallDuration / totalCalls) : 0,
+            byLead: Object.values(callsByLead),
+          },
+          sms: {
+            total: totalSMS,
+            byLead: Object.values(smsByLead),
+            templateUsage: templateUsageArray.sort((a, b) => b.count - a.count),
+          },
+          statusConversions: {
+            total: totalStatusChanges,
+            breakdown: statusConversions,
+            byLead: Object.values(conversionsByLead),
+          },
         };
       }),
     );

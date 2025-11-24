@@ -3,6 +3,7 @@ import Communication from '../models/Communication.model.js';
 import Lead from '../models/Lead.model.js';
 import Admission from '../models/Admission.model.js';
 import User from '../models/User.model.js';
+import ActivityLog from '../models/ActivityLog.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
@@ -277,7 +278,65 @@ export const getConversionReports = async (req, res) => {
       }
     });
 
-    // Calculate conversions for each user
+    // Get status conversions from activity logs for the period
+    const statusChangeFilter = {
+      type: 'status_change',
+      createdAt: { $gte: start, $lte: end },
+    };
+
+    const statusChanges = await ActivityLog.find(statusChangeFilter)
+      .populate('leadId', 'assignedTo name enquiryNumber')
+      .populate('performedBy', 'name email')
+      .select('leadId oldStatus newStatus performedBy createdAt')
+      .lean();
+
+    // Group status changes by user
+    const userStatusChanges = {};
+    statusChanges.forEach((change) => {
+      if (change.leadId && change.leadId.assignedTo) {
+        const userId = change.leadId.assignedTo.toString();
+        if (!userStatusChanges[userId]) {
+          userStatusChanges[userId] = [];
+        }
+        userStatusChanges[userId].push({
+          leadId: change.leadId._id?.toString(),
+          leadName: change.leadId.name || 'Unknown',
+          enquiryNumber: change.leadId.enquiryNumber || '',
+          from: change.oldStatus || 'Unknown',
+          to: change.newStatus || 'Unknown',
+          performedBy: change.performedBy?.name || 'Unknown',
+          date: change.createdAt,
+        });
+      }
+    });
+
+    // Pre-calculate confirmed leads count for all users
+    const userIds = Object.keys(userLeadMap).map(id => new mongoose.Types.ObjectId(id));
+    const confirmedLeadsMap = {};
+    
+    if (userIds.length > 0) {
+      const confirmedLeadsAggregation = await Lead.aggregate([
+        {
+          $match: {
+            assignedTo: { $in: userIds },
+            leadStatus: 'Confirmed',
+            createdAt: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $group: {
+            _id: '$assignedTo',
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+
+      confirmedLeadsAggregation.forEach((item) => {
+        confirmedLeadsMap[item._id.toString()] = item.count || 0;
+      });
+    }
+
+    // Calculate conversions for each user with status change data
     const conversionReports = Object.values(userLeadMap).map((userData) => {
       if (!userData || !userData.leads) {
         return null;
@@ -287,6 +346,19 @@ export const getConversionReports = async (req, res) => {
       const convertedLeads = admissionsForUser.length || 0;
       const conversionRate = totalLeads > 0 ? parseFloat(((convertedLeads / totalLeads) * 100).toFixed(2)) : 0;
 
+      // Get status changes for this user's leads
+      const userStatusChangesList = userStatusChanges[userData.userId] || [];
+      
+      // Count status conversions (e.g., New → Interested, Interested → Confirmed)
+      const statusConversionCounts = {};
+      userStatusChangesList.forEach((change) => {
+        const conversion = `${change.from} → ${change.to}`;
+        statusConversionCounts[conversion] = (statusConversionCounts[conversion] || 0) + 1;
+      });
+
+      // Get confirmed leads count from pre-calculated map
+      const confirmedLeads = confirmedLeadsMap[userData.userId] || 0;
+
       return {
         userId: userData.userId || 'unknown',
         userName: userData.userName || 'Unknown',
@@ -294,7 +366,10 @@ export const getConversionReports = async (req, res) => {
         roleName: userData.roleName || 'User',
         totalLeads,
         convertedLeads,
+        confirmedLeads,
         conversionRate,
+        statusConversions: statusConversionCounts,
+        statusChangeCount: userStatusChangesList.length,
         admissions: (admissionsForUser || []).map((adm) => ({
           admissionId: adm?._id?.toString() || 'N/A',
           admissionDate: adm?.admissionDate || null,
