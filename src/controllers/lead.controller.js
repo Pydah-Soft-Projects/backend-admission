@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
 import Lead from '../models/Lead.model.js';
+import User from '../models/User.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import DeleteJob from '../models/DeleteJob.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
@@ -119,8 +120,30 @@ export const getLead = async (req, res) => {
       return errorResponse(res, 'Lead not found', 404);
     }
 
-    // Check if user has access (Super Admin or assigned to this lead)
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?._id?.toString() !== req.user._id.toString()) {
+    // Check if user has access
+    let hasAccess = false;
+
+    // Super Admin always has access
+    if (hasElevatedAdminPrivileges(req.user.roleName)) {
+      hasAccess = true;
+    }
+    // If lead is assigned to the user, they have access
+    else if (lead.assignedTo?._id?.toString() === req.user._id.toString()) {
+      hasAccess = true;
+    }
+    // If user is a Manager, check if lead is assigned to one of their team members
+    else if (req.user.isManager) {
+      const teamMembers = await User.find({ managedBy: req.user._id }).select('_id');
+      const teamMemberIds = teamMembers.map((member) => member._id.toString());
+      
+      // Check if lead is assigned to manager or any team member
+      const assignedToId = lead.assignedTo?._id?.toString();
+      if (assignedToId && (assignedToId === req.user._id.toString() || teamMemberIds.includes(assignedToId))) {
+        hasAccess = true;
+      }
+    }
+
+    if (!hasAccess) {
       return errorResponse(res, 'Access denied', 403);
     }
 

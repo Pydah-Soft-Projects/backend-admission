@@ -204,32 +204,51 @@ export const getManagerAnalytics = async (req, res) => {
         const memberLeads = await Lead.find({ assignedTo: member._id });
         const memberLeadIds = memberLeads.map((lead) => lead._id);
 
-        // Get today's calls for this member
+        // Get today's date range
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
         const todayEnd = new Date();
         todayEnd.setHours(23, 59, 59, 999);
 
+        // Get today's calls made by this member (from Communication logs)
+        // Ensure member._id is ObjectId for proper querying
+        let memberUserId = member._id;
+        if (!(member._id instanceof mongoose.Types.ObjectId)) {
+          try {
+            memberUserId = new mongoose.Types.ObjectId(member._id);
+          } catch (e) {
+            memberUserId = member._id;
+          }
+        }
+
         const todayCalls = await Communication.countDocuments({
-          leadId: { $in: memberLeadIds },
+          sentBy: memberUserId,
           type: 'call',
-          createdAt: { $gte: todayStart, $lte: todayEnd },
+          sentAt: { $gte: todayStart, $lte: todayEnd },
         });
 
-        // Get today's activity logs
+        // Get today's SMS sent by this member (from Communication logs)
+        const todaySMS = await Communication.countDocuments({
+          sentBy: memberUserId,
+          type: 'sms',
+          sentAt: { $gte: todayStart, $lte: todayEnd },
+        });
+
+        // Get today's activity logs performed by this member (from ActivityLog)
         const todayActivities = await ActivityLog.countDocuments({
-          leadId: { $in: memberLeadIds },
+          performedBy: memberUserId,
           createdAt: { $gte: todayStart, $lte: todayEnd },
         });
 
-        // Get status conversions
+        // Get status conversions performed by this member (from ActivityLog)
         const statusChanges = await ActivityLog.find({
-          leadId: { $in: memberLeadIds },
-          activityType: 'status_change',
+          performedBy: memberUserId,
+          type: 'status_change',
         })
           .populate('leadId', 'name phone enquiryNumber')
           .sort({ createdAt: -1 })
-          .limit(100);
+          .limit(100)
+          .lean();
 
         const conversions = {};
         statusChanges.forEach((change) => {
@@ -254,6 +273,7 @@ export const getManagerAnalytics = async (req, res) => {
           totalLeads: memberLeads.length,
           confirmedLeads: memberConfirmed,
           todayCalls,
+          todaySMS,
           todayActivities,
           statusConversions: conversions,
         };
@@ -264,19 +284,39 @@ export const getManagerAnalytics = async (req, res) => {
     const managerLeads = await Lead.find({ assignedTo: managerId });
     const managerLeadIds = managerLeads.map((lead) => lead._id);
 
+    // Get today's date range
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const todayEnd = new Date();
     todayEnd.setHours(23, 59, 59, 999);
 
+    // Ensure managerId is ObjectId for proper querying
+    let managerUserId = managerId;
+    if (!(managerId instanceof mongoose.Types.ObjectId)) {
+      try {
+        managerUserId = new mongoose.Types.ObjectId(managerId);
+      } catch (e) {
+        managerUserId = managerId;
+      }
+    }
+
+    // Get today's calls made by manager (from Communication logs)
     const managerTodayCalls = await Communication.countDocuments({
-      leadId: { $in: managerLeadIds },
+      sentBy: managerUserId,
       type: 'call',
-      createdAt: { $gte: todayStart, $lte: todayEnd },
+      sentAt: { $gte: todayStart, $lte: todayEnd },
     });
 
+    // Get today's SMS sent by manager (from Communication logs)
+    const managerTodaySMS = await Communication.countDocuments({
+      sentBy: managerUserId,
+      type: 'sms',
+      sentAt: { $gte: todayStart, $lte: todayEnd },
+    });
+
+    // Get today's activity logs performed by manager (from ActivityLog)
     const managerTodayActivities = await ActivityLog.countDocuments({
-      leadId: { $in: managerLeadIds },
+      performedBy: managerUserId,
       createdAt: { $gte: todayStart, $lte: todayEnd },
     });
 
@@ -316,6 +356,7 @@ export const getManagerAnalytics = async (req, res) => {
           totalLeads: managerLeads.length,
           confirmedLeads: managerConfirmed,
           todayCalls: managerTodayCalls,
+          todaySMS: managerTodaySMS,
           todayActivities: managerTodayActivities,
         },
         unfollowedLeads: unfollowedLeads.map((lead) => ({

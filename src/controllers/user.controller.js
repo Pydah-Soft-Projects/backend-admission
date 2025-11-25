@@ -35,13 +35,33 @@ export const getUsers = async (req, res) => {
 
 // @desc    Get single user
 // @route   GET /api/users/:id
-// @access  Private (Super Admin)
+// @access  Private (Super Admin or Manager for their team members)
 export const getUser = async (req, res) => {
   try {
+    const isAdmin = req.user.roleName === 'Super Admin' || req.user.roleName === 'Sub Super Admin';
+    const isManager = req.user.isManager === true;
+
+    // If not admin or manager, deny access
+    if (!isAdmin && !isManager) {
+      return errorResponse(res, 'Access denied', 403);
+    }
+
     const user = await User.findById(req.params.id).select('-password');
 
     if (!user) {
       return errorResponse(res, 'User not found', 404);
+    }
+
+    // If manager (not admin), check if the requested user is in their team
+    if (isManager && !isAdmin) {
+      // Check if the user is managed by this manager
+      // Handle both ObjectId and populated object cases
+      const managedById = user.managedBy?._id?.toString() || user.managedBy?.toString();
+      const managerId = req.user._id.toString();
+      
+      if (managedById !== managerId) {
+        return errorResponse(res, 'Access denied. You can only view your team members.', 403);
+      }
     }
 
     return successResponse(res, user, 'User retrieved successfully', 200);

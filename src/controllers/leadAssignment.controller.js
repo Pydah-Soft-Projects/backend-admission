@@ -706,11 +706,15 @@ export const getOverviewAnalytics = async (req, res) => {
 // @access  Private (Super Admin)
 export const getUserAnalytics = async (req, res) => {
   try {
-    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+    // Allow Super Admin, Sub Super Admin, and Managers
+    const isAdmin = hasElevatedAdminPrivileges(req.user.roleName);
+    const isManager = req.user.isManager === true;
+    
+    if (!isAdmin && !isManager) {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, userId } = req.query;
     
     // Set date range for filtering activities (calls, SMS, status changes)
     // NOTE: We don't filter leads by createdAt because we want to show all leads
@@ -730,10 +734,26 @@ export const getUserAnalytics = async (req, res) => {
       }
     }
 
-    // Get all users except Super Admin and Sub Super Admin
-    const users = await User.find({
+    // Build user filter
+    let userFilter = {
       roleName: { $nin: ['Super Admin', 'Sub Super Admin'] },
-    })
+    };
+
+    // If manager, only show their team members
+    if (isManager && !isAdmin) {
+      userFilter.managedBy = req.user._id;
+    }
+
+    // If userId is provided, filter to that specific user
+    if (userId) {
+      // Convert string userId to ObjectId if needed
+      userFilter._id = mongoose.Types.ObjectId.isValid(userId) 
+        ? new mongoose.Types.ObjectId(userId) 
+        : userId;
+    }
+
+    // Get users based on filter
+    const users = await User.find(userFilter)
       .select('_id name email roleName isActive')
       .lean();
 
@@ -781,8 +801,18 @@ export const getUserAnalytics = async (req, res) => {
         const leadIds = userLeads.map((lead) => lead._id);
         
         // Get calls made by this user in the period
+        // Ensure userId is properly formatted for querying
+        let callUserId = userId;
+        if (!(userId instanceof mongoose.Types.ObjectId)) {
+          try {
+            callUserId = new mongoose.Types.ObjectId(userId);
+          } catch (e) {
+            // If conversion fails, use original value (mongoose might handle it)
+            callUserId = userId;
+          }
+        }
         const callFilter = {
-          sentBy: userId,
+          sentBy: callUserId,
           type: 'call',
         };
         if (Object.keys(activityDateFilter).length > 0) {
@@ -821,8 +851,18 @@ export const getUserAnalytics = async (req, res) => {
         });
 
         // Get SMS/texts sent by this user in the period
+        // Ensure userId is properly formatted for querying
+        let smsUserId = userId;
+        if (!(userId instanceof mongoose.Types.ObjectId)) {
+          try {
+            smsUserId = new mongoose.Types.ObjectId(userId);
+          } catch (e) {
+            // If conversion fails, use original value (mongoose might handle it)
+            smsUserId = userId;
+          }
+        }
         const smsFilter = {
-          sentBy: userId,
+          sentBy: smsUserId,
           type: 'sms',
         };
         if (Object.keys(activityDateFilter).length > 0) {
@@ -880,8 +920,18 @@ export const getUserAnalytics = async (req, res) => {
         }));
 
         // Get status conversions made by this user in the period
+        // Ensure userId is properly formatted for querying
+        let activityUserId = userId;
+        if (!(userId instanceof mongoose.Types.ObjectId)) {
+          try {
+            activityUserId = new mongoose.Types.ObjectId(userId);
+          } catch (e) {
+            // If conversion fails, use original value (mongoose might handle it)
+            activityUserId = userId;
+          }
+        }
         const statusChangeFilter = {
-          performedBy: userId,
+          performedBy: activityUserId,
           type: 'status_change',
         };
         if (Object.keys(activityDateFilter).length > 0) {
