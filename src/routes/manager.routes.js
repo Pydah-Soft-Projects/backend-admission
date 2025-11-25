@@ -5,6 +5,7 @@ import {
   getManagerAnalytics,
   getUnfollowedLeads,
   notifyTeam,
+  getTeamAnalyticsForAdmin,
 } from '../controllers/manager.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
@@ -27,6 +28,9 @@ router.get('/unfollowed-leads', getUnfollowedLeads);
 
 // Send notifications to team
 router.post('/notify-team', notifyTeam);
+
+// Get team analytics for super admin (by manager ID)
+router.get('/team-analytics/:managerId', getTeamAnalyticsForAdmin);
 
 export default router;
 

@@ -4,6 +4,7 @@ import Lead from '../models/Lead.model.js';
 import ActivityLog from '../models/ActivityLog.model.js';
 import Communication from '../models/Communication.model.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Get manager's team members
 // @route   GET /api/manager/team
@@ -325,22 +326,66 @@ export const getManagerAnalytics = async (req, res) => {
       leadStatus: 'Confirmed',
     });
 
-    // Unfollowed leads (leads with no activity in last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    // Find unfollowed leads
+    // A lead is unfollowed if the assigned user has:
+    // - No calls for that lead
+    // - No SMS for that lead
+    // - No activity logs (except status_change to "Assigned")
+    const unfollowedLeads = [];
+    
+    for (const lead of allLeads) {
+      const assignedUserId = lead.assignedTo?.toString() || lead.assignedTo;
+      if (!assignedUserId) continue;
 
-    const allLeadIds = allLeads.map((lead) => lead._id);
-    const leadsWithRecentActivity = await ActivityLog.distinct('leadId', {
-      leadId: { $in: allLeadIds },
-      createdAt: { $gte: sevenDaysAgo },
-    });
+      let userObjId = assignedUserId;
+      if (!(assignedUserId instanceof mongoose.Types.ObjectId)) {
+        try {
+          userObjId = new mongoose.Types.ObjectId(assignedUserId);
+        } catch (e) {
+          userObjId = assignedUserId;
+        }
+      }
 
-    const unfollowedLeadIds = allLeadIds.filter(
-      (leadId) => !leadsWithRecentActivity.some((activeId) => activeId.toString() === leadId.toString())
-    );
+      // Check for calls from assigned user for this lead
+      const hasCalls = await Communication.exists({
+        leadId: lead._id,
+        sentBy: userObjId,
+        type: 'call',
+      });
 
-    const unfollowedLeads = await Lead.find({
-      _id: { $in: unfollowedLeadIds },
+      // Check for SMS from assigned user for this lead
+      const hasSMS = await Communication.exists({
+        leadId: lead._id,
+        sentBy: userObjId,
+        type: 'sms',
+      });
+
+      // Check for activity logs from assigned user for this lead
+      // Exclude status_change to "Assigned" with null oldStatus (initial assignment)
+      const hasActivity = await ActivityLog.exists({
+        leadId: lead._id,
+        performedBy: userObjId,
+        $or: [
+          { type: { $ne: 'status_change' } },
+          { 
+            type: 'status_change',
+            $or: [
+              { newStatus: { $ne: 'Assigned' } },
+              { oldStatus: { $ne: null } } // If oldStatus exists, it's not the initial assignment
+            ]
+          }
+        ]
+      });
+
+      // If no calls, no SMS, and no activity (except assignment), it's unfollowed
+      if (!hasCalls && !hasSMS && !hasActivity) {
+        unfollowedLeads.push(lead);
+      }
+    }
+
+    // Populate assignedTo and limit
+    const populatedUnfollowedLeads = await Lead.find({
+      _id: { $in: unfollowedLeads.map(l => l._id) },
     })
       .populate('assignedTo', 'name email')
       .limit(100);
@@ -359,7 +404,7 @@ export const getManagerAnalytics = async (req, res) => {
           todaySMS: managerTodaySMS,
           todayActivities: managerTodayActivities,
         },
-        unfollowedLeads: unfollowedLeads.map((lead) => ({
+        unfollowedLeads: populatedUnfollowedLeads.map((lead) => ({
           _id: lead._id,
           enquiryNumber: lead.enquiryNumber,
           name: lead.name,
@@ -368,7 +413,7 @@ export const getManagerAnalytics = async (req, res) => {
           assignedTo: lead.assignedTo,
           lastFollowUp: lead.lastFollowUp,
         })),
-        unfollowedCount: unfollowedLeads.length,
+        unfollowedCount: populatedUnfollowedLeads.length,
       },
       'Manager analytics retrieved successfully',
       200
@@ -400,25 +445,66 @@ export const getUnfollowedLeads = async (req, res) => {
     const allLeads = await Lead.find({ assignedTo: { $in: allUserIds } });
     const allLeadIds = allLeads.map((lead) => lead._id);
 
-    // Days threshold (default 7 days)
-    const daysThreshold = parseInt(req.query.days) || 7;
-    const thresholdDate = new Date();
-    thresholdDate.setDate(thresholdDate.getDate() - daysThreshold);
-
-    // Get leads with recent activity
-    const leadsWithRecentActivity = await ActivityLog.distinct('leadId', {
-      leadId: { $in: allLeadIds },
-      createdAt: { $gte: thresholdDate },
-    });
-
     // Find unfollowed leads
-    const unfollowedLeadIds = allLeadIds.filter(
-      (leadId) => !leadsWithRecentActivity.some((activeId) => activeId.toString() === leadId.toString())
-    );
+    // A lead is unfollowed if the assigned user has:
+    // - No calls for that lead
+    // - No SMS for that lead
+    // - No activity logs (except status_change to "Assigned")
+    const unfollowedLeads = [];
+    
+    for (const lead of allLeads) {
+      const assignedUserId = lead.assignedTo?.toString() || lead.assignedTo;
+      if (!assignedUserId) continue;
 
-    // Get unfollowed leads with details
-    const unfollowedLeads = await Lead.find({
-      _id: { $in: unfollowedLeadIds },
+      let userObjId = assignedUserId;
+      if (!(assignedUserId instanceof mongoose.Types.ObjectId)) {
+        try {
+          userObjId = new mongoose.Types.ObjectId(assignedUserId);
+        } catch (e) {
+          userObjId = assignedUserId;
+        }
+      }
+
+      // Check for calls from assigned user for this lead
+      const hasCalls = await Communication.exists({
+        leadId: lead._id,
+        sentBy: userObjId,
+        type: 'call',
+      });
+
+      // Check for SMS from assigned user for this lead
+      const hasSMS = await Communication.exists({
+        leadId: lead._id,
+        sentBy: userObjId,
+        type: 'sms',
+      });
+
+      // Check for activity logs from assigned user for this lead
+      // Exclude status_change to "Assigned" with null oldStatus (initial assignment)
+      const hasActivity = await ActivityLog.exists({
+        leadId: lead._id,
+        performedBy: userObjId,
+        $or: [
+          { type: { $ne: 'status_change' } },
+          { 
+            type: 'status_change',
+            $or: [
+              { newStatus: { $ne: 'Assigned' } },
+              { oldStatus: { $ne: null } } // If oldStatus exists, it's not the initial assignment
+            ]
+          }
+        ]
+      });
+
+      // If no calls, no SMS, and no activity (except assignment), it's unfollowed
+      if (!hasCalls && !hasSMS && !hasActivity) {
+        unfollowedLeads.push(lead);
+      }
+    }
+
+    // Populate assignedTo and sort
+    const populatedLeads = await Lead.find({
+      _id: { $in: unfollowedLeads.map(l => l._id) },
     })
       .populate('assignedTo', 'name email roleName')
       .sort({ createdAt: -1 })
@@ -427,9 +513,8 @@ export const getUnfollowedLeads = async (req, res) => {
     return successResponse(
       res,
       {
-        leads: unfollowedLeads,
-        count: unfollowedLeads.length,
-        thresholdDays: daysThreshold,
+        leads: populatedLeads,
+        count: populatedLeads.length,
       },
       'Unfollowed leads retrieved successfully',
       200
@@ -495,6 +580,338 @@ export const notifyTeam = async (req, res) => {
     );
   } catch (error) {
     return errorResponse(res, error.message || 'Failed to send notifications', 500);
+  }
+};
+
+// @desc    Get team analytics for super admin (by manager ID)
+// @route   GET /api/manager/team-analytics/:managerId
+// @access  Private (Super Admin only)
+export const getTeamAnalyticsForAdmin = async (req, res) => {
+  try {
+    // Only Super Admin can access this
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Only Super Admin can access this endpoint', 403);
+    }
+
+    const managerId = req.params.managerId;
+
+    // Verify manager exists and is actually a manager
+    const manager = await User.findById(managerId).select('_id name email roleName isManager');
+    if (!manager) {
+      return errorResponse(res, 'Manager not found', 404);
+    }
+    if (!manager.isManager) {
+      return errorResponse(res, 'User is not a manager', 400);
+    }
+
+    // Get team member IDs
+    const teamMembers = await User.find({ managedBy: managerId }).select('_id name email roleName');
+    const teamMemberIds = teamMembers.map((member) => member._id);
+    const allUserIds = [managerId, ...teamMemberIds];
+
+    // Date filtering for activities (calls, SMS, status changes)
+    let activityDateFilter = {};
+    if (req.query.startDate || req.query.endDate) {
+      if (req.query.startDate) {
+        const start = new Date(req.query.startDate);
+        start.setHours(0, 0, 0, 0);
+        activityDateFilter.$gte = start;
+      }
+      if (req.query.endDate) {
+        const end = new Date(req.query.endDate);
+        end.setHours(23, 59, 59, 999);
+        activityDateFilter.$lte = end;
+      }
+    }
+
+    // Get all leads assigned to manager and team (no date filter on leads - show all assigned)
+    const leadFilter = {
+      assignedTo: { $in: allUserIds },
+    };
+
+    const allLeads = await Lead.find(leadFilter);
+    const allLeadIds = allLeads.map((lead) => lead._id);
+
+    // Total leads
+    const totalLeads = allLeads.length;
+
+    // Team status breakdown
+    const statusBreakdown = await Lead.aggregate([
+      { $match: leadFilter },
+      {
+        $group: {
+          _id: '$leadStatus',
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    const statusMap = {};
+    statusBreakdown.forEach((item) => {
+      statusMap[item._id || 'Not Provided'] = item.count;
+    });
+
+    // Confirmed leads
+    const confirmedLeads = await Lead.countDocuments({
+      ...leadFilter,
+      leadStatus: 'Confirmed',
+    });
+
+    // Team calls and SMS (within date range)
+    let teamCalls = 0;
+    let teamSMS = 0;
+    if (Object.keys(activityDateFilter).length > 0) {
+      const userIdsForQuery = allUserIds.map(id => {
+        if (id instanceof mongoose.Types.ObjectId) return id;
+        if (mongoose.Types.ObjectId.isValid(id)) return new mongoose.Types.ObjectId(id);
+        return id;
+      });
+
+      const callFilter = {
+        sentBy: { $in: userIdsForQuery },
+        type: 'call',
+        sentAt: activityDateFilter,
+      };
+      teamCalls = await Communication.countDocuments(callFilter);
+
+      const smsFilter = {
+        sentBy: { $in: userIdsForQuery },
+        type: 'sms',
+        sentAt: activityDateFilter,
+      };
+      teamSMS = await Communication.countDocuments(smsFilter);
+    }
+
+    // Team status changes (within date range)
+    let teamStatusChanges = 0;
+    if (Object.keys(activityDateFilter).length > 0) {
+      const userIdsForQuery = allUserIds.map(id => {
+        if (id instanceof mongoose.Types.ObjectId) return id;
+        if (mongoose.Types.ObjectId.isValid(id)) return new mongoose.Types.ObjectId(id);
+        return id;
+      });
+
+      const statusChangeFilter = {
+        performedBy: { $in: userIdsForQuery },
+        type: 'status_change',
+        createdAt: activityDateFilter,
+      };
+      teamStatusChanges = await ActivityLog.countDocuments(statusChangeFilter);
+    }
+
+    // Calculate total unfollowed leads across all team members
+    // A lead is unfollowed if the assigned user has no calls, SMS, or activity logs (except assignment)
+    let totalUnfollowedLeads = 0;
+    for (const userId of allUserIds) {
+      let userObjId = userId;
+      if (!(userId instanceof mongoose.Types.ObjectId)) {
+        try {
+          userObjId = new mongoose.Types.ObjectId(userId);
+        } catch (e) {
+          userObjId = userId;
+        }
+      }
+
+      const userLeads = await Lead.find({ assignedTo: userId });
+      const userLeadIds = userLeads.map((lead) => lead._id);
+
+      for (const leadId of userLeadIds) {
+        // Check for calls from this user for this lead
+        const hasCalls = await Communication.exists({
+          leadId: leadId,
+          sentBy: userObjId,
+          type: 'call',
+        });
+
+        // Check for SMS from this user for this lead
+        const hasSMS = await Communication.exists({
+          leadId: leadId,
+          sentBy: userObjId,
+          type: 'sms',
+        });
+
+        // Check for activity logs from this user for this lead
+        // Exclude status_change to "Assigned" (assignment itself)
+        const hasActivity = await ActivityLog.exists({
+          leadId: leadId,
+          performedBy: userObjId,
+          $or: [
+            { type: { $ne: 'status_change' } },
+            { 
+              type: 'status_change',
+              $or: [
+                { newStatus: { $ne: 'Assigned' } },
+                { oldStatus: { $ne: null } } // If oldStatus exists, it's not the initial assignment
+              ]
+            }
+          ]
+        });
+
+        // If no calls, no SMS, and no activity (except assignment), it's unfollowed
+        if (!hasCalls && !hasSMS && !hasActivity) {
+          totalUnfollowedLeads++;
+        }
+      }
+    }
+
+    // Get per-user analytics
+    const userAnalytics = await Promise.all(
+      allUserIds.map(async (userId) => {
+        const user = userId.toString() === managerId.toString() 
+          ? manager 
+          : teamMembers.find(m => m._id.toString() === userId.toString());
+        
+        if (!user) return null;
+
+        const userLeads = await Lead.find({ assignedTo: userId });
+        const userLeadIds = userLeads.map((lead) => lead._id);
+
+        // User status breakdown
+        const userStatusBreakdown = await Lead.aggregate([
+          { $match: { assignedTo: userId } },
+          {
+            $group: {
+              _id: '$leadStatus',
+              count: { $sum: 1 },
+            },
+          },
+        ]);
+
+        const userStatusMap = {};
+        userStatusBreakdown.forEach((item) => {
+          userStatusMap[item._id || 'Not Provided'] = item.count;
+        });
+
+        // User calls and SMS (within date range)
+        let userCalls = 0;
+        let userSMS = 0;
+        if (Object.keys(activityDateFilter).length > 0) {
+          let userObjId = userId;
+          if (!(userId instanceof mongoose.Types.ObjectId)) {
+            try {
+              userObjId = new mongoose.Types.ObjectId(userId);
+            } catch (e) {
+              userObjId = userId;
+            }
+          }
+
+          userCalls = await Communication.countDocuments({
+            sentBy: userObjId,
+            type: 'call',
+            sentAt: activityDateFilter,
+          });
+
+          userSMS = await Communication.countDocuments({
+            sentBy: userObjId,
+            type: 'sms',
+            sentAt: activityDateFilter,
+          });
+        }
+
+        // User unfollowed leads count
+        // A lead is unfollowed if the assigned user has:
+        // - No calls for that lead
+        // - No SMS for that lead
+        // - No activity logs (except status_change to "Assigned")
+        let userObjId = userId;
+        if (!(userId instanceof mongoose.Types.ObjectId)) {
+          try {
+            userObjId = new mongoose.Types.ObjectId(userId);
+          } catch (e) {
+            userObjId = userId;
+          }
+        }
+
+        const userUnfollowedLeadIds = [];
+        for (const leadId of userLeadIds) {
+          // Check for calls from this user for this lead
+          const hasCalls = await Communication.exists({
+            leadId: leadId,
+            sentBy: userObjId,
+            type: 'call',
+          });
+
+          // Check for SMS from this user for this lead
+          const hasSMS = await Communication.exists({
+            leadId: leadId,
+            sentBy: userObjId,
+            type: 'sms',
+          });
+
+          // Check for activity logs from this user for this lead
+          // Exclude status_change to "Assigned" (assignment itself)
+          const hasActivity = await ActivityLog.exists({
+            leadId: leadId,
+            performedBy: userObjId,
+            $or: [
+              { type: { $ne: 'status_change' } },
+              { 
+                type: 'status_change',
+                $or: [
+                  { newStatus: { $ne: 'Assigned' } },
+                  { oldStatus: { $ne: null } } // If oldStatus exists, it's not the initial assignment
+                ]
+              }
+            ]
+          });
+
+          // If no calls, no SMS, and no activity (except assignment), it's unfollowed
+          if (!hasCalls && !hasSMS && !hasActivity) {
+            userUnfollowedLeadIds.push(leadId);
+          }
+        }
+
+        return {
+          userId: userId.toString(),
+          name: user.name,
+          email: user.email,
+          roleName: user.roleName,
+          isManager: userId.toString() === managerId.toString(),
+          totalLeads: userLeads.length,
+          confirmedLeads: userStatusMap['Confirmed'] || 0,
+          statusBreakdown: userStatusMap,
+          calls: userCalls,
+          sms: userSMS,
+          unfollowedLeadsCount: userUnfollowedLeadIds.length,
+        };
+      })
+    );
+
+    // Filter out null values
+    const validUserAnalytics = userAnalytics.filter(analytics => analytics !== null);
+
+    return successResponse(
+      res,
+      {
+        manager: {
+          _id: manager._id.toString(),
+          name: manager.name,
+          email: manager.email,
+        },
+        teamMembers: teamMembers.map(m => ({
+          _id: m._id.toString(),
+          name: m.name,
+          email: m.email,
+          roleName: m.roleName,
+        })),
+        teamStats: {
+          totalLeads,
+          confirmedLeads,
+          statusBreakdown: statusMap,
+          calls: teamCalls,
+          sms: teamSMS,
+          statusChanges: teamStatusChanges,
+          totalUnfollowedLeads,
+        },
+        userAnalytics: validUserAnalytics,
+      },
+      'Team analytics retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting team analytics:', error);
+    return errorResponse(res, error.message || 'Failed to get team analytics', 500);
   }
 };
 
