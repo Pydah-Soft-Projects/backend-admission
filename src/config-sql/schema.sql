@@ -496,8 +496,9 @@ CREATE TABLE IF NOT EXISTS payment_configs (
     updated_by CHAR(36) NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
-    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+    -- Note: Foreign keys for course_id and branch_id are removed because courses/branches
+    -- are now stored in the secondary database. course_id and branch_id store string
+    -- representations of int IDs from the secondary database.
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
     INDEX idx_payment_configs_course_id (course_id),

@@ -7,15 +7,16 @@ import { decryptSensitiveValue } from '../utils/encryption.util.js';
 const resolveConfiguredFee = async (courseId, branchId) => {
   if (!courseId) return 0;
 
-  const pool = getPool();
+  const pool = getPool(); // Primary DB for payment configs
 
+  // Note: courseId and branchId are expected to be strings (from secondary DB int IDs converted to strings)
   // Try to find branch-specific fee first
   if (branchId) {
     const [branchFees] = await pool.execute(
       `SELECT amount FROM payment_configs 
        WHERE course_id = ? AND branch_id = ? AND is_active = 1 
        ORDER BY updated_at DESC LIMIT 1`,
-      [courseId, branchId]
+      [courseId, branchId] // Both are strings
     );
     if (branchFees.length > 0) {
       return Number(branchFees[0].amount) || 0;
@@ -27,7 +28,7 @@ const resolveConfiguredFee = async (courseId, branchId) => {
     `SELECT amount FROM payment_configs 
      WHERE course_id = ? AND branch_id IS NULL AND is_active = 1 
      ORDER BY updated_at DESC LIMIT 1`,
-    [courseId]
+    [courseId] // courseId is string
   );
 
   return courseFees.length > 0 ? Number(courseFees[0].amount) || 0 : 0;
