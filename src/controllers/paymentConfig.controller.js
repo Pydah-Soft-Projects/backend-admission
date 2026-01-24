@@ -1,66 +1,139 @@
-import mongoose from 'mongoose';
-import PaymentConfig from '../models/PaymentConfig.model.js';
-import PaymentGatewayConfig from '../models/PaymentGatewayConfig.model.js';
-import Course from '../models/Course.model.js';
-import Branch from '../models/Branch.model.js';
+import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
-
-const toObjectId = (id) => {
-  if (!id) return null;
-  return mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null;
-};
+import { encryptSensitiveValue } from '../utils/encryption.util.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const maskValue = (value = '') => {
   if (!value || value.length < 6) return '******';
   return `${value.slice(0, 3)}****${value.slice(-3)}`;
 };
 
+// Helper function to format course data
+const formatCourse = (courseData) => {
+  if (!courseData) return null;
+  return {
+    id: courseData.id,
+    _id: courseData.id,
+    name: courseData.name,
+    code: courseData.code,
+    description: courseData.description,
+    isActive: courseData.is_active === 1 || courseData.is_active === true,
+    createdAt: courseData.created_at,
+    updatedAt: courseData.updated_at,
+  };
+};
+
+// Helper function to format branch data
+const formatBranch = (branchData) => {
+  if (!branchData) return null;
+  return {
+    id: branchData.id,
+    _id: branchData.id,
+    courseId: branchData.course_id,
+    name: branchData.name,
+    code: branchData.code,
+    description: branchData.description,
+    isActive: branchData.is_active === 1 || branchData.is_active === true,
+    createdAt: branchData.created_at,
+    updatedAt: branchData.updated_at,
+  };
+};
+
+// Helper function to format payment config data
+const formatPaymentConfig = (configData) => {
+  if (!configData) return null;
+  return {
+    id: configData.id,
+    _id: configData.id,
+    courseId: configData.course_id,
+    branchId: configData.branch_id,
+    amount: parseFloat(configData.amount),
+    currency: configData.currency,
+    isActive: configData.is_active === 1 || configData.is_active === true,
+    notes: configData.notes,
+    createdBy: configData.created_by,
+    updatedBy: configData.updated_by,
+    createdAt: configData.created_at,
+    updatedAt: configData.updated_at,
+  };
+};
+
 export const getPaymentSettings = async (req, res) => {
   try {
     const showInactive = req.query.showInactive === 'true';
+    const pool = getPool();
 
-    const courseFilter = showInactive ? {} : { isActive: true };
-    const courses = await Course.find(courseFilter).sort({ name: 1 }).lean();
-    const courseIds = courses.map((course) => course._id);
-
-    const branchFilter = { courseId: { $in: courseIds } };
+    // Get courses
+    let courseQuery = 'SELECT id, name, code, description, is_active, created_at, updated_at FROM courses';
+    const courseParams = [];
     if (!showInactive) {
-      branchFilter.isActive = true;
+      courseQuery += ' WHERE is_active = ?';
+      courseParams.push(true);
+    }
+    courseQuery += ' ORDER BY name ASC';
+
+    const [courses] = await pool.execute(courseQuery, courseParams);
+    const formattedCourses = courses.map(formatCourse);
+    const courseIds = formattedCourses.map(c => c.id);
+
+    if (courseIds.length === 0) {
+      return successResponse(res, []);
     }
 
-    const branches = await Branch.find(branchFilter).sort({ name: 1 }).lean();
-    const configs = await PaymentConfig.find({
-      courseId: { $in: courseIds },
-      ...(showInactive ? {} : { isActive: true }),
-    })
-      .sort({ createdAt: -1 })
-      .lean();
+    // Get branches
+    let branchQuery = 'SELECT id, course_id, name, code, description, is_active, created_at, updated_at FROM branches WHERE course_id IN (';
+    branchQuery += courseIds.map(() => '?').join(',');
+    branchQuery += ')';
+    const branchParams = [...courseIds];
+    if (!showInactive) {
+      branchQuery += ' AND is_active = ?';
+      branchParams.push(true);
+    }
+    branchQuery += ' ORDER BY name ASC';
 
-    const configMap = configs.reduce((acc, config) => {
-      const key = config.courseId.toString();
+    const [branches] = await pool.execute(branchQuery, branchParams);
+    const formattedBranches = branches.map(formatBranch);
+
+    // Get payment configs
+    let configQuery = 'SELECT id, course_id, branch_id, amount, currency, is_active, notes, created_by, updated_by, created_at, updated_at FROM payment_configs WHERE course_id IN (';
+    configQuery += courseIds.map(() => '?').join(',');
+    configQuery += ')';
+    const configParams = [...courseIds];
+    if (!showInactive) {
+      configQuery += ' AND is_active = ?';
+      configParams.push(true);
+    }
+    configQuery += ' ORDER BY created_at DESC';
+
+    const [configs] = await pool.execute(configQuery, configParams);
+    const formattedConfigs = configs.map(formatPaymentConfig);
+
+    // Group by course_id
+    const configMap = formattedConfigs.reduce((acc, config) => {
+      const key = config.courseId;
       if (!acc[key]) acc[key] = [];
       acc[key].push(config);
       return acc;
     }, {});
 
-    const branchMap = branches.reduce((acc, branch) => {
-      const key = branch.courseId.toString();
+    const branchMap = formattedBranches.reduce((acc, branch) => {
+      const key = branch.courseId;
       if (!acc[key]) acc[key] = [];
       acc[key].push(branch);
       return acc;
     }, {});
 
-    const payload = courses.map((course) => {
-      const courseKey = course._id.toString();
+    const payload = formattedCourses.map((course) => {
+      const courseKey = course.id;
       const relatedBranches = branchMap[courseKey] || [];
       const relatedConfigs = configMap[courseKey] || [];
 
-      const defaultFee = relatedConfigs.find((config) => !config.branchId);
+      const defaultFee = relatedConfigs.find((config) => !config.branchId) || null;
       const branchFees = relatedConfigs
         .filter((config) => !!config.branchId)
         .map((config) => ({
           ...config,
-          branch: relatedBranches.find((branch) => branch._id.equals(config.branchId)) || null,
+          branch: relatedBranches.find((branch) => branch.id === config.branchId) || null,
         }));
 
       return {
@@ -75,6 +148,7 @@ export const getPaymentSettings = async (req, res) => {
 
     return successResponse(res, payload);
   } catch (error) {
+    console.error('Get payment settings error:', error);
     return errorResponse(res, error.message || 'Failed to load payment settings', 500);
   }
 };
@@ -82,20 +156,39 @@ export const getPaymentSettings = async (req, res) => {
 export const getCourseFees = async (req, res) => {
   try {
     const { courseId } = req.params;
-    const course = await Course.findById(courseId).lean();
+    const pool = getPool();
 
-    if (!course) {
+    // Get course
+    const [courses] = await pool.execute(
+      'SELECT id, name, code, description, is_active, created_at, updated_at FROM courses WHERE id = ?',
+      [courseId]
+    );
+
+    if (courses.length === 0) {
       return errorResponse(res, 'Course not found', 404);
     }
 
-    const branches = await Branch.find({ courseId }).sort({ name: 1 }).lean();
-    const configs = await PaymentConfig.find({ courseId }).lean();
+    const course = formatCourse(courses[0]);
 
-    const defaultFee = configs.find((config) => !config.branchId) || null;
-    const branchFees = configs.filter((config) => !!config.branchId);
+    // Get branches
+    const [branches] = await pool.execute(
+      'SELECT id, course_id, name, code, description, is_active, created_at, updated_at FROM branches WHERE course_id = ? ORDER BY name ASC',
+      [courseId]
+    );
+    const formattedBranches = branches.map(formatBranch);
 
-    const fees = branches.map((branch) => {
-      const feeConfig = branchFees.find((config) => config.branchId.toString() === branch._id.toString());
+    // Get payment configs
+    const [configs] = await pool.execute(
+      'SELECT id, course_id, branch_id, amount, currency, is_active, notes, created_by, updated_by, created_at, updated_at FROM payment_configs WHERE course_id = ?',
+      [courseId]
+    );
+    const formattedConfigs = configs.map(formatPaymentConfig);
+
+    const defaultFee = formattedConfigs.find((config) => !config.branchId) || null;
+    const branchFees = formattedConfigs.filter((config) => !!config.branchId);
+
+    const fees = formattedBranches.map((branch) => {
+      const feeConfig = branchFees.find((config) => config.branchId === branch.id);
       return {
         branch,
         feeConfig: feeConfig || null,
@@ -108,6 +201,7 @@ export const getCourseFees = async (req, res) => {
       defaultFee,
     });
   } catch (error) {
+    console.error('Get course fees error:', error);
     return errorResponse(res, error.message || 'Failed to load course fees', 500);
   }
 };
@@ -116,101 +210,104 @@ export const upsertBranchFees = async (req, res) => {
   try {
     const { courseId } = req.params;
     const { fees = [], defaultFee, currency = 'INR' } = req.body;
+    const pool = getPool();
+    const actorId = req.user?.id || req.user?._id;
+    const normalizedCurrency = currency?.trim()?.toUpperCase() || 'INR';
 
-    const course = await Course.findById(courseId);
-    if (!course) {
+    // Check if course exists
+    const [courses] = await pool.execute(
+      'SELECT id FROM courses WHERE id = ?',
+      [courseId]
+    );
+    if (courses.length === 0) {
       return errorResponse(res, 'Course not found', 404);
     }
 
+    // Validate branches
     const branchIds = fees.map((entry) => entry.branchId).filter(Boolean);
     if (branchIds.length > 0) {
-      const branches = await Branch.find({ courseId, _id: { $in: branchIds } }).lean();
+      const placeholders = branchIds.map(() => '?').join(',');
+      const [branches] = await pool.execute(
+        `SELECT id FROM branches WHERE course_id = ? AND id IN (${placeholders})`,
+        [courseId, ...branchIds]
+      );
       if (branches.length !== branchIds.length) {
         return errorResponse(res, 'One or more branches are invalid for the selected course', 400);
       }
     }
 
-    const bulkOperations = [];
-    const actorId = req.user?._id;
-    const normalizedCurrency = currency?.trim()?.toUpperCase() || 'INR';
-
+    // Handle default fee
     if (defaultFee !== undefined) {
       if (defaultFee === null) {
-        bulkOperations.push({
-          updateOne: {
-            filter: { courseId, branchId: null },
-            update: {
-              $set: {
-                isActive: false,
-                updatedBy: actorId,
-                updatedAt: new Date(),
-              },
-            },
-            upsert: false,
-          },
-        });
+        // Deactivate default fee
+        await pool.execute(
+          'UPDATE payment_configs SET is_active = ?, updated_by = ?, updated_at = NOW() WHERE course_id = ? AND branch_id IS NULL',
+          [false, actorId, courseId]
+        );
       } else if (typeof defaultFee === 'number' && defaultFee >= 0) {
-        bulkOperations.push({
-          updateOne: {
-            filter: { courseId, branchId: null },
-            update: {
-              $set: {
-                amount: defaultFee,
-                currency: normalizedCurrency,
-                isActive: true,
-                updatedBy: actorId,
-              },
-              $setOnInsert: {
-                createdBy: actorId,
-                branchId: null,
-              },
-            },
-            upsert: true,
-          },
-        });
+        // Check if default fee exists
+        const [existing] = await pool.execute(
+          'SELECT id FROM payment_configs WHERE course_id = ? AND branch_id IS NULL',
+          [courseId]
+        );
+
+        if (existing.length > 0) {
+          await pool.execute(
+            'UPDATE payment_configs SET amount = ?, currency = ?, is_active = ?, updated_by = ?, updated_at = NOW() WHERE course_id = ? AND branch_id IS NULL',
+            [defaultFee, normalizedCurrency, true, actorId, courseId]
+          );
+        } else {
+          const configId = uuidv4();
+          await pool.execute(
+            'INSERT INTO payment_configs (id, course_id, branch_id, amount, currency, is_active, created_by, updated_by, created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NOW(), NOW())',
+            [configId, courseId, defaultFee, normalizedCurrency, true, actorId, actorId]
+          );
+        }
       } else {
         return errorResponse(res, 'Default fee must be a non-negative number or null', 422);
       }
     }
 
-    fees.forEach((entry) => {
+    // Handle branch fees
+    for (const entry of fees) {
       if (!entry || typeof entry.branchId !== 'string' || entry.branchId.trim() === '') {
-        return;
+        continue;
       }
 
       if (typeof entry.amount !== 'number' || entry.amount < 0) {
-        return;
+        continue;
       }
 
-      bulkOperations.push({
-        updateOne: {
-          filter: { courseId, branchId: entry.branchId },
-          update: {
-            $set: {
-              amount: entry.amount,
-              currency: normalizedCurrency,
-              isActive: true,
-              updatedBy: actorId,
-            },
-            $setOnInsert: {
-              createdBy: actorId,
-            },
-          },
-          upsert: true,
-        },
-      });
-    });
+      // Check if config exists
+      const [existing] = await pool.execute(
+        'SELECT id FROM payment_configs WHERE course_id = ? AND branch_id = ?',
+        [courseId, entry.branchId]
+      );
 
-    if (bulkOperations.length === 0) {
-      return successResponse(res, { message: 'No changes applied' }, 'Nothing to update');
+      if (existing.length > 0) {
+        await pool.execute(
+          'UPDATE payment_configs SET amount = ?, currency = ?, is_active = ?, updated_by = ?, updated_at = NOW() WHERE course_id = ? AND branch_id = ?',
+          [entry.amount, normalizedCurrency, true, actorId, courseId, entry.branchId]
+        );
+      } else {
+        const configId = uuidv4();
+        await pool.execute(
+          'INSERT INTO payment_configs (id, course_id, branch_id, amount, currency, is_active, created_by, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
+          [configId, courseId, entry.branchId, entry.amount, normalizedCurrency, true, actorId, actorId]
+        );
+      }
     }
 
-    await PaymentConfig.bulkWrite(bulkOperations);
+    // Fetch updated configs
+    const [updatedConfigs] = await pool.execute(
+      'SELECT id, course_id, branch_id, amount, currency, is_active, notes, created_by, updated_by, created_at, updated_at FROM payment_configs WHERE course_id = ?',
+      [courseId]
+    );
+    const formattedConfigs = updatedConfigs.map(formatPaymentConfig);
 
-    const updatedConfigs = await PaymentConfig.find({ courseId }).lean();
-
-    return successResponse(res, updatedConfigs, 'Payment configuration saved successfully');
+    return successResponse(res, formattedConfigs, 'Payment configuration saved successfully');
   } catch (error) {
+    console.error('Upsert branch fees error:', error);
     return errorResponse(res, error.message || 'Failed to update payment configuration', 500);
   }
 };
@@ -218,63 +315,101 @@ export const upsertBranchFees = async (req, res) => {
 export const deleteFeeConfig = async (req, res) => {
   try {
     const { courseId, configId } = req.params;
+    const pool = getPool();
 
-    const config = await PaymentConfig.findOne({ _id: configId, courseId });
-    if (!config) {
+    // Check if config exists for this course
+    const [configs] = await pool.execute(
+      'SELECT id FROM payment_configs WHERE id = ? AND course_id = ?',
+      [configId, courseId]
+    );
+
+    if (configs.length === 0) {
       return errorResponse(res, 'Fee configuration not found', 404);
     }
 
-    await PaymentConfig.deleteOne({ _id: configId });
+    // Delete config
+    await pool.execute(
+      'DELETE FROM payment_configs WHERE id = ?',
+      [configId]
+    );
+
     return successResponse(res, null, 'Fee configuration removed successfully');
   } catch (error) {
+    console.error('Delete fee config error:', error);
     return errorResponse(res, error.message || 'Failed to remove fee configuration', 500);
   }
 };
 
 export const getCashfreeConfig = async (req, res) => {
   try {
-    const config = await PaymentGatewayConfig.findOne({ provider: 'cashfree' });
+    const pool = getPool();
 
-    if (!config) {
+    const [configs] = await pool.execute(
+      'SELECT id, provider, display_name, client_id, client_secret, environment, is_active, updated_at FROM payment_gateway_configs WHERE provider = ?',
+      ['cashfree']
+    );
+
+    if (configs.length === 0) {
       return successResponse(res, null, 'Cashfree configuration not found', 200);
     }
 
-    const configObj = config.toObject({ getters: true });
+    const config = configs[0];
     const response = {
-      provider: configObj.provider,
-      displayName: configObj.displayName,
-      environment: configObj.environment,
-      isActive: configObj.isActive,
-      updatedAt: configObj.updatedAt,
-      clientIdPreview: maskValue(configObj.clientId),
-      clientSecretPreview: maskValue(configObj.clientSecret),
+      provider: config.provider,
+      displayName: config.display_name,
+      environment: config.environment,
+      isActive: config.is_active === 1 || config.is_active === true,
+      updatedAt: config.updated_at,
+      clientIdPreview: maskValue(config.client_id),
+      clientSecretPreview: maskValue(config.client_secret),
     };
 
     return successResponse(res, response);
   } catch (error) {
+    console.error('Get Cashfree config error:', error);
     return errorResponse(res, error.message || 'Failed to load Cashfree configuration', 500);
   }
 };
 
 export const updateCashfreeConfig = async (req, res) => {
   try {
-    const { clientId, clientSecret, environment = 'sandbox', confirmChange = false } = req.body;
+    let { clientId, clientSecret, environment = 'sandbox', confirmChange = false } = req.body;
+    const pool = getPool();
+    const userId = req.user?.id || req.user?._id;
 
     if (!clientId || !clientSecret) {
       return errorResponse(res, 'Client ID and Client Secret are required', 422);
+    }
+
+    // Clean credentials: trim whitespace and remove newlines
+    clientId = (clientId || '').trim().replace(/\r?\n/g, '').replace(/\s+/g, '');
+    clientSecret = (clientSecret || '').trim().replace(/\r?\n/g, '').replace(/\s+/g, '');
+
+    if (!clientId || !clientSecret || clientId === '' || clientSecret === '') {
+      return errorResponse(res, 'Client ID and Client Secret cannot be empty after cleaning', 422);
     }
 
     if (!['sandbox', 'production'].includes(environment)) {
       return errorResponse(res, 'Environment must be sandbox or production', 422);
     }
 
-    const existing = await PaymentGatewayConfig.findOne({ provider: 'cashfree' });
+    // Check if config exists
+    const [existing] = await pool.execute(
+      'SELECT id, client_id, client_secret, environment FROM payment_gateway_configs WHERE provider = ?',
+      ['cashfree']
+    );
 
-    if (existing) {
+    if (existing.length > 0) {
+      const existingConfig = existing[0];
+      // Decrypt existing credentials to compare (since we're comparing with plain text input)
+      const { decryptSensitiveValue } = await import('../utils/encryption.util.js');
+      const existingClientId = decryptSensitiveValue(existingConfig.client_id)?.trim().replace(/\r?\n/g, '').replace(/\s+/g, '') || '';
+      const existingClientSecret = decryptSensitiveValue(existingConfig.client_secret)?.trim().replace(/\r?\n/g, '').replace(/\s+/g, '') || '';
+      
       const hasChanges =
-        existing.clientId !== clientId ||
-        existing.clientSecret !== clientSecret ||
-        existing.environment !== environment;
+        existingClientId !== clientId ||
+        existingClientSecret !== clientSecret ||
+        existingConfig.environment !== environment;
 
       if (hasChanges && !confirmChange) {
         return res.status(409).json({
@@ -284,28 +419,33 @@ export const updateCashfreeConfig = async (req, res) => {
         });
       }
 
-      existing.clientId = clientId;
-      existing.clientSecret = clientSecret;
-      existing.environment = environment;
-      existing.updatedBy = req.user?._id;
-      existing.isActive = true;
-      await existing.save();
+      // Encrypt credentials before storing
+      const encryptedClientId = encryptSensitiveValue(clientId);
+      const encryptedClientSecret = encryptSensitiveValue(clientSecret);
+
+      // Update existing config
+      await pool.execute(
+        'UPDATE payment_gateway_configs SET client_id = ?, client_secret = ?, environment = ?, is_active = ?, updated_by = ?, updated_at = NOW() WHERE provider = ?',
+        [encryptedClientId, encryptedClientSecret, environment, true, userId, 'cashfree']
+      );
 
       return successResponse(res, { acknowledged: true }, 'Cashfree configuration updated successfully');
     }
 
-    await PaymentGatewayConfig.create({
-      provider: 'cashfree',
-      clientId,
-      clientSecret,
-      environment,
-      displayName: 'Cashfree',
-      isActive: true,
-      updatedBy: req.user?._id,
-    });
+    // Encrypt credentials before storing
+    const encryptedClientId = encryptSensitiveValue(clientId);
+    const encryptedClientSecret = encryptSensitiveValue(clientSecret);
+
+    // Create new config
+    const configId = uuidv4();
+    await pool.execute(
+      'INSERT INTO payment_gateway_configs (id, provider, display_name, client_id, client_secret, environment, is_active, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())',
+      [configId, 'cashfree', 'Cashfree', encryptedClientId, encryptedClientSecret, environment, true, userId]
+    );
 
     return successResponse(res, { acknowledged: true }, 'Cashfree configuration saved successfully', 201);
   } catch (error) {
+    console.error('Update Cashfree config error:', error);
     return errorResponse(res, error.message || 'Failed to update Cashfree configuration', 500);
   }
 };

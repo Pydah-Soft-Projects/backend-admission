@@ -1,5 +1,6 @@
 import webpush from 'web-push';
-import PushSubscription from '../models/PushSubscription.model.js';
+import { getPool } from '../config-sql/database.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // VAPID keys - should be set in environment variables
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
@@ -52,11 +53,13 @@ export const sendPushNotificationToUser = async (userId, notification) => {
   }
 
   try {
+    const pool = getPool();
+    
     // Get all active subscriptions for the user
-    const subscriptions = await PushSubscription.find({
-      userId,
-      isActive: true,
-    }).lean();
+    const [subscriptions] = await pool.execute(
+      'SELECT * FROM push_subscriptions WHERE user_id = ? AND is_active = ?',
+      [userId, true]
+    );
 
     if (subscriptions.length === 0) {
       return {
@@ -92,49 +95,56 @@ export const sendPushNotificationToUser = async (userId, notification) => {
     // Send to all subscriptions
     const sendPromises = subscriptions.map(async (subscription) => {
       try {
+        const keys = typeof subscription.key_p256dh === 'string' && typeof subscription.key_auth === 'string'
+          ? {
+              p256dh: subscription.key_p256dh,
+              auth: subscription.key_auth,
+            }
+          : JSON.parse(subscription.key_p256dh || '{}'); // Fallback if stored as JSON
+
         const pushSubscription = {
           endpoint: subscription.endpoint,
           keys: {
-            p256dh: subscription.keys.p256dh,
-            auth: subscription.keys.auth,
+            p256dh: keys.p256dh || subscription.key_p256dh,
+            auth: keys.auth || subscription.key_auth,
           },
         };
 
-        console.log(`[PushNotification] Attempting to send to subscription ${subscription._id}, endpoint: ${subscription.endpoint.substring(0, 50)}...`);
+        console.log(`[PushNotification] Attempting to send to subscription ${subscription.id}, endpoint: ${subscription.endpoint.substring(0, 50)}...`);
         
         await webpush.sendNotification(pushSubscription, payload);
         
-        console.log(`[PushNotification] Successfully sent to subscription ${subscription._id}`);
+        console.log(`[PushNotification] Successfully sent to subscription ${subscription.id}`);
         results.sent++;
-        return { success: true, subscriptionId: subscription._id };
+        return { success: true, subscriptionId: subscription.id };
       } catch (error) {
         results.failed++;
         const errorMessage = error.message || 'Unknown error';
         const statusCode = error.statusCode || error.code;
         
-        console.error(`[PushNotification] Failed to send to subscription ${subscription._id}:`, {
+        console.error(`[PushNotification] Failed to send to subscription ${subscription.id}:`, {
           error: errorMessage,
           statusCode,
           endpoint: subscription.endpoint?.substring(0, 50),
         });
         
         results.errors.push({
-          subscriptionId: subscription._id,
+          subscriptionId: subscription.id,
           error: errorMessage,
           statusCode,
         });
 
         // If subscription is invalid (410 Gone), mark it as inactive
         if (statusCode === 410 || errorMessage.includes('410') || errorMessage.includes('Gone')) {
-          console.log(`[PushNotification] Marking subscription ${subscription._id} as inactive (410 Gone)`);
-          await PushSubscription.findByIdAndUpdate(subscription._id, {
-            isActive: false,
-            deactivatedAt: new Date(),
-            deactivationReason: 'Subscription expired (410 Gone)',
-          });
+          console.log(`[PushNotification] Marking subscription ${subscription.id} as inactive (410 Gone)`);
+          const pool = getPool();
+          await pool.execute(
+            'UPDATE push_subscriptions SET is_active = ?, deactivated_at = NOW(), deactivation_reason = ? WHERE id = ?',
+            [false, 'Subscription expired (410 Gone)', subscription.id]
+          );
         }
 
-        return { success: false, subscriptionId: subscription._id, error: errorMessage };
+        return { success: false, subscriptionId: subscription.id, error: errorMessage };
       }
     });
 
@@ -216,40 +226,67 @@ export const savePushSubscription = async (userId, subscription) => {
   }
 
   try {
+    const pool = getPool();
     console.log(`[PushNotification] Saving subscription for user ${userId}, endpoint: ${subscription.endpoint.substring(0, 50)}...`);
     
     // Check if subscription already exists for this endpoint
-    const existing = await PushSubscription.findOne({
-      userId,
-      endpoint: subscription.endpoint,
-    });
+    const [existing] = await pool.execute(
+      'SELECT * FROM push_subscriptions WHERE user_id = ? AND endpoint = ?',
+      [userId, subscription.endpoint]
+    );
 
-    if (existing) {
+    if (existing.length > 0) {
       // Update existing subscription
-      console.log(`[PushNotification] Updating existing subscription ${existing._id}`);
-      existing.keys = subscription.keys;
-      existing.isActive = true;
-      existing.updatedAt = new Date();
-      await existing.save();
-      console.log(`[PushNotification] Subscription ${existing._id} updated successfully`);
-      return existing;
+      const existingSub = existing[0];
+      console.log(`[PushNotification] Updating existing subscription ${existingSub.id}`);
+      await pool.execute(
+        `UPDATE push_subscriptions SET 
+          key_p256dh = ?, key_auth = ?, is_active = ?, deactivated_at = NULL, 
+          deactivation_reason = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [
+          subscription.keys.p256dh,
+          subscription.keys.auth,
+          true,
+          existingSub.id,
+        ]
+      );
+      console.log(`[PushNotification] Subscription ${existingSub.id} updated successfully`);
+      
+      // Fetch updated subscription
+      const [updated] = await pool.execute(
+        'SELECT * FROM push_subscriptions WHERE id = ?',
+        [existingSub.id]
+      );
+      return updated[0];
     }
 
     // Create new subscription
     console.log(`[PushNotification] Creating new subscription for user ${userId}`);
-    const newSubscription = await PushSubscription.create({
-      userId,
-      endpoint: subscription.endpoint,
-      keys: {
-        p256dh: subscription.keys.p256dh,
-        auth: subscription.keys.auth,
-      },
-      isActive: true,
-      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
-    });
+    const subscriptionId = uuidv4();
+    await pool.execute(
+      `INSERT INTO push_subscriptions (
+        id, user_id, endpoint, key_p256dh, key_auth, is_active, user_agent, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        subscriptionId,
+        userId,
+        subscription.endpoint,
+        subscription.keys.p256dh,
+        subscription.keys.auth,
+        true,
+        typeof navigator !== 'undefined' ? navigator.userAgent : null,
+      ]
+    );
 
-    console.log(`[PushNotification] New subscription ${newSubscription._id} created successfully`);
-    return newSubscription;
+    console.log(`[PushNotification] New subscription ${subscriptionId} created successfully`);
+    
+    // Fetch created subscription
+    const [newSubscription] = await pool.execute(
+      'SELECT * FROM push_subscriptions WHERE id = ?',
+      [subscriptionId]
+    );
+    return newSubscription[0];
   } catch (error) {
     console.error('[PushNotification] Error saving subscription:', error);
     throw new Error(error.message || 'Failed to save push subscription');
@@ -268,11 +305,14 @@ export const removePushSubscription = async (userId, endpoint) => {
   }
 
   try {
-    const result = await PushSubscription.updateOne(
-      { userId, endpoint },
-      { isActive: false, deactivatedAt: new Date(), deactivationReason: 'User unsubscribed' }
+    const pool = getPool();
+    const [result] = await pool.execute(
+      `UPDATE push_subscriptions SET 
+        is_active = ?, deactivated_at = NOW(), deactivation_reason = ?, updated_at = NOW()
+       WHERE user_id = ? AND endpoint = ?`,
+      [false, 'User unsubscribed', userId, endpoint]
     );
-    return result.modifiedCount > 0;
+    return result.affectedRows > 0;
   } catch (error) {
     console.error('[PushNotification] Error removing subscription:', error);
     throw new Error(error.message || 'Failed to remove push subscription');

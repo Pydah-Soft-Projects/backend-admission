@@ -1,4 +1,4 @@
-import Lead from '../models/Lead.model.js';
+import { getPool } from '../config-sql/database.js';
 
 /**
  * Generate enquiry number in format: ENQ{YY}{6-digit}
@@ -17,20 +17,23 @@ export const generateEnquiryNumber = async () => {
     // Create prefix (same as bulk upload)
     const prefix = `ENQ${yearSuffix}`;
     
+    const pool = getPool();
+    
     // Find the highest enquiry number for this year (same query as bulk upload)
-    const lastLead = await Lead.findOne({
-      enquiryNumber: { $regex: `^${prefix}` },
-    })
-      .sort({ enquiryNumber: -1 })
-      .select('enquiryNumber')
-      .lean();
+    const [leads] = await pool.execute(
+      `SELECT enquiry_number FROM leads 
+       WHERE enquiry_number LIKE ? 
+       ORDER BY enquiry_number DESC 
+       LIMIT 1`,
+      [`${prefix}%`]
+    );
 
     let sequenceNumber = 1;
 
-    if (lastLead && lastLead.enquiryNumber) {
+    if (leads.length > 0 && leads[0].enquiry_number) {
       // Extract the sequence number from the last enquiry number (same logic as bulk upload)
       // Format: ENQ24000001 -> extract 000001 -> convert to 1
-      const lastSequence = lastLead.enquiryNumber.replace(prefix, '');
+      const lastSequence = leads[0].enquiry_number.replace(prefix, '');
       const lastNumber = parseInt(lastSequence, 10);
       
       if (!isNaN(lastNumber)) {
@@ -45,8 +48,12 @@ export const generateEnquiryNumber = async () => {
     const enquiryNumber = `${prefix}${formattedSequence}`;
 
     // Double-check uniqueness (in case of race condition)
-    const exists = await Lead.findOne({ enquiryNumber });
-    if (exists) {
+    const [existing] = await pool.execute(
+      'SELECT id FROM leads WHERE enquiry_number = ?',
+      [enquiryNumber]
+    );
+    
+    if (existing.length > 0) {
       // If exists, try next number (recursive call to get next available number)
       return generateEnquiryNumber();
     }

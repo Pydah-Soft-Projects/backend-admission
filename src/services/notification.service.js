@@ -4,8 +4,8 @@ import {
   sendPushNotificationToUser,
   sendPushNotificationToUsers,
 } from './pushNotification.service.js';
-import User from '../models/User.model.js';
-import Notification from '../models/Notification.model.js';
+import { getPool } from '../config-sql/database.js';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Send notification to lead when a new lead is created
@@ -40,52 +40,67 @@ export const notifyLeadCreated = async (lead) => {
 
     // Notify all Super Admins about new lead creation
     try {
-      const superAdmins = await User.find({ roleName: 'Super Admin', isActive: true })
-        .select('_id name email')
-        .lean();
+      const pool = getPool();
+      const [superAdmins] = await pool.execute(
+        'SELECT id, name, email FROM users WHERE role_name = ? AND is_active = ?',
+        ['Super Admin', true]
+      );
 
       if (superAdmins.length > 0) {
         const notificationTitle = 'New Lead Created';
         const notificationBody = `A new lead has been created: ${lead.name} (${lead.enquiryNumber || 'Pending'}) - ${lead.phone || 'No phone'}`;
 
         // Send push notifications to all Super Admins
-        const superAdminIds = superAdmins.map((admin) => admin._id.toString());
+        const superAdminIds = superAdmins.map((admin) => admin.id);
         const pushResult = await sendPushNotificationToUsers(superAdminIds, {
           title: notificationTitle,
           body: notificationBody,
           url: '/superadmin/leads',
           data: {
             type: 'lead_created',
-            leadId: lead._id?.toString() || lead.id,
+            leadId: lead.id || lead._id?.toString(),
             timestamp: Date.now(),
           },
         });
 
         // Save in-app notifications for all Super Admins
-        const notificationPromises = superAdmins.map((admin) =>
-          Notification.create({
-            userId: admin._id,
-            type: 'lead_created',
-            title: notificationTitle,
-            message: notificationBody,
-            data: {
-              leadId: lead._id?.toString() || lead.id,
+        const notificationPromises = superAdmins.map(async (admin) => {
+          try {
+            const notificationId = uuidv4();
+            const leadId = lead.id || lead._id?.toString() || null;
+            const notificationData = {
+              leadId: lead.id || lead._id?.toString() || null,
               leadName: lead.name,
               enquiryNumber: lead.enquiryNumber,
               phone: lead.phone,
-            },
-            channels: {
-              push: pushResult.sent > 0,
-              email: false,
-              sms: false,
-            },
-            leadId: lead._id,
-            actionUrl: '/superadmin/leads',
-          }).catch((error) => {
-            console.error(`[Notification] Error saving notification for Super Admin ${admin._id}:`, error);
+            };
+
+            await pool.execute(
+              `INSERT INTO notifications (
+                id, user_id, type, title, message, data,
+                channel_push, channel_email, channel_sms,
+                lead_id, action_url, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+              [
+                notificationId,
+                admin.id,
+                'lead_created',
+                notificationTitle,
+                notificationBody,
+                JSON.stringify(notificationData),
+                pushResult.sent > 0 ? 1 : 0,
+                0,
+                0,
+                leadId,
+                '/superadmin/leads',
+              ]
+            );
+            return { success: true };
+          } catch (error) {
+            console.error(`[Notification] Error saving notification for Super Admin ${admin.id}:`, error);
             return null;
-          })
-        );
+          }
+        });
 
         await Promise.all(notificationPromises);
         results.superAdmin.notified = true;
@@ -124,10 +139,22 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
     }
 
     // Get user details
-    const user = await User.findById(userId).select('name email roleName').lean();
-    if (!user) {
+    const pool = getPool();
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name FROM users WHERE id = ?',
+      [userId]
+    );
+    
+    if (!users || users.length === 0) {
       throw new Error('User not found');
     }
+    
+    const user = {
+      id: users[0].id,
+      name: users[0].name,
+      email: users[0].email,
+      roleName: users[0].role_name,
+    };
 
     // Prepare notification content
     const notificationTitle = isBulk
@@ -233,13 +260,18 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
     let leadsToNotify = leads;
     if (isBulk && allLeadIds.length > 0 && leads.length < leadCount) {
       // Fetch lead details for bulk assignment if we don't have all leads
-      const Lead = (await import('../models/Lead.model.js')).default;
-      const mongoose = (await import('mongoose')).default;
-      const leadObjectIds = allLeadIds.map((id) => new mongoose.Types.ObjectId(id));
-      const fetchedLeads = await Lead.find({ _id: { $in: leadObjectIds } })
-        .select('_id name phone enquiryNumber')
-        .lean();
-      leadsToNotify = fetchedLeads;
+      const placeholders = allLeadIds.map(() => '?').join(',');
+      const [fetchedLeads] = await pool.execute(
+        `SELECT id, name, phone, enquiry_number FROM leads WHERE id IN (${placeholders})`,
+        allLeadIds
+      );
+      leadsToNotify = fetchedLeads.map((lead) => ({
+        id: lead.id,
+        _id: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        enquiryNumber: lead.enquiry_number,
+      }));
     }
 
     // Send SMS to each assigned lead
@@ -255,7 +287,7 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
               isUnicode: false,
             });
           } catch (error) {
-            console.error(`[Notification] Error sending SMS to lead ${lead._id}:`, error);
+            console.error(`[Notification] Error sending SMS to lead ${lead.id || lead._id}:`, error);
             // Don't fail the whole operation if SMS fails
           }
         }
@@ -265,29 +297,36 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
     // Save in-app notification for assigned user (save after all channels are processed)
     // Always save notification even if push/email failed, so user can see it in-app
     try {
+      const notificationId = uuidv4();
       const notificationData = {
-        userId,
-        type: 'lead_assignment',
-        title: notificationTitle,
-        message: notificationBody,
-        data: {
-          leadCount: leadCount || 0,
-          isBulk: isBulk || false,
-          leads: (leads || []).slice(0, 10).map((l) => ({
-            id: l?._id?.toString() || l?.id || 'unknown',
-            name: l?.name || 'Unknown',
-            enquiryNumber: l?.enquiryNumber || 'N/A',
-          })),
-        },
-        channels: {
-          push: results.push.sent || false,
-          email: results.email.sent || false,
-          sms: false,
-        },
-        actionUrl: '/superadmin/leads',
+        leadCount: leadCount || 0,
+        isBulk: isBulk || false,
+        leads: (leads || []).slice(0, 10).map((l) => ({
+          id: l?.id || l?._id?.toString() || 'unknown',
+          name: l?.name || 'Unknown',
+          enquiryNumber: l?.enquiryNumber || l?.enquiry_number || 'N/A',
+        })),
       };
 
-      await Notification.create(notificationData);
+      await pool.execute(
+        `INSERT INTO notifications (
+          id, user_id, type, title, message, data,
+          channel_push, channel_email, channel_sms,
+          action_url, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          notificationId,
+          userId,
+          'lead_assignment',
+          notificationTitle,
+          notificationBody,
+          JSON.stringify(notificationData),
+          results.push.sent ? 1 : 0,
+          results.email.sent ? 1 : 0,
+          0,
+          '/superadmin/leads',
+        ]
+      );
     } catch (error) {
       console.error('[Notification] Error saving in-app notification:', error);
       // Don't fail the whole operation if saving notification fails
@@ -296,9 +335,10 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
 
     // Notify all Super Admins about lead assignment
     try {
-      const superAdmins = await User.find({ roleName: 'Super Admin', isActive: true })
-        .select('_id name email')
-        .lean();
+      const [superAdmins] = await pool.execute(
+        'SELECT id, name, email FROM users WHERE role_name = ? AND is_active = ?',
+        ['Super Admin', true]
+      );
 
       if (superAdmins.length > 0) {
         const superAdminTitle = isBulk
@@ -310,11 +350,11 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
         const superAdminBody = isBulk
           ? `${leadCount} leads have been assigned to ${user.name} (${user.roleName}).`
           : leadCount === 1 && leads.length > 0
-          ? `Lead "${leads[0].name}" (${leads[0].enquiryNumber || 'Pending'}) has been assigned to ${user.name} (${user.roleName}).`
+          ? `Lead "${leads[0].name}" (${leads[0].enquiryNumber || leads[0]?.enquiry_number || 'Pending'}) has been assigned to ${user.name} (${user.roleName}).`
           : `${leadCount} leads have been assigned to ${user.name} (${user.roleName}).`;
 
         // Send push notifications to all Super Admins
-        const superAdminIds = superAdmins.map((admin) => admin._id.toString());
+        const superAdminIds = superAdmins.map((admin) => admin.id);
         const pushResult = await sendPushNotificationToUsers(superAdminIds, {
           title: superAdminTitle,
           body: superAdminBody,
@@ -330,35 +370,47 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
         });
 
         // Save in-app notifications for all Super Admins
-        const notificationPromises = superAdmins.map((admin) =>
-          Notification.create({
-            userId: admin._id,
-            type: 'lead_assignment',
-            title: superAdminTitle,
-            message: superAdminBody,
-            data: {
+        const notificationPromises = superAdmins.map(async (admin) => {
+          try {
+            const notificationId = uuidv4();
+            const notificationData = {
               assignedToUserId: userId,
               assignedToUserName: user.name,
               assignedToUserRole: user.roleName,
               leadCount: leadCount || 0,
               isBulk: isBulk || false,
               leads: (leads || []).slice(0, 5).map((l) => ({
-                id: l?._id?.toString() || l?.id || 'unknown',
+                id: l?.id || l?._id?.toString() || 'unknown',
                 name: l?.name || 'Unknown',
-                enquiryNumber: l?.enquiryNumber || 'N/A',
+                enquiryNumber: l?.enquiryNumber || l?.enquiry_number || 'N/A',
               })),
-            },
-            channels: {
-              push: pushResult.sent > 0,
-              email: false,
-              sms: false,
-            },
-            actionUrl: '/superadmin/leads',
-          }).catch((error) => {
-            console.error(`[Notification] Error saving notification for Super Admin ${admin._id}:`, error);
+            };
+
+            await pool.execute(
+              `INSERT INTO notifications (
+                id, user_id, type, title, message, data,
+                channel_push, channel_email, channel_sms,
+                action_url, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+              [
+                notificationId,
+                admin.id,
+                'lead_assignment',
+                superAdminTitle,
+                superAdminBody,
+                JSON.stringify(notificationData),
+                pushResult.sent > 0 ? 1 : 0,
+                0,
+                0,
+                '/superadmin/leads',
+              ]
+            );
+            return { success: true };
+          } catch (error) {
+            console.error(`[Notification] Error saving notification for Super Admin ${admin.id}:`, error);
             return null;
-          })
-        );
+          }
+        });
 
         await Promise.all(notificationPromises);
       }

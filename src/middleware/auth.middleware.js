@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import User from '../models/User.model.js';
+import { getPool } from '../config-sql/database.js';
 import { errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges, isTrueSuperAdmin } from '../utils/role.util.js';
 
@@ -20,12 +20,44 @@ export const protect = async (req, res, next) => {
       // Verify token
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // Get user from token
-      req.user = await User.findById(decoded.id);
+      // Get database pool
+      let pool;
+      try {
+        pool = getPool();
+      } catch (error) {
+        console.error('Database connection error:', error);
+        return errorResponse(res, 'Database connection failed', 500);
+      }
 
-      if (!req.user) {
+      // Get user from SQL database
+      const [users] = await pool.execute(
+        'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+        [decoded.id]
+      );
+
+      if (users.length === 0) {
         return errorResponse(res, 'User not found', 404);
       }
+
+      const userData = users[0];
+
+      // Format user object to match expected structure (camelCase)
+      req.user = {
+        id: userData.id,
+        _id: userData.id, // Keep _id for backward compatibility
+        name: userData.name,
+        email: userData.email,
+        roleName: userData.role_name,
+        managedBy: userData.managed_by,
+        isManager: userData.is_manager === 1 || userData.is_manager === true,
+        designation: userData.designation,
+        permissions: typeof userData.permissions === 'string' 
+          ? JSON.parse(userData.permissions) 
+          : userData.permissions || {},
+        isActive: userData.is_active === 1 || userData.is_active === true,
+        createdAt: userData.created_at,
+        updatedAt: userData.updated_at,
+      };
 
       if (!req.user.isActive) {
         return errorResponse(res, 'User account is inactive', 403);

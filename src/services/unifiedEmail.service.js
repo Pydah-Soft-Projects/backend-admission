@@ -1,6 +1,6 @@
 import { sendEmailViaBrevo } from './brevoEmail.service.js';
 import { sendEmailViaNodeMailer } from './nodemailerEmail.service.js';
-import NotificationConfig from '../models/NotificationConfig.model.js';
+import { getPool } from '../config-sql/database.js';
 
 /**
  * Get the configured email channel preference
@@ -8,8 +8,17 @@ import NotificationConfig from '../models/NotificationConfig.model.js';
  */
 const getEmailChannelPreference = async () => {
   try {
-    const config = await NotificationConfig.findOne({ type: 'email_channel' }).lean();
-    return config?.value || 'brevo'; // Default to Brevo for backward compatibility
+    const pool = getPool();
+    const [rows] = await pool.execute(
+      'SELECT value FROM notification_configs WHERE type = ? LIMIT 1',
+      ['email_channel']
+    );
+    
+    if (rows && rows.length > 0) {
+      return rows[0].value || 'brevo';
+    }
+    
+    return 'brevo'; // Default to Brevo for backward compatibility
   } catch (error) {
     console.error('[UnifiedEmail] Error getting email channel preference:', error);
     return 'brevo'; // Default fallback

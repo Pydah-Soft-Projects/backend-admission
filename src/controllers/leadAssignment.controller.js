@@ -1,13 +1,8 @@
-import mongoose from 'mongoose';
-import Lead from '../models/Lead.model.js';
-import User from '../models/User.model.js';
-import Joining from '../models/Joining.model.js';
-import Admission from '../models/Admission.model.js';
-import ActivityLog from '../models/ActivityLog.model.js';
-import Communication from '../models/Communication.model.js';
+import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
@@ -15,51 +10,58 @@ import { notifyLeadAssignment } from '../services/notification.service.js';
 export const assignLeads = async (req, res) => {
   try {
     const { userId, mandal, state, count, leadIds, assignNow = true } = req.body;
+    const pool = getPool();
+    const currentUserId = req.user.id || req.user._id;
 
     // Validate required fields
     if (!userId) {
       return errorResponse(res, 'User ID is required', 400);
     }
 
-    // Check if user exists and is assignable (User or Sub Super Admin, not Super Admin)
-    const user = await User.findById(userId);
-    if (!user) {
+    // Check if user exists and is assignable
+    const [users] = await pool.execute(
+      'SELECT id, name, role_name, is_active FROM users WHERE id = ?',
+      [userId]
+    );
+
+    if (users.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
-    // Validate that user can receive assignments (User or Sub Super Admin only)
-    if (user.roleName === 'Super Admin') {
+    const user = users[0];
+
+    // Validate that user can receive assignments
+    if (user.role_name === 'Super Admin') {
       return errorResponse(res, 'Cannot assign leads to Super Admin', 400);
     }
 
-    if (!user.isActive) {
+    if (user.is_active !== 1 && user.is_active !== true) {
       return errorResponse(res, 'Cannot assign leads to inactive user', 400);
     }
 
     let leadIdsToAssign = [];
-    let filter = {};
 
     // Single assignment mode: assign specific lead IDs
     if (leadIds && Array.isArray(leadIds) && leadIds.length > 0) {
-      // Validate lead IDs
-      const validLeadIds = leadIds
-        .filter((id) => mongoose.Types.ObjectId.isValid(id))
-        .map((id) => new mongoose.Types.ObjectId(id));
+      // Validate lead IDs (UUID format)
+      const validLeadIds = leadIds.filter((id) => id && typeof id === 'string' && id.length === 36);
 
       if (validLeadIds.length === 0) {
         return errorResponse(res, 'No valid lead IDs provided', 400);
       }
 
       // Check if leads exist
-      const existingLeads = await Lead.find({
-        _id: { $in: validLeadIds },
-      }).select('_id assignedTo').lean();
+      const placeholders = validLeadIds.map(() => '?').join(',');
+      const [existingLeads] = await pool.execute(
+        `SELECT id, assigned_to FROM leads WHERE id IN (${placeholders})`,
+        validLeadIds
+      );
 
       if (existingLeads.length === 0) {
         return errorResponse(res, 'No leads found with the provided IDs', 404);
       }
 
-      leadIdsToAssign = existingLeads.map((lead) => lead._id);
+      leadIdsToAssign = existingLeads.map((lead) => lead.id);
     } else {
       // Bulk assignment mode: assign based on filters and count
       if (!count || count <= 0) {
@@ -67,29 +69,28 @@ export const assignLeads = async (req, res) => {
       }
 
       // Build filter for unassigned leads
-      // Unassigned means: assignedTo is null or doesn't exist
-      filter = {
-        $or: [
-          { assignedTo: { $exists: false } },
-          { assignedTo: null },
-        ],
-      };
+      const conditions = ['(assigned_to IS NULL)'];
+      const params = [];
 
       // Add mandal filter if provided
       if (mandal) {
-        filter.mandal = mandal;
+        conditions.push('mandal = ?');
+        params.push(mandal);
       }
 
       // Add state filter if provided
       if (state) {
-        filter.state = state;
+        conditions.push('state = ?');
+        params.push(state);
       }
 
+      const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
       // Get available unassigned leads matching criteria
-      const availableLeads = await Lead.find(filter)
-        .select('_id')
-        .limit(parseInt(count))
-        .lean();
+      const [availableLeads] = await pool.execute(
+        `SELECT id FROM leads ${whereClause} LIMIT ?`,
+        [...params, parseInt(count)]
+      );
 
       if (availableLeads.length === 0) {
         return successResponse(
@@ -104,68 +105,81 @@ export const assignLeads = async (req, res) => {
         );
       }
 
-      leadIdsToAssign = availableLeads.map((lead) => lead._id);
+      leadIdsToAssign = availableLeads.map((lead) => lead.id);
     }
 
     // Get leads before update to check status
-    const leadsToAssign = await Lead.find({ _id: { $in: leadIdsToAssign } }).lean();
+    const placeholders = leadIdsToAssign.map(() => '?').join(',');
+    const [leadsToAssign] = await pool.execute(
+      `SELECT id, lead_status FROM leads WHERE id IN (${placeholders})`,
+      leadIdsToAssign
+    );
     
     // Update leads and create activity logs
-    const activityLogs = [];
     const now = new Date();
+    let modifiedCount = 0;
     
     for (const lead of leadsToAssign) {
-      const oldStatus = lead.leadStatus || 'New';
+      const oldStatus = lead.lead_status || 'New';
       const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
       
       // Update lead
-      await Lead.findByIdAndUpdate(lead._id, {
-        $set: {
-          assignedTo: userId,
-          assignedAt: now,
-          assignedBy: req.user._id,
-          leadStatus: newStatus,
-        },
-      });
+      await pool.execute(
+        `UPDATE leads SET 
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [userId, currentUserId, newStatus, lead.id]
+      );
       
       // Create activity log
-      activityLogs.push({
-        leadId: lead._id,
-        type: 'status_change',
-        oldStatus: oldStatus,
-        newStatus: newStatus,
-        comment: `Assigned to ${user.roleName === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`,
-        performedBy: req.user._id,
-        metadata: {
-          assignment: {
-            assignedTo: userId.toString(),
-            assignedBy: req.user._id.toString(),
-          },
-        },
-        createdAt: now,
-        updatedAt: now,
-      });
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (
+          id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          lead.id,
+          'status_change',
+          oldStatus,
+          newStatus,
+          `Assigned to ${user.role_name === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`,
+          currentUserId,
+          JSON.stringify({
+            assignment: {
+              assignedTo: userId,
+              assignedBy: currentUserId,
+            },
+          }),
+        ]
+      );
+      
+      modifiedCount++;
     }
-    
-    if (activityLogs.length > 0) {
-      await ActivityLog.insertMany(activityLogs);
-    }
-    
-    const result = { modifiedCount: activityLogs.length };
 
     // Send notifications (async, don't wait for it)
     const isBulk = !leadIds || leadIds.length === 0;
-    const assignedLeadCount = result.modifiedCount;
     
-    // Get full lead details for notification (limit to 50 for email display, but send SMS to all)
-    const leadsForNotification = leadsToAssign.slice(0, 50);
+    // Get full lead details for notification (limit to 50 for email display)
+    const [leadsForNotification] = await pool.execute(
+      `SELECT id, name, phone, enquiry_number FROM leads WHERE id IN (${placeholders}) LIMIT 50`,
+      leadIdsToAssign
+    );
+    
+    const formattedLeads = leadsForNotification.map(l => ({
+      _id: l.id,
+      id: l.id,
+      name: l.name,
+      phone: l.phone,
+      enquiryNumber: l.enquiry_number,
+    }));
     
     notifyLeadAssignment({
       userId,
-      leadCount: assignedLeadCount,
-      leads: leadsForNotification,
+      leadCount: modifiedCount,
+      leads: formattedLeads,
       isBulk,
-      allLeadIds: leadIdsToAssign, // Pass all lead IDs for SMS sending
+      allLeadIds: leadIdsToAssign,
     }).catch((error) => {
       console.error('[LeadAssignment] Error sending notifications:', error);
     });
@@ -173,7 +187,7 @@ export const assignLeads = async (req, res) => {
     return successResponse(
       res,
       {
-        assigned: result.modifiedCount,
+        assigned: modifiedCount,
         requested: leadIds ? leadIds.length : parseInt(count),
         userId,
         userName: user.name,
@@ -181,7 +195,7 @@ export const assignLeads = async (req, res) => {
         state: state || 'All',
         mode: leadIds ? 'single' : 'bulk',
       },
-      `Successfully assigned ${result.modifiedCount} lead${result.modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
+      `Successfully assigned ${modifiedCount} lead${modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
       200
     );
   } catch (error) {
@@ -196,58 +210,58 @@ export const assignLeads = async (req, res) => {
 export const getAssignmentStats = async (req, res) => {
   try {
     const { mandal, state } = req.query;
+    const pool = getPool();
 
     // Build filter for unassigned leads
-    const unassignedFilter = {
-      $or: [
-        { assignedTo: { $exists: false } },
-        { assignedTo: null },
-      ],
-    };
+    const conditions = ['assigned_to IS NULL'];
+    const params = [];
 
     // Add mandal filter if provided
     if (mandal) {
-      unassignedFilter.mandal = mandal;
+      conditions.push('mandal = ?');
+      params.push(mandal);
     }
 
     // Add state filter if provided
     if (state) {
-      unassignedFilter.state = state;
+      conditions.push('state = ?');
+      params.push(state);
     }
 
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
     // Get unassigned leads count
-    const unassignedCount = await Lead.countDocuments(unassignedFilter);
+    const [unassignedCountResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${whereClause}`,
+      params
+    );
+    const unassignedCount = unassignedCountResult[0].total;
 
     // Get total leads count
-    const totalLeads = await Lead.countDocuments();
+    const [totalLeadsResult] = await pool.execute('SELECT COUNT(*) as total FROM leads');
+    const totalLeads = totalLeadsResult[0].total;
 
     // Get assigned leads count
     const assignedCount = totalLeads - unassignedCount;
 
     // Get breakdown by mandal (for unassigned leads)
-    const mandalBreakdown = await Lead.aggregate([
-      { $match: unassignedFilter },
-      {
-        $group: {
-          _id: '$mandal',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-      { $limit: 20 },
-    ]);
+    const [mandalBreakdown] = await pool.execute(
+      `SELECT mandal, COUNT(*) as count 
+       FROM leads ${whereClause}
+       GROUP BY mandal 
+       ORDER BY count DESC 
+       LIMIT 20`,
+      params
+    );
 
     // Get breakdown by state (for unassigned leads)
-    const stateBreakdown = await Lead.aggregate([
-      { $match: unassignedFilter },
-      {
-        $group: {
-          _id: '$state',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
+    const [stateBreakdown] = await pool.execute(
+      `SELECT state, COUNT(*) as count 
+       FROM leads ${whereClause}
+       GROUP BY state 
+       ORDER BY count DESC`,
+      params
+    );
 
     return successResponse(
       res,
@@ -256,11 +270,11 @@ export const getAssignmentStats = async (req, res) => {
         assignedCount,
         unassignedCount,
         mandalBreakdown: mandalBreakdown.map((item) => ({
-          mandal: item._id || 'Unknown',
+          mandal: item.mandal || 'Unknown',
           count: item.count,
         })),
         stateBreakdown: stateBreakdown.map((item) => ({
-          state: item._id || 'Unknown',
+          state: item.state || 'Unknown',
           count: item.count,
         })),
       },
@@ -279,67 +293,67 @@ export const getAssignmentStats = async (req, res) => {
 export const getUserLeadAnalytics = async (req, res) => {
   try {
     const { userId } = req.params;
-    const requestingUserId = req.user._id;
+    const requestingUserId = req.user.id || req.user._id;
+    const pool = getPool();
 
     // Users can only view their own analytics, Super Admin can view any user's analytics
-  if (!hasElevatedAdminPrivileges(req.user.roleName) && userId !== requestingUserId.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && userId !== requestingUserId) {
       return errorResponse(res, 'Access denied', 403);
     }
 
     // Get total leads assigned to user
-    const totalLeads = await Lead.countDocuments({ assignedTo: userId });
+    const [totalLeadsResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ?',
+      [userId]
+    );
+    const totalLeads = totalLeadsResult[0].total;
 
     // Get leads by status
-    const statusBreakdown = await Lead.aggregate([
-      { $match: { assignedTo: new mongoose.Types.ObjectId(userId) } },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
+    const [statusBreakdown] = await pool.execute(
+      `SELECT lead_status, COUNT(*) as count 
+       FROM leads 
+       WHERE assigned_to = ? 
+       GROUP BY lead_status 
+       ORDER BY count DESC`,
+      [userId]
+    );
 
     // Get leads by mandal
-    const mandalBreakdown = await Lead.aggregate([
-      { $match: { assignedTo: new mongoose.Types.ObjectId(userId) } },
-      {
-        $group: {
-          _id: '$mandal',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-      { $limit: 10 }, // Top 10 mandals
-    ]);
+    const [mandalBreakdown] = await pool.execute(
+      `SELECT mandal, COUNT(*) as count 
+       FROM leads 
+       WHERE assigned_to = ? 
+       GROUP BY mandal 
+       ORDER BY count DESC 
+       LIMIT 10`,
+      [userId]
+    );
 
     // Get leads by state
-    const stateBreakdown = await Lead.aggregate([
-      { $match: { assignedTo: new mongoose.Types.ObjectId(userId) } },
-      {
-        $group: {
-          _id: '$state',
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-    ]);
+    const [stateBreakdown] = await pool.execute(
+      `SELECT state, COUNT(*) as count 
+       FROM leads 
+       WHERE assigned_to = ? 
+       GROUP BY state 
+       ORDER BY count DESC`,
+      [userId]
+    );
 
     // Convert status breakdown to object
     const statusCounts = {};
     statusBreakdown.forEach((item) => {
-      statusCounts[item._id || 'New'] = item.count;
+      statusCounts[item.lead_status || 'New'] = item.count;
     });
 
     // Get recent activity (last 7 days)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    const recentLeads = await Lead.countDocuments({
-      assignedTo: userId,
-      updatedAt: { $gte: sevenDaysAgo },
-    });
+    const [recentLeadsResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ? AND updated_at >= ?',
+      [userId, sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ')]
+    );
+    const recentLeads = recentLeadsResult[0].total;
 
     return successResponse(
       res,
@@ -347,11 +361,11 @@ export const getUserLeadAnalytics = async (req, res) => {
         totalLeads,
         statusBreakdown: statusCounts,
         mandalBreakdown: mandalBreakdown.map((item) => ({
-          mandal: item._id,
+          mandal: item.mandal,
           count: item.count,
         })),
         stateBreakdown: stateBreakdown.map((item) => ({
-          state: item._id,
+          state: item.state,
           count: item.count,
         })),
         recentActivity: {
@@ -374,11 +388,10 @@ export const getOverviewAnalytics = async (req, res) => {
     }
 
     const rangeInDays = Number.parseInt(req.query.days, 10) || 14;
-    const timezone = req.query.tz || 'Asia/Kolkata';
+    const pool = getPool();
 
-    // Get today's date in the specified timezone
+    // Get today's date
     const today = new Date();
-    // Set to end of today in the timezone
     const endDate = new Date(today);
     endDate.setHours(23, 59, 59, 999);
     
@@ -387,159 +400,114 @@ export const getOverviewAnalytics = async (req, res) => {
     startDate.setDate(startDate.getDate() - (rangeInDays - 1));
     startDate.setHours(0, 0, 0, 0);
     
-    // Helper to format date in timezone for key matching
+    // Helper to format date for key matching
     const formatDateKey = (date) => {
-      // Use the same format as $dateToString in aggregation
       const year = date.getFullYear();
       const month = String(date.getMonth() + 1).padStart(2, '0');
       const day = String(date.getDate()).padStart(2, '0');
       return `${year}-${month}-${day}`;
     };
 
-    const [
-      totalLeads,
-      confirmedLeads,
-      admittedLeads,
-      assignedLeads,
-      unassignedLeads,
-      leadStatusAgg,
-      joiningStatusAgg,
-      admissionStatusAgg,
-      admissionsTotal,
-      leadsCreatedAgg,
-      statusChangesAgg,
-      joiningTrendAgg,
-      admissionsAgg,
-    ] = await Promise.all([
-      Lead.countDocuments(),
-      Lead.countDocuments({ leadStatus: 'Confirmed' }),
-      Lead.countDocuments({ leadStatus: 'Admitted' }),
-      Lead.countDocuments({ assignedTo: { $exists: true, $ne: null } }),
-      Lead.countDocuments({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }] }),
-      Lead.aggregate([
-        {
-          $group: {
-            _id: '$leadStatus',
-            count: { $sum: 1 },
-          },
-        },
-      ]),
-      Joining.aggregate([
-        {
-          $group: {
-            _id: '$status',
-            count: { $sum: 1 },
-          },
-        },
-      ]),
-      Admission.aggregate([
-        {
-          $group: {
-            _id: '$status',
-            count: { $sum: 1 },
-          },
-        },
-      ]),
-      Admission.countDocuments(),
-      Lead.aggregate([
-        { $match: { createdAt: { $gte: startDate, $lte: endDate } } },
-        {
-          $group: {
-            _id: {
-              $dateToString: {
-                format: '%Y-%m-%d',
-                date: '$createdAt',
-                timezone,
-              },
-            },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
-      ActivityLog.aggregate([
-        {
-          $match: {
-            type: 'status_change',
-            createdAt: { $gte: startDate, $lte: endDate },
-          },
-        },
-        {
-          $group: {
-            _id: {
-              date: {
-                $dateToString: {
-                  format: '%Y-%m-%d',
-                  date: '$createdAt',
-                  timezone,
-                },
-              },
-              status: '$newStatus',
-            },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { '_id.date': 1 } },
-      ]),
-      Joining.aggregate([
-        {
-          $match: {
-            updatedAt: { $gte: startDate, $lte: endDate },
-          },
-        },
-        {
-          $group: {
-            _id: {
-              date: {
-                $dateToString: {
-                  format: '%Y-%m-%d',
-                  date: '$updatedAt',
-                  timezone,
-                },
-              },
-              status: '$status',
-            },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { '_id.date': 1 } },
-      ]),
-      Admission.aggregate([
-        {
-          $match: {
-            admissionDate: { $gte: startDate, $lte: endDate },
-          },
-        },
-        {
-          $group: {
-            _id: {
-              $dateToString: {
-                format: '%Y-%m-%d',
-                date: '$admissionDate',
-                timezone,
-              },
-            },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
-    ]);
+    const startDateStr = startDate.toISOString().slice(0, 19).replace('T', ' ');
+    const endDateStr = endDate.toISOString().slice(0, 19).replace('T', ' ');
+
+    // Get basic counts
+    const [totalLeadsResult] = await pool.execute('SELECT COUNT(*) as total FROM leads');
+    const totalLeads = totalLeadsResult[0].total;
+
+    const [confirmedLeadsResult] = await pool.execute(
+      "SELECT COUNT(*) as total FROM leads WHERE lead_status = 'Confirmed'"
+    );
+    const confirmedLeads = confirmedLeadsResult[0].total;
+
+    const [admittedLeadsResult] = await pool.execute(
+      "SELECT COUNT(*) as total FROM leads WHERE lead_status = 'Admitted'"
+    );
+    const admittedLeads = admittedLeadsResult[0].total;
+
+    const [assignedLeadsResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM leads WHERE assigned_to IS NOT NULL'
+    );
+    const assignedLeads = assignedLeadsResult[0].total;
+
+    const [unassignedLeadsResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM leads WHERE assigned_to IS NULL'
+    );
+    const unassignedLeads = unassignedLeadsResult[0].total;
+
+    // Get lead status breakdown
+    const [leadStatusAgg] = await pool.execute(
+      'SELECT lead_status, COUNT(*) as count FROM leads GROUP BY lead_status'
+    );
+
+    // Get joining status breakdown (NOTE: Requires joinings table - will be updated when joining controller is migrated)
+    const [joiningStatusAgg] = await pool.execute(
+      'SELECT status, COUNT(*) as count FROM joinings GROUP BY status'
+    ).catch(() => [[{ status: 'draft', count: 0 }]]); // Fallback if table doesn't exist yet
+
+    // Get admission status breakdown (NOTE: Requires admissions table - will be updated when admission controller is migrated)
+    const [admissionStatusAgg] = await pool.execute(
+      'SELECT status, COUNT(*) as count FROM admissions GROUP BY status'
+    ).catch(() => [[{ status: 'active', count: 0 }]]); // Fallback if table doesn't exist yet
+
+    const [admissionsTotalResult] = await pool.execute('SELECT COUNT(*) as total FROM admissions')
+      .catch(() => [{ total: 0 }]);
+    const admissionsTotal = admissionsTotalResult[0].total;
+
+    // Get leads created by date
+    const [leadsCreatedAgg] = await pool.execute(
+      `SELECT DATE(created_at) as date, COUNT(*) as count 
+       FROM leads 
+       WHERE created_at >= ? AND created_at <= ?
+       GROUP BY DATE(created_at)
+       ORDER BY date ASC`,
+      [startDateStr, endDateStr]
+    );
+
+    // Get status changes by date
+    const [statusChangesAgg] = await pool.execute(
+      `SELECT DATE(created_at) as date, new_status as status, COUNT(*) as count
+       FROM activity_logs
+       WHERE type = 'status_change' AND created_at >= ? AND created_at <= ?
+       GROUP BY DATE(created_at), new_status
+       ORDER BY date ASC`,
+      [startDateStr, endDateStr]
+    );
+
+    // Get joining trends (NOTE: Requires joinings table)
+    const [joiningTrendAgg] = await pool.execute(
+      `SELECT DATE(updated_at) as date, status, COUNT(*) as count
+       FROM joinings
+       WHERE updated_at >= ? AND updated_at <= ?
+       GROUP BY DATE(updated_at), status
+       ORDER BY date ASC`,
+      [startDateStr, endDateStr]
+    ).catch(() => []); // Fallback if table doesn't exist yet
+
+    // Get admissions by date (NOTE: Requires admissions table)
+    const [admissionsAgg] = await pool.execute(
+      `SELECT DATE(admission_date) as date, COUNT(*) as count
+       FROM admissions
+       WHERE admission_date >= ? AND admission_date <= ?
+       GROUP BY DATE(admission_date)
+       ORDER BY date ASC`,
+      [startDateStr, endDateStr]
+    ).catch(() => []); // Fallback if table doesn't exist yet
 
     const leadStatusBreakdown = leadStatusAgg.reduce((acc, item) => {
-      const key = item._id || 'Unknown';
+      const key = item.lead_status || 'Unknown';
       acc[key] = item.count;
       return acc;
     }, {});
 
     const joiningStatusBreakdown = joiningStatusAgg.reduce((acc, item) => {
-      const key = item._id || 'draft';
+      const key = item.status || 'draft';
       acc[key] = item.count;
       return acc;
     }, {});
 
     const admissionStatusBreakdown = admissionStatusAgg.reduce((acc, item) => {
-      const key = item._id || 'active';
+      const key = item.status || 'active';
       acc[key] = item.count;
       return acc;
     }, {});
@@ -562,7 +530,8 @@ export const getOverviewAnalytics = async (req, res) => {
 
     const leadsCreatedSeries = initDailySeries();
     leadsCreatedAgg.forEach((item) => {
-      const entry = leadsCreatedSeries.get(item._id);
+      const dateKey = formatDateKey(new Date(item.date));
+      const entry = leadsCreatedSeries.get(dateKey);
       if (entry) {
         entry.count = item.count;
       }
@@ -570,7 +539,7 @@ export const getOverviewAnalytics = async (req, res) => {
 
     const statusChangeSeries = new Map();
     statusChangesAgg.forEach((item) => {
-      const dateKey = item._id.date;
+      const dateKey = formatDateKey(new Date(item.date));
       if (!statusChangeSeries.has(dateKey)) {
         statusChangeSeries.set(dateKey, {
           date: dateKey,
@@ -580,8 +549,8 @@ export const getOverviewAnalytics = async (req, res) => {
       }
       const bucket = statusChangeSeries.get(dateKey);
       bucket.total += item.count;
-      if (item._id.status) {
-        bucket.statuses[item._id.status] = (bucket.statuses[item._id.status] || 0) + item.count;
+      if (item.status) {
+        bucket.statuses[item.status] = (bucket.statuses[item.status] || 0) + item.count;
       }
     });
     for (const [dateKey, entry] of statusChangeSeries) {
@@ -592,7 +561,7 @@ export const getOverviewAnalytics = async (req, res) => {
 
     const joiningSeries = new Map();
     joiningTrendAgg.forEach((item) => {
-      const dateKey = item._id.date;
+      const dateKey = formatDateKey(new Date(item.date));
       if (!joiningSeries.has(dateKey)) {
         joiningSeries.set(dateKey, {
           date: dateKey,
@@ -602,12 +571,13 @@ export const getOverviewAnalytics = async (req, res) => {
         });
       }
       const bucket = joiningSeries.get(dateKey);
-      bucket[item._id.status] = (bucket[item._id.status] || 0) + item.count;
+      bucket[item.status] = (bucket[item.status] || 0) + item.count;
     });
 
     const admissionsSeries = initDailySeries();
     admissionsAgg.forEach((item) => {
-      const entry = admissionsSeries.get(item._id);
+      const dateKey = formatDateKey(new Date(item.date));
+      const entry = admissionsSeries.get(dateKey);
       if (entry) {
         entry.count = item.count;
       }
@@ -709,6 +679,8 @@ export const getUserAnalytics = async (req, res) => {
     // Allow Super Admin, Sub Super Admin, and Managers
     const isAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     const isManager = req.user.isManager === true;
+    const pool = getPool();
+    const currentUserId = req.user.id || req.user._id;
     
     if (!isAdmin && !isManager) {
       return errorResponse(res, 'Access denied', 403);
@@ -716,189 +688,182 @@ export const getUserAnalytics = async (req, res) => {
 
     const { startDate, endDate, userId } = req.query;
     
-    // Set date range for filtering activities (calls, SMS, status changes)
-    // NOTE: We don't filter leads by createdAt because we want to show all leads
-    // assigned to the user, but only count activities within the date range
-    let activityDateFilter = {};
-    if (startDate || endDate) {
-      activityDateFilter = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        activityDateFilter.$gte = start;
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        activityDateFilter.$lte = end;
-      }
+    // Set date range for filtering activities
+    let activityDateConditions = [];
+    let activityDateParams = [];
+    if (startDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      activityDateConditions.push('>= ?');
+      activityDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
     }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      activityDateConditions.push('<= ?');
+      activityDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    const activityDateClause = activityDateConditions.length > 0 
+      ? `AND ${activityDateConditions.map((c, i) => `sent_at ${c}`).join(' AND ')}`
+      : '';
 
     // Build user filter
-    let userFilter = {
-      roleName: { $nin: ['Super Admin', 'Sub Super Admin'] },
-    };
+    let userConditions = ["role_name NOT IN ('Super Admin', 'Sub Super Admin')"];
+    let userParams = [];
 
     // If manager, only show their team members
     if (isManager && !isAdmin) {
-      userFilter.managedBy = req.user._id;
+      userConditions.push('managed_by = ?');
+      userParams.push(currentUserId);
     }
 
     // If userId is provided, filter to that specific user
     if (userId) {
-      // Convert string userId to ObjectId if needed
-      userFilter._id = mongoose.Types.ObjectId.isValid(userId) 
-        ? new mongoose.Types.ObjectId(userId) 
-        : userId;
+      userConditions = ['id = ?'];
+      userParams = [userId];
     }
 
+    const userWhereClause = `WHERE ${userConditions.join(' AND ')}`;
+
     // Get users based on filter
-    const users = await User.find(userFilter)
-      .select('_id name email roleName isActive')
-      .lean();
+    const [users] = await pool.execute(
+      `SELECT id, name, email, role_name, is_active FROM users ${userWhereClause}`,
+      userParams
+    );
 
     // Get analytics for each user with comprehensive data including activity logs
     const userAnalytics = await Promise.all(
       users.map(async (user) => {
-        const userId = user._id;
-
-        // Build lead filter WITHOUT date range - show all assigned leads
-        // We'll filter activities by date instead
-        const leadFilter = { assignedTo: userId };
+        const userId = user.id;
 
         // Count total assigned leads
-        const totalAssigned = await Lead.countDocuments(leadFilter);
+        const [totalAssignedResult] = await pool.execute(
+          'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ?',
+          [userId]
+        );
+        const totalAssigned = totalAssignedResult[0].total;
 
         // Get status breakdown for assigned leads
-        const statusBreakdown = await Lead.aggregate([
-          { $match: leadFilter },
-          {
-            $group: {
-              _id: '$leadStatus',
-              count: { $sum: 1 },
-            },
-          },
-        ]);
+        const [statusBreakdown] = await pool.execute(
+          `SELECT lead_status, COUNT(*) as count 
+           FROM leads 
+           WHERE assigned_to = ? 
+           GROUP BY lead_status`,
+          [userId]
+        );
 
         const statusMap = {};
         statusBreakdown.forEach((item) => {
-          statusMap[item._id || 'Unknown'] = item.count;
+          statusMap[item.lead_status || 'Unknown'] = item.count;
         });
 
         // Get active leads (leads with status not 'Admitted' or 'Closed')
-        const activeLeads = await Lead.countDocuments({
-          ...leadFilter,
-          leadStatus: { $nin: ['Admitted', 'Closed', 'Cancelled'] },
-        });
+        const [activeLeadsResult] = await pool.execute(
+          `SELECT COUNT(*) as total 
+           FROM leads 
+           WHERE assigned_to = ? AND lead_status NOT IN ('Admitted', 'Closed', 'Cancelled')`,
+          [userId]
+        );
+        const activeLeads = activeLeadsResult[0].total;
 
-        // Get converted leads (leads that have admissions)
-        const convertedLeads = await Admission.countDocuments({
-          leadId: { $in: await Lead.find(leadFilter).distinct('_id') },
-        });
+        // Get converted leads (leads that have admissions) - NOTE: Requires admissions table
+        const [convertedLeadsResult] = await pool.execute(
+          `SELECT COUNT(DISTINCT a.lead_id) as total
+           FROM admissions a
+           INNER JOIN leads l ON a.lead_id = l.id
+           WHERE l.assigned_to = ?`,
+          [userId]
+        ).catch(() => [{ total: 0 }]);
+        const convertedLeads = convertedLeadsResult[0].total;
 
         // Get user's leads for activity tracking
-        const userLeads = await Lead.find(leadFilter).select('_id name phone enquiryNumber').lean();
-        const leadIds = userLeads.map((lead) => lead._id);
+        const [userLeads] = await pool.execute(
+          'SELECT id, name, phone, enquiry_number FROM leads WHERE assigned_to = ?',
+          [userId]
+        );
+        const leadIds = userLeads.map((lead) => lead.id);
         
-        // Get calls made by this user in the period
-        // Ensure userId is properly formatted for querying
-        let callUserId = userId;
-        if (!(userId instanceof mongoose.Types.ObjectId)) {
-          try {
-            callUserId = new mongoose.Types.ObjectId(userId);
-          } catch (e) {
-            // If conversion fails, use original value (mongoose might handle it)
-            callUserId = userId;
-          }
-        }
-        const callFilter = {
-          sentBy: callUserId,
-          type: 'call',
-        };
-        if (Object.keys(activityDateFilter).length > 0) {
-          callFilter.sentAt = activityDateFilter;
-        }
-
-        const calls = await Communication.find(callFilter)
-          .populate('leadId', 'name phone enquiryNumber')
-          .select('leadId contactNumber durationSeconds callOutcome remarks sentAt')
-          .lean();
+        // Get calls made by this user in the period - NOTE: Requires communications table
+        const callDateClause = activityDateConditions.length > 0
+          ? `AND sent_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          : '';
+        
+        const [calls] = await pool.execute(
+          `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
+           FROM communications c
+           LEFT JOIN leads l ON c.lead_id = l.id
+           WHERE c.sent_by = ? AND c.type = 'call' ${callDateClause}
+           ORDER BY c.sent_at DESC`,
+          [userId, ...activityDateParams]
+        ).catch(() => []);
 
         const totalCalls = calls.length;
-        const totalCallDuration = calls.reduce((sum, call) => sum + (call.durationSeconds || 0), 0);
+        const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
         const callsByLead = {};
         calls.forEach((call) => {
-          const leadId = call.leadId?._id?.toString() || 'unknown';
+          const leadId = call.lead_id || 'unknown';
           if (!callsByLead[leadId]) {
             callsByLead[leadId] = {
               leadId,
-              leadName: call.leadId?.name || 'Unknown',
-              leadPhone: call.leadId?.phone || call.contactNumber,
-              enquiryNumber: call.leadId?.enquiryNumber || '',
+              leadName: call.lead_name || 'Unknown',
+              leadPhone: call.lead_phone || call.contact_number,
+              enquiryNumber: call.enquiry_number || '',
               callCount: 0,
               totalDuration: 0,
               calls: [],
             };
           }
           callsByLead[leadId].callCount += 1;
-          callsByLead[leadId].totalDuration += call.durationSeconds || 0;
+          callsByLead[leadId].totalDuration += call.duration_seconds || 0;
           callsByLead[leadId].calls.push({
-            date: call.sentAt,
-            duration: call.durationSeconds || 0,
-            outcome: call.callOutcome || 'N/A',
+            date: call.sent_at,
+            duration: call.duration_seconds || 0,
+            outcome: call.call_outcome || 'N/A',
             remarks: call.remarks || '',
           });
         });
 
-        // Get SMS/texts sent by this user in the period
-        // Ensure userId is properly formatted for querying
-        let smsUserId = userId;
-        if (!(userId instanceof mongoose.Types.ObjectId)) {
-          try {
-            smsUserId = new mongoose.Types.ObjectId(userId);
-          } catch (e) {
-            // If conversion fails, use original value (mongoose might handle it)
-            smsUserId = userId;
-          }
-        }
-        const smsFilter = {
-          sentBy: smsUserId,
-          type: 'sms',
-        };
-        if (Object.keys(activityDateFilter).length > 0) {
-          smsFilter.sentAt = activityDateFilter;
-        }
-
-        const smsMessages = await Communication.find(smsFilter)
-          .populate('leadId', 'name phone enquiryNumber')
-          .select('leadId contactNumber template sentAt status')
-          .lean();
+        // Get SMS/texts sent by this user in the period - NOTE: Requires communications table
+        const smsDateClause = activityDateConditions.length > 0
+          ? `AND sent_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          : '';
+        
+        const [smsMessages] = await pool.execute(
+          `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number,
+           t.name as template_name
+           FROM communications c
+           LEFT JOIN leads l ON c.lead_id = l.id
+           LEFT JOIN message_templates t ON c.template_id = t.id
+           WHERE c.sent_by = ? AND c.type = 'sms' ${smsDateClause}
+           ORDER BY c.sent_at DESC`,
+          [userId, ...activityDateParams]
+        ).catch(() => []);
 
         const totalSMS = smsMessages.length;
         const smsByLead = {};
         const templateUsage = {};
 
         smsMessages.forEach((sms) => {
-          const leadId = sms.leadId?._id?.toString() || 'unknown';
+          const leadId = sms.lead_id || 'unknown';
           if (!smsByLead[leadId]) {
             smsByLead[leadId] = {
               leadId,
-              leadName: sms.leadId?.name || 'Unknown',
-              leadPhone: sms.leadId?.phone || sms.contactNumber,
-              enquiryNumber: sms.leadId?.enquiryNumber || '',
+              leadName: sms.lead_name || 'Unknown',
+              leadPhone: sms.lead_phone || sms.contact_number,
+              enquiryNumber: sms.enquiry_number || '',
               smsCount: 0,
               messages: [],
             };
           }
           smsByLead[leadId].smsCount += 1;
           smsByLead[leadId].messages.push({
-            date: sms.sentAt,
-            template: sms.template?.name || 'Custom',
+            date: sms.sent_at,
+            template: sms.template_name || 'Custom',
             status: sms.status || 'unknown',
           });
 
           // Track template usage
-          const templateName = sms.template?.name || 'Custom';
+          const templateName = sms.template_name || 'Custom';
           if (!templateUsage[templateName]) {
             templateUsage[templateName] = {
               name: templateName,
@@ -920,118 +885,111 @@ export const getUserAnalytics = async (req, res) => {
         }));
 
         // Get status conversions made by this user in the period
-        // Ensure userId is properly formatted for querying
-        let activityUserId = userId;
-        if (!(userId instanceof mongoose.Types.ObjectId)) {
-          try {
-            activityUserId = new mongoose.Types.ObjectId(userId);
-          } catch (e) {
-            // If conversion fails, use original value (mongoose might handle it)
-            activityUserId = userId;
-          }
-        }
-        const statusChangeFilter = {
-          performedBy: activityUserId,
-          type: 'status_change',
-        };
-        if (Object.keys(activityDateFilter).length > 0) {
-          statusChangeFilter.createdAt = activityDateFilter;
-        }
-
-        const statusChanges = await ActivityLog.find(statusChangeFilter)
-          .populate('leadId', 'name phone enquiryNumber')
-          .select('leadId oldStatus newStatus createdAt')
-          .lean();
+        const statusChangeDateClause = activityDateConditions.length > 0
+          ? `AND created_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          : '';
+        
+        const [statusChanges] = await pool.execute(
+          `SELECT a.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
+           FROM activity_logs a
+           LEFT JOIN leads l ON a.lead_id = l.id
+           WHERE a.performed_by = ? AND a.type = 'status_change' ${statusChangeDateClause}
+           ORDER BY a.created_at DESC`,
+          [userId, ...activityDateParams]
+        );
 
         const totalStatusChanges = statusChanges.length;
         const statusConversions = {};
         const conversionsByLead = {};
 
         statusChanges.forEach((change) => {
-          const conversion = `${change.oldStatus || 'Unknown'} → ${change.newStatus || 'Unknown'}`;
+          const conversion = `${change.old_status || 'Unknown'} → ${change.new_status || 'Unknown'}`;
           if (!statusConversions[conversion]) {
             statusConversions[conversion] = 0;
           }
           statusConversions[conversion] += 1;
 
-          const leadId = change.leadId?._id?.toString() || 'unknown';
+          const leadId = change.lead_id || 'unknown';
           if (!conversionsByLead[leadId]) {
             conversionsByLead[leadId] = {
               leadId,
-              leadName: change.leadId?.name || 'Unknown',
-              leadPhone: change.leadId?.phone || '',
-              enquiryNumber: change.leadId?.enquiryNumber || '',
+              leadName: change.lead_name || 'Unknown',
+              leadPhone: change.lead_phone || '',
+              enquiryNumber: change.enquiry_number || '',
               conversions: [],
             };
           }
           conversionsByLead[leadId].conversions.push({
-            from: change.oldStatus || 'Unknown',
-            to: change.newStatus || 'Unknown',
-            date: change.createdAt,
+            from: change.old_status || 'Unknown',
+            to: change.new_status || 'Unknown',
+            date: change.created_at,
           });
         });
 
         // Get activity logs count for this user's leads
-        const activityLogsCount = leadIds.length > 0
-          ? await ActivityLog.countDocuments({
-              leadId: { $in: leadIds },
-            })
-          : 0;
+        let activityLogsCount = 0;
+        if (leadIds.length > 0) {
+          const placeholders = leadIds.map(() => '?').join(',');
+          const [activityLogsCountResult] = await pool.execute(
+            `SELECT COUNT(*) as total FROM activity_logs WHERE lead_id IN (${placeholders})`,
+            leadIds
+          );
+          activityLogsCount = activityLogsCountResult[0].total;
+        }
 
         // Get recent activity (last 7 days)
-        const recentActivityFilter = {
-          leadId: { $in: leadIds },
-          createdAt: {
-            $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-          },
-        };
-        const recentActivityCount = leadIds.length > 0
-          ? await ActivityLog.countDocuments(recentActivityFilter)
-          : 0;
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        let recentActivityCount = 0;
+        if (leadIds.length > 0) {
+          const placeholders = leadIds.map(() => '?').join(',');
+          const [recentActivityCountResult] = await pool.execute(
+            `SELECT COUNT(*) as total 
+             FROM activity_logs 
+             WHERE lead_id IN (${placeholders}) AND created_at >= ?`,
+            [...leadIds, sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ')]
+          );
+          recentActivityCount = recentActivityCountResult[0].total;
+        }
 
         // Get source breakdown for assigned leads
-        const sourceBreakdown = await Lead.aggregate([
-          { $match: leadFilter },
-          {
-            $group: {
-              _id: '$source',
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { count: -1 } },
-          { $limit: 10 },
-        ]);
+        const [sourceBreakdown] = await pool.execute(
+          `SELECT source, COUNT(*) as count 
+           FROM leads 
+           WHERE assigned_to = ? 
+           GROUP BY source 
+           ORDER BY count DESC 
+           LIMIT 10`,
+          [userId]
+        );
 
         const sourceMap = {};
         sourceBreakdown.forEach((item) => {
-          sourceMap[item._id || 'Unknown'] = item.count;
+          sourceMap[item.source || 'Unknown'] = item.count;
         });
 
         // Get course breakdown
-        const courseBreakdown = await Lead.aggregate([
-          { $match: leadFilter },
-          {
-            $group: {
-              _id: '$courseInterested',
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { count: -1 } },
-          { $limit: 10 },
-        ]);
+        const [courseBreakdown] = await pool.execute(
+          `SELECT course_interested, COUNT(*) as count 
+           FROM leads 
+           WHERE assigned_to = ? 
+           GROUP BY course_interested 
+           ORDER BY count DESC 
+           LIMIT 10`,
+          [userId]
+        );
 
         const courseMap = {};
         courseBreakdown.forEach((item) => {
-          courseMap[item._id || 'Unknown'] = item.count;
+          courseMap[item.course_interested || 'Unknown'] = item.count;
         });
 
         return {
-          userId: userId.toString(),
+          userId: userId,
           userName: user.name,
           name: user.name,
           email: user.email,
-          roleName: user.roleName,
-          isActive: user.isActive,
+          roleName: user.role_name,
+          isActive: user.is_active === 1 || user.is_active === true,
           totalAssigned,
           activeLeads,
           convertedLeads,

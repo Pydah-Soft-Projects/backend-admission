@@ -4,8 +4,7 @@ import Excel from 'exceljs';
 import XLSX from 'xlsx';
 import Papa from 'papaparse';
 import PQueue from 'p-queue';
-import Lead from '../models/Lead.model.js';
-import ImportJob from '../models/ImportJob.model.js';
+import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -455,23 +454,35 @@ export const bulkUploadLeads = async (req, res) => {
       req.file?.size ||
       0;
 
-    const importJob = await ImportJob.create({
-      uploadId,
-      originalName,
-      filePath,
-      fileSize,
-      extension: fileExtension,
-      selectedSheets,
-      sourceLabel,
-      createdBy: req.user?._id,
-      status: 'queued',
-      uploadBatchId: batchId,
-      uploadToken,
-      message: 'Queued for processing',
-    });
+    const pool = getPool();
+    const jobId = uuidv4();
+
+    // Create import job in SQL
+    await pool.execute(
+      `INSERT INTO import_jobs (
+        id, upload_id, original_name, file_path, file_size, extension,
+        selected_sheets, source_label, status, created_by, upload_batch_id,
+        upload_token, message, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        jobId,
+        uploadId,
+        originalName,
+        filePath,
+        fileSize,
+        fileExtension,
+        JSON.stringify(selectedSheets),
+        sourceLabel,
+        'queued',
+        req.user?.id || null,
+        batchId,
+        uploadToken || null,
+        'Queued for processing',
+      ]
+    );
 
     importQueue
-      .add(() => processImportJob(importJob._id))
+      .add(() => processImportJob(jobId))
       .catch((error) => {
         console.error('Failed to enqueue import job', error);
       });
@@ -479,10 +490,10 @@ export const bulkUploadLeads = async (req, res) => {
     return successResponse(
       res,
       {
-        jobId: importJob._id,
+        jobId,
         uploadId,
         batchId,
-        status: importJob.status,
+        status: 'queued',
       },
       'Bulk upload queued successfully',
       202
@@ -500,10 +511,32 @@ export const bulkUploadLeads = async (req, res) => {
 };
 
 const processImportJob = async (jobId) => {
-  const job = await ImportJob.findById(jobId);
-  if (!job) {
+  const pool = getPool();
+  
+  // Fetch import job
+  const [jobs] = await pool.execute(
+    'SELECT * FROM import_jobs WHERE id = ?',
+    [jobId]
+  );
+
+  if (jobs.length === 0) {
     return;
   }
+
+  const job = jobs[0];
+  // Parse JSON fields
+  job.selectedSheets = typeof job.selected_sheets === 'string' 
+    ? JSON.parse(job.selected_sheets) 
+    : job.selected_sheets || [];
+  job.stats = {
+    totalProcessed: job.stats_total_processed || 0,
+    totalSuccess: job.stats_total_success || 0,
+    totalErrors: job.stats_total_errors || 0,
+    sheetsProcessed: typeof job.stats_sheets_processed === 'string'
+      ? JSON.parse(job.stats_sheets_processed)
+      : job.stats_sheets_processed || [],
+    durationMs: job.stats_duration_ms || 0,
+  };
 
   const startedAt = Date.now();
   const stats = {
@@ -568,25 +601,40 @@ const processImportJob = async (jobId) => {
       return;
     }
     updateJobProgress.lastUpdated = now;
-    await ImportJob.findByIdAndUpdate(jobId, {
-      stats: {
-        totalProcessed: stats.totalProcessed,
-        totalSuccess: stats.totalSuccess,
-        totalErrors: stats.totalErrors,
-        durationMs: Date.now() - startedAt,
-        sheetsProcessed: Array.from(processedSheets),
-      },
-      status: 'processing',
-      message,
-    }).catch(() => {});
+    await pool.execute(
+      `UPDATE import_jobs SET
+        stats_total_processed = ?,
+        stats_total_success = ?,
+        stats_total_errors = ?,
+        stats_duration_ms = ?,
+        stats_sheets_processed = ?,
+        status = ?,
+        message = ?,
+        updated_at = NOW()
+      WHERE id = ?`,
+      [
+        stats.totalProcessed,
+        stats.totalSuccess,
+        stats.totalErrors,
+        Date.now() - startedAt,
+        JSON.stringify(Array.from(processedSheets)),
+        'processing',
+        message,
+        jobId,
+      ]
+    ).catch(() => {});
   };
   updateJobProgress.lastUpdated = 0;
 
-  await ImportJob.findByIdAndUpdate(jobId, {
-    status: 'processing',
-    startedAt: new Date(),
-    message: 'Processing file',
-  }).catch(() => {});
+  await pool.execute(
+    `UPDATE import_jobs SET
+      status = ?,
+      started_at = NOW(),
+      message = ?,
+      updated_at = NOW()
+    WHERE id = ?`,
+    ['processing', 'Processing file', jobId]
+  ).catch(() => {});
 
   let currentSequence = 1;
   let enquiryPrefix = '';
@@ -596,15 +644,16 @@ const processImportJob = async (jobId) => {
     const yearSuffix = String(currentYear).slice(-2);
     enquiryPrefix = `ENQ${yearSuffix}`;
 
-    const lastLead = await Lead.findOne({
-      enquiryNumber: { $regex: `^${enquiryPrefix}` },
-    })
-      .sort({ enquiryNumber: -1 })
-      .select('enquiryNumber')
-      .lean();
+    const [lastLeads] = await pool.execute(
+      `SELECT enquiry_number FROM leads 
+       WHERE enquiry_number LIKE ? 
+       ORDER BY enquiry_number DESC 
+       LIMIT 1`,
+      [`${enquiryPrefix}%`]
+    );
 
-    if (lastLead?.enquiryNumber) {
-      const lastSequence = lastLead.enquiryNumber.replace(enquiryPrefix, '');
+    if (lastLeads.length > 0 && lastLeads[0].enquiry_number) {
+      const lastSequence = lastLeads[0].enquiry_number.replace(enquiryPrefix, '');
       const lastNumber = parseInt(lastSequence, 10);
       if (!Number.isNaN(lastNumber)) {
         currentSequence = lastNumber + 1;
@@ -712,9 +761,9 @@ const processImportJob = async (jobId) => {
         applicationStatus: toTrimmedString(normalizedLead.applicationStatus) || 'Not Provided',
         notes: toTrimmedString(normalizedLead.notes),
         dynamicFields: cleanedDynamicFields,
-        source: toTrimmedString(normalizedLead.source) || job.sourceLabel || 'Bulk Upload',
-        uploadedBy: job.createdBy,
-        uploadBatchId: job.uploadBatchId,
+        source: toTrimmedString(normalizedLead.source) || job.source_label || 'Bulk Upload',
+        uploadedBy: job.created_by,
+        uploadBatchId: job.upload_batch_id,
         leadStatus: toTrimmedString(normalizedLead.leadStatus) || 'New',
         createdAt: now,
         updatedAt: now,
@@ -738,39 +787,72 @@ const processImportJob = async (jobId) => {
       let failedInBatch = 0;
 
       try {
-        await Lead.collection.insertMany(documents, {
-          ordered: false,
-          writeConcern: { w: 1 },
-        });
-        successfulInBatch = documents.length;
-        } catch (error) {
-        if (error.writeErrors && Array.isArray(error.writeErrors)) {
-          const failedIndexes = new Set();
-          error.writeErrors.forEach((writeError) => {
-            const failedIndex = writeError.index;
-            failedIndexes.add(failedIndex);
-            const meta = entries[failedIndex]?.meta;
-            pushErrorDetail(
-              meta,
-              entries[failedIndex]?.doc,
-              writeError.errmsg || writeError.err?.message || 'Insert failed'
+        // Bulk insert leads using prepared statements
+        const insertPromises = documents.map(async (doc) => {
+          const leadId = uuidv4();
+          try {
+            await pool.execute(
+              `INSERT INTO leads (
+                id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
+                hall_ticket_number, village, course_interested, district, mandal, state,
+                is_nri, gender, \`rank\`, inter_college, quota, application_status,
+                dynamic_fields, lead_status, source, uploaded_by, upload_batch_id,
+                notes, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+              [
+                leadId,
+                doc.enquiryNumber,
+                doc.name,
+                doc.phone,
+                doc.email || null,
+                doc.fatherName,
+                doc.motherName || '',
+                doc.fatherPhone,
+                doc.hallTicketNumber || '',
+                doc.village,
+                doc.courseInterested || null,
+                doc.district,
+                doc.mandal,
+                doc.state || 'Andhra Pradesh',
+                doc.isNRI === true || doc.isNRI === 'true' ? 1 : 0,
+                doc.gender || 'Not Specified',
+                doc.rank !== undefined && doc.rank !== null ? doc.rank : null,
+                doc.interCollege || '',
+                doc.quota || 'Not Applicable',
+                doc.applicationStatus || 'Not Provided',
+                JSON.stringify(doc.dynamicFields || {}),
+                doc.leadStatus || 'New',
+                doc.source || 'Bulk Upload',
+                job.created_by || null,
+                job.upload_batch_id || null,
+                doc.notes || null,
+              ]
             );
-          });
-          failedInBatch = failedIndexes.size;
-          successfulInBatch = documents.length - failedInBatch;
-        } else if (typeof error.insertedCount === 'number') {
-          successfulInBatch = error.insertedCount;
-          failedInBatch = documents.length - error.insertedCount;
-          for (let i = error.insertedCount; i < documents.length; i += 1) {
-            const meta = entries[i]?.meta;
-            pushErrorDetail(meta, entries[i]?.doc, error.message || 'Insert failed');
+            return { success: true };
+          } catch (insertError) {
+            return { success: false, error: insertError };
           }
-        } else {
-          failedInBatch = documents.length;
-          entries.forEach((entry) => {
-            pushErrorDetail(entry.meta, entry.doc, error.message || 'Insert failed');
-          });
-        }
+        });
+
+        const results = await Promise.allSettled(insertPromises);
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled' && result.value.success) {
+            successfulInBatch += 1;
+          } else {
+            failedInBatch += 1;
+            const meta = entries[index]?.meta;
+            const errorMsg = result.status === 'rejected' 
+              ? result.reason?.message || 'Insert failed'
+              : result.value?.error?.message || 'Insert failed';
+            pushErrorDetail(meta, entries[index]?.doc, errorMsg);
+          }
+        });
+      } catch (error) {
+        // Fallback: mark all as failed
+        failedInBatch = documents.length;
+        entries.forEach((entry) => {
+          pushErrorDetail(entry.meta, entry.doc, error.message || 'Insert failed');
+        });
       }
 
       stats.totalSuccess += successfulInBatch;
@@ -783,7 +865,18 @@ const processImportJob = async (jobId) => {
 
     const scheduleFlush = async (entries) => {
       if (!entries || entries.length === 0) return;
-      pendingFlush = pendingFlush.then(() => flushEntries(entries));
+      // Chain the flush operation but don't await it immediately to avoid blocking
+      pendingFlush = pendingFlush
+        .then(() => flushEntries(entries))
+        .catch((error) => {
+          console.error('[Import] Error in flushEntries:', error);
+          // Mark all entries as failed
+          entries.forEach((entry) => {
+            stats.totalErrors += 1;
+            pushErrorDetail(entry.meta, entry.doc, error.message || 'Database insert failed');
+          });
+        });
+      // Wait for the flush to complete before continuing
       await pendingFlush;
     };
 
@@ -802,14 +895,25 @@ const processImportJob = async (jobId) => {
         leadsBuffer.push({ doc: leadDoc, meta });
         if (leadsBuffer.length >= DEFAULT_CHUNK_SIZE) {
           const entries = leadsBuffer.splice(0, leadsBuffer.length);
-          await scheduleFlush(entries);
+          // Schedule flush but handle errors gracefully to not break the stream
+          try {
+            await scheduleFlush(entries);
+          } catch (flushError) {
+            console.error('[Import] Error flushing leads buffer:', flushError);
+            // Mark entries as failed but continue processing
+            entries.forEach((entry) => {
+              stats.totalErrors += 1;
+              pushErrorDetail(entry.meta, entry.doc, flushError.message || 'Database flush failed');
+            });
+          }
         }
-        } catch (error) {
+      } catch (error) {
         stats.totalErrors += 1;
         pushErrorDetail(meta, rawLead, error.message || 'Validation failed');
-        await updateJobProgress(
+        // Don't await updateJobProgress to avoid blocking
+        updateJobProgress(
           `Processed ${stats.totalProcessed} row(s). Success: ${stats.totalSuccess}, Errors: ${stats.totalErrors}`
-        );
+        ).catch(() => {}); // Ignore update errors
       }
     };
 
@@ -817,46 +921,104 @@ const processImportJob = async (jobId) => {
     let processedSheetCount = 0;
 
     const processExcelStream = async () => {
-      const workbookReader = new Excel.stream.xlsx.WorkbookReader(job.filePath, {
-        entries: 'emit',
-        sharedStrings: 'cache',
-        hyperlinks: 'cache',
-        styles: 'cache',
-        worksheets: 'emit',
-      });
+      // Verify file exists before processing
+      try {
+        await fsPromises.access(job.file_path);
+      } catch (error) {
+        throw new Error(`File not found: ${job.file_path}. The file may have been deleted or moved.`);
+      }
 
-      for await (const worksheetReader of workbookReader) {
-        const sheetName = worksheetReader.name || `Sheet${worksheetReader.id}`;
-        if (selectedSheets.length > 0 && !selectedSheets.includes(sheetName)) {
-          // eslint-disable-next-line no-continue
-          continue;
-        }
+      // Verify file is readable
+      const fileStats = await fsPromises.stat(job.file_path).catch(() => null);
+      if (!fileStats || fileStats.size === 0) {
+        throw new Error('File is empty or cannot be read');
+      }
 
-        processedSheets.add(sheetName);
-        processedSheetCount += 1;
-        let headers = null;
+      let workbookReader;
+      try {
+        workbookReader = new Excel.stream.xlsx.WorkbookReader(job.file_path, {
+          entries: 'emit',
+          sharedStrings: 'cache',
+          hyperlinks: 'cache',
+          styles: 'cache',
+          worksheets: 'emit',
+        });
+      } catch (error) {
+        throw new Error(`Failed to initialize Excel reader: ${error.message}. The file may be corrupted or in an unsupported format.`);
+      }
 
-        for await (const row of worksheetReader) {
-          const rowValues = row.values || [];
-          if (!headers) {
-            headers = rowValues
-              .slice(1)
-              .map((cellValue, index) => {
-                const value = getCellValue(cellValue);
-                const trimmed = value === undefined || value === null ? '' : String(value).trim();
-                return trimmed || `Column${index + 1}`;
-              });
+      // Verify workbookReader is properly initialized
+      if (!workbookReader) {
+        throw new Error('WorkbookReader initialization failed');
+      }
+
+      try {
+        for await (const worksheetReader of workbookReader) {
+          if (!worksheetReader) {
+            console.warn('[Import] Skipping invalid worksheet reader');
+            continue;
+          }
+
+          const sheetName = worksheetReader.name || `Sheet${worksheetReader.id || processedSheetCount + 1}`;
+          if (selectedSheets.length > 0 && !selectedSheets.includes(sheetName)) {
             // eslint-disable-next-line no-continue
             continue;
           }
 
-          const rawLead = {};
-          headers.forEach((header, index) => {
-            rawLead[header] = getCellValue(rowValues[index + 1]);
-          });
+          processedSheets.add(sheetName);
+          processedSheetCount += 1;
+          let headers = null;
 
-          await processRawLead(rawLead, { sheetName, rowNumber: row.number });
+          try {
+            for await (const row of worksheetReader) {
+              if (!row) {
+                continue;
+              }
+
+              const rowValues = row.values || [];
+              if (!headers) {
+                headers = rowValues
+                  .slice(1)
+                  .map((cellValue, index) => {
+                    const value = getCellValue(cellValue);
+                    const trimmed = value === undefined || value === null ? '' : String(value).trim();
+                    return trimmed || `Column${index + 1}`;
+                  });
+                // eslint-disable-next-line no-continue
+                continue;
+              }
+
+              const rawLead = {};
+              headers.forEach((header, index) => {
+                rawLead[header] = getCellValue(rowValues[index + 1]);
+              });
+
+              // Process lead - await to ensure proper buffer flushing, but catch errors to prevent stream failure
+              try {
+                await processRawLead(rawLead, { sheetName, rowNumber: row.number });
+              } catch (leadError) {
+                // Error already handled in processRawLead, just log for debugging
+                console.error(`[Import] Error processing lead in sheet "${sheetName}", row ${row.number}:`, leadError.message);
+                // Don't re-throw - continue processing other rows
+              }
+            }
+          } catch (sheetError) {
+            console.error(`[Import] Error processing sheet "${sheetName}":`, sheetError);
+            // Continue with other sheets instead of failing completely
+            stats.totalErrors += 1;
+            pushErrorDetail(
+              { sheetName, rowNumber: null },
+              {},
+              `Error processing sheet "${sheetName}": ${sheetError.message}`
+            );
+          }
         }
+      } catch (parseError) {
+        // More specific error message for parsing errors
+        if (parseError.message && parseError.message.includes('sheets')) {
+          throw new Error(`Excel file parsing failed: The file structure may be corrupted or invalid. Please verify the file is a valid .xlsx file. Original error: ${parseError.message}`);
+        }
+        throw new Error(`Excel file parsing failed: ${parseError.message}`);
       }
 
       if (processedSheetCount === 0) {
@@ -869,7 +1031,7 @@ const processImportJob = async (jobId) => {
       let rowNumber = 2;
 
       await new Promise((resolve, reject) => {
-        const stream = createReadStream(job.filePath);
+        const stream = createReadStream(job.file_path);
         Papa.parse(stream, {
           header: true,
           skipEmptyLines: true,
@@ -890,9 +1052,23 @@ const processImportJob = async (jobId) => {
       });
     };
 
-    if (['.xlsx', '.xlsm', '.xlsb'].includes(job.extension)) {
-      await processExcelStream();
-    } else if (job.extension === '.csv') {
+    if (['.xlsx', '.xlsm', '.xlsb'].includes(job.extension || '')) {
+      try {
+        await processExcelStream();
+      } catch (excelError) {
+        // If streaming reader fails, provide a more helpful error message
+        const errorMessage = excelError.message || 'Unknown error';
+        if (errorMessage.includes('sheets') || errorMessage.includes('Cannot read properties')) {
+          throw new Error(
+            `Excel file parsing failed: The file may be corrupted, password-protected, or in an unsupported format. ` +
+            `Please ensure the file is a valid .xlsx file and try again. ` +
+            `If the problem persists, try opening and re-saving the file in Excel. ` +
+            `Original error: ${errorMessage}`
+          );
+        }
+        throw excelError;
+      }
+    } else if ((job.extension || '') === '.csv') {
       await processCsvStream();
     } else if (job.extension === '.xls') {
       throw new Error('Legacy .xls files are not supported. Please convert the file to .xlsx and try again.');
@@ -909,16 +1085,82 @@ const processImportJob = async (jobId) => {
 
     stats.durationMs = Date.now() - startedAt;
 
-    await ImportJob.findByIdAndUpdate(jobId, {
-      status: 'completed',
-      completedAt: new Date(),
-      stats: {
-        ...stats,
-        sheetsProcessed: Array.from(processedSheets),
-      },
-      errorDetails: errors.slice(0, MAX_ERROR_DETAILS),
-      message: `Imported ${stats.totalSuccess} of ${stats.totalProcessed} row(s).`,
-    }).catch(() => {});
+    // Log stats before saving for debugging
+    console.log('[Import] Final stats before saving:', {
+      totalProcessed: stats.totalProcessed,
+      totalSuccess: stats.totalSuccess,
+      totalErrors: stats.totalErrors,
+      durationMs: stats.durationMs,
+      sheetsProcessed: Array.from(processedSheets),
+    });
+
+    // Update job status
+    const updateResult = await pool.execute(
+      `UPDATE import_jobs SET
+        status = ?,
+        completed_at = NOW(),
+        stats_total_processed = ?,
+        stats_total_success = ?,
+        stats_total_errors = ?,
+        stats_sheets_processed = ?,
+        stats_duration_ms = ?,
+        message = ?,
+        updated_at = NOW()
+      WHERE id = ?`,
+      [
+        'completed',
+        stats.totalProcessed || 0,
+        stats.totalSuccess || 0,
+        stats.totalErrors || 0,
+        JSON.stringify(Array.from(processedSheets)),
+        stats.durationMs || 0,
+        `Imported ${stats.totalSuccess || 0} of ${stats.totalProcessed || 0} row(s).`,
+        jobId,
+      ]
+    ).catch((error) => {
+      console.error('[Import] Error updating job status:', error);
+      throw error;
+    });
+
+    console.log('[Import] Job status updated. Affected rows:', updateResult[0]?.affectedRows || 0);
+
+    // Insert error details
+    const errorDetailsToInsert = errors.slice(0, MAX_ERROR_DETAILS);
+    if (errorDetailsToInsert.length > 0) {
+      const errorInsertPromises = errorDetailsToInsert.map(async (errorDetail) => {
+        const errorId = uuidv4();
+        await pool.execute(
+          `INSERT INTO import_job_error_details (id, import_job_id, sheet, \`row_number\`, error, created_at)
+           VALUES (?, ?, ?, ?, ?, NOW())`,
+          [
+            errorId,
+            jobId,
+            errorDetail.sheet || null,
+            errorDetail.row || errorDetail.rowNumber || null,
+            errorDetail.error || 'Unknown error',
+          ]
+        );
+      });
+      await Promise.allSettled(errorInsertPromises);
+    }
+
+    // Verify stats were saved correctly
+    try {
+      const [verifyJobs] = await pool.execute(
+        'SELECT stats_total_processed, stats_total_success, stats_total_errors FROM import_jobs WHERE id = ?',
+        [jobId]
+      );
+      if (verifyJobs.length > 0) {
+        const savedStats = verifyJobs[0];
+        console.log('[Import] Verified saved stats:', {
+          totalProcessed: savedStats.stats_total_processed,
+          totalSuccess: savedStats.stats_total_success,
+          totalErrors: savedStats.stats_total_errors,
+        });
+      }
+    } catch (verifyError) {
+      console.error('[Import] Error verifying saved stats:', verifyError);
+    }
   } catch (error) {
     console.error('Import job failed:', error);
     stats.durationMs = Date.now() - startedAt;
@@ -926,18 +1168,52 @@ const processImportJob = async (jobId) => {
       pushErrorDetail({ sheetName: 'N/A', rowNumber: 0 }, null, error.message || 'Import failed');
     }
 
-    await ImportJob.findByIdAndUpdate(jobId, {
-      status: 'failed',
-      completedAt: new Date(),
-      stats: {
-        ...stats,
-        sheetsProcessed: Array.from(processedSheets),
-      },
-      errorDetails: errors.slice(0, MAX_ERROR_DETAILS),
-      message: error.message || 'Import job failed',
-    }).catch(() => {});
+    // Update job status to failed
+    await pool.execute(
+      `UPDATE import_jobs SET
+        status = ?,
+        completed_at = NOW(),
+        stats_total_processed = ?,
+        stats_total_success = ?,
+        stats_total_errors = ?,
+        stats_sheets_processed = ?,
+        stats_duration_ms = ?,
+        message = ?,
+        updated_at = NOW()
+      WHERE id = ?`,
+      [
+        'failed',
+        stats.totalProcessed,
+        stats.totalSuccess,
+        stats.totalErrors,
+        JSON.stringify(Array.from(processedSheets)),
+        stats.durationMs,
+        error.message || 'Import job failed',
+        jobId,
+      ]
+    ).catch(() => {});
+
+    // Insert error details
+    const errorDetailsToInsert = errors.slice(0, MAX_ERROR_DETAILS);
+    if (errorDetailsToInsert.length > 0) {
+      const errorInsertPromises = errorDetailsToInsert.map(async (errorDetail) => {
+        const errorId = uuidv4();
+        await pool.execute(
+          `INSERT INTO import_job_error_details (id, import_job_id, sheet, \`row_number\`, error, created_at)
+           VALUES (?, ?, ?, ?, ?, NOW())`,
+          [
+            errorId,
+            jobId,
+            errorDetail.sheet || null,
+            errorDetail.row || errorDetail.rowNumber || null,
+            errorDetail.error || 'Unknown error',
+          ]
+        );
+      });
+      await Promise.allSettled(errorInsertPromises);
+    }
   } finally {
-    await fsPromises.unlink(job.filePath).catch(() => {});
+    await fsPromises.unlink(job.file_path).catch(() => {});
   }
 };
 
@@ -947,25 +1223,21 @@ const processImportJob = async (jobId) => {
 export const getUploadStats = async (req, res) => {
   try {
     const { batchId } = req.query;
+    const pool = getPool();
 
     if (!batchId) {
       return errorResponse(res, 'Batch ID is required', 400);
     }
 
-    const stats = await Lead.aggregate([
-      { $match: { uploadBatchId: batchId } },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          byStatus: { $push: '$applicationStatus' },
-          byMandal: { $push: '$mandal' },
-          byState: { $push: '$state' },
-        },
-      },
-    ]);
+    // Get total count
+    const [totalResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM leads WHERE upload_batch_id = ?',
+      [batchId]
+    );
 
-    if (stats.length === 0) {
+    const total = totalResult[0]?.total || 0;
+
+    if (total === 0) {
       return successResponse(res, {
         total: 0,
         byStatus: {},
@@ -974,30 +1246,56 @@ export const getUploadStats = async (req, res) => {
       }, 'No leads found for this batch', 200);
     }
 
-    // Count occurrences
+    // Get counts by status
+    const [statusResults] = await pool.execute(
+      `SELECT application_status, COUNT(*) as count 
+       FROM leads 
+       WHERE upload_batch_id = ? 
+       GROUP BY application_status`,
+      [batchId]
+    );
+
     const statusCount = {};
+    statusResults.forEach((row) => {
+      statusCount[row.application_status || 'Not Provided'] = row.count;
+    });
+
+    // Get counts by mandal
+    const [mandalResults] = await pool.execute(
+      `SELECT mandal, COUNT(*) as count 
+       FROM leads 
+       WHERE upload_batch_id = ? 
+       GROUP BY mandal`,
+      [batchId]
+    );
+
     const mandalCount = {};
+    mandalResults.forEach((row) => {
+      mandalCount[row.mandal || 'Unknown'] = row.count;
+    });
+
+    // Get counts by state
+    const [stateResults] = await pool.execute(
+      `SELECT state, COUNT(*) as count 
+       FROM leads 
+       WHERE upload_batch_id = ? 
+       GROUP BY state`,
+      [batchId]
+    );
+
     const stateCount = {};
-
-    stats[0].byStatus.forEach((status) => {
-      statusCount[status] = (statusCount[status] || 0) + 1;
-    });
-
-    stats[0].byMandal.forEach((mandal) => {
-      mandalCount[mandal] = (mandalCount[mandal] || 0) + 1;
-    });
-
-    stats[0].byState.forEach((state) => {
-      stateCount[state] = (stateCount[state] || 0) + 1;
+    stateResults.forEach((row) => {
+      stateCount[row.state || 'Unknown'] = row.count;
     });
 
     return successResponse(res, {
-      total: stats[0].total,
+      total,
       byStatus: statusCount,
       byMandal: mandalCount,
       byState: stateCount,
     }, 'Upload statistics retrieved successfully', 200);
   } catch (error) {
+    console.error('Error getting upload stats:', error);
     return errorResponse(res, error.message || 'Failed to get upload stats', 500);
   }
 };
@@ -1008,34 +1306,83 @@ export const getUploadStats = async (req, res) => {
 export const getImportJobStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
+    const pool = getPool();
 
     if (!jobId) {
       return errorResponse(res, 'Job ID is required', 400);
     }
 
-    const job = await ImportJob.findById(jobId).lean();
+    // Fetch import job
+    const [jobs] = await pool.execute(
+      'SELECT * FROM import_jobs WHERE id = ?',
+      [jobId]
+    );
 
-    if (!job) {
+    if (jobs.length === 0) {
       return errorResponse(res, 'Import job not found', 404);
     }
 
+    const job = jobs[0];
+
+    // Fetch error details
+    const [errorDetails] = await pool.execute(
+      'SELECT sheet, `row_number` as rowNumber, error FROM import_job_error_details WHERE import_job_id = ? ORDER BY created_at ASC',
+      [jobId]
+    );
+
+    // Parse sheets processed safely
+    let sheetsProcessed = [];
+    try {
+      if (job.stats_sheets_processed) {
+        if (typeof job.stats_sheets_processed === 'string') {
+          sheetsProcessed = JSON.parse(job.stats_sheets_processed);
+        } else if (Array.isArray(job.stats_sheets_processed)) {
+          sheetsProcessed = job.stats_sheets_processed;
+        }
+      }
+    } catch (parseError) {
+      console.error('[Import] Error parsing stats_sheets_processed:', parseError);
+      sheetsProcessed = [];
+    }
+
+    // Format response with explicit number conversion
+    const response = {
+      jobId: job.id,
+      uploadId: job.upload_id,
+      status: job.status,
+      stats: {
+        totalProcessed: Number(job.stats_total_processed) || 0,
+        totalSuccess: Number(job.stats_total_success) || 0,
+        totalErrors: Number(job.stats_total_errors) || 0,
+        sheetsProcessed: sheetsProcessed,
+        durationMs: Number(job.stats_duration_ms) || 0,
+      },
+      message: job.message || null,
+      errorDetails: errorDetails.map((err) => ({
+        sheet: err.sheet || null,
+        row: err.rowNumber || null,
+        error: err.error || 'Unknown error',
+      })),
+      createdAt: job.created_at,
+      startedAt: job.started_at,
+      completedAt: job.completed_at,
+    };
+
+    // Log response for debugging
+    console.log('[Import] Returning job status response:', {
+      jobId: response.jobId,
+      status: response.status,
+      stats: response.stats,
+    });
+
     return successResponse(
       res,
-      {
-        jobId: job._id,
-        uploadId: job.uploadId,
-        status: job.status,
-        stats: job.stats,
-        message: job.message,
-        errorDetails: job.errorDetails,
-        createdAt: job.createdAt,
-        startedAt: job.startedAt,
-        completedAt: job.completedAt,
-      },
+      response,
       'Import job status retrieved successfully',
       200
     );
   } catch (error) {
+    console.error('Error getting import job status:', error);
     return errorResponse(res, error.message || 'Failed to get import job status', 500);
   }
 };

@@ -1,4 +1,5 @@
-import ShortUrl from '../models/ShortUrl.model.js';
+import { getPool } from '../config-sql/database.js';
+import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 
 /**
@@ -77,11 +78,15 @@ export const createShortUrl = async ({
   }
 
   // Ensure code is unique
+  const pool = getPool();
   let attempts = 0;
   let finalCode = code;
   while (attempts < 10) {
-    const existing = await ShortUrl.findOne({ shortCode: finalCode });
-    if (!existing) {
+    const [existing] = await pool.execute(
+      'SELECT id FROM short_urls WHERE short_code = ?',
+      [finalCode]
+    );
+    if (!existing || existing.length === 0) {
       break;
     }
     // If code exists, append random suffix
@@ -94,20 +99,34 @@ export const createShortUrl = async ({
   }
 
   // Create short URL
-  const shortUrl = await ShortUrl.create({
-    shortCode: finalCode,
-    originalUrl,
-    utmSource,
-    utmMedium,
-    utmCampaign,
-    utmTerm,
-    utmContent,
-    createdBy: userId,
-    expiresAt,
-    isActive: true,
-  });
+  const shortUrlId = uuidv4();
+  await pool.execute(
+    `INSERT INTO short_urls (
+      id, short_code, original_url, utm_source, utm_medium, utm_campaign,
+      utm_term, utm_content, created_by, expires_at, is_active, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      shortUrlId,
+      finalCode,
+      originalUrl,
+      utmSource || null,
+      utmMedium || null,
+      utmCampaign || null,
+      utmTerm || null,
+      utmContent || null,
+      userId || null,
+      expiresAt || null,
+      true,
+    ]
+  );
 
-  return shortUrl;
+  // Fetch created short URL
+  const [rows] = await pool.execute(
+    'SELECT * FROM short_urls WHERE id = ?',
+    [shortUrlId]
+  );
+
+  return rows[0];
 };
 
 /**
@@ -120,31 +139,53 @@ export const createShortUrl = async ({
  * @returns {Promise<Object>} Short URL with UTM parameters
  */
 export const getShortUrl = async (shortCode, clickData = {}) => {
-  const shortUrl = await ShortUrl.findOne({
-    shortCode,
-    isActive: true,
-  });
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    'SELECT * FROM short_urls WHERE short_code = ? AND is_active = ?',
+    [shortCode, true]
+  );
 
-  if (!shortUrl) {
+  if (!rows || rows.length === 0) {
     return null;
   }
+
+  const shortUrl = rows[0];
 
   // Check if expired
-  if (shortUrl.expiresAt && new Date() > shortUrl.expiresAt) {
+  if (shortUrl.expires_at && new Date() > new Date(shortUrl.expires_at)) {
     return null;
   }
 
-  // Increment click count and add click record
-  shortUrl.clickCount += 1;
-  shortUrl.clicks.push({
-    clickedAt: new Date(),
-    ipAddress: clickData.ipAddress,
-    userAgent: clickData.userAgent,
-    referer: clickData.referer,
-  });
-  await shortUrl.save();
+  // Increment click count
+  await pool.execute(
+    'UPDATE short_urls SET click_count = click_count + 1, updated_at = NOW() WHERE id = ?',
+    [shortUrl.id]
+  );
 
-  return shortUrl;
+  // Add click record to short_url_clicks table
+  if (clickData.ipAddress || clickData.userAgent || clickData.referer) {
+    const clickId = uuidv4();
+    await pool.execute(
+      `INSERT INTO short_url_clicks (
+        id, short_url_id, clicked_at, ip_address, user_agent, referer
+      ) VALUES (?, ?, NOW(), ?, ?, ?)`,
+      [
+        clickId,
+        shortUrl.id,
+        clickData.ipAddress || null,
+        clickData.userAgent || null,
+        clickData.referer || null,
+      ]
+    );
+  }
+
+  // Fetch updated short URL
+  const [updatedRows] = await pool.execute(
+    'SELECT * FROM short_urls WHERE id = ?',
+    [shortUrl.id]
+  );
+
+  return updatedRows[0];
 };
 
 /**
@@ -172,38 +213,66 @@ export const createOrUpdateLongUrl = async ({
     throw new Error('Original URL is required');
   }
 
-  // Check if a record with this URL already exists (without short code)
-  let urlRecord = await ShortUrl.findOne({
-    originalUrl,
-    shortCode: null,
-    createdBy: userId,
-  });
+  const pool = getPool();
 
-  if (urlRecord) {
+  // Check if a record with this URL already exists (without short code)
+  const [existing] = await pool.execute(
+    'SELECT * FROM short_urls WHERE original_url = ? AND short_code IS NULL AND created_by = ?',
+    [originalUrl, userId]
+  );
+
+  if (existing && existing.length > 0) {
     // Update existing record
-    urlRecord.utmSource = utmSource;
-    urlRecord.utmMedium = utmMedium;
-    urlRecord.utmCampaign = utmCampaign;
-    urlRecord.utmTerm = utmTerm;
-    urlRecord.utmContent = utmContent;
-    await urlRecord.save();
-    return urlRecord;
+    await pool.execute(
+      `UPDATE short_urls SET
+        utm_source = ?, utm_medium = ?, utm_campaign = ?,
+        utm_term = ?, utm_content = ?, updated_at = NOW()
+      WHERE id = ?`,
+      [
+        utmSource || null,
+        utmMedium || null,
+        utmCampaign || null,
+        utmTerm || null,
+        utmContent || null,
+        existing[0].id,
+      ]
+    );
+
+    // Fetch updated record
+    const [updated] = await pool.execute(
+      'SELECT * FROM short_urls WHERE id = ?',
+      [existing[0].id]
+    );
+    return updated[0];
   }
 
   // Create new record without short code
-  urlRecord = await ShortUrl.create({
-    originalUrl,
-    utmSource,
-    utmMedium,
-    utmCampaign,
-    utmTerm,
-    utmContent,
-    createdBy: userId,
-    isActive: true,
-    // shortCode is null for long URLs
-  });
+  const urlRecordId = uuidv4();
+  await pool.execute(
+    `INSERT INTO short_urls (
+      id, original_url, utm_source, utm_medium, utm_campaign,
+      utm_term, utm_content, created_by, is_active, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      urlRecordId,
+      originalUrl,
+      utmSource || null,
+      utmMedium || null,
+      utmCampaign || null,
+      utmTerm || null,
+      utmContent || null,
+      userId || null,
+      true,
+    ]
+  );
 
-  return urlRecord;
+  // Fetch created record
+  const [rows] = await pool.execute(
+    'SELECT * FROM short_urls WHERE id = ?',
+    [urlRecordId]
+  );
+
+  return rows[0];
 };
 
 /**
@@ -214,27 +283,43 @@ export const createOrUpdateLongUrl = async ({
  * @returns {Promise<Object>} Updated URL record
  */
 export const addShortCodeToUrl = async (originalUrl, shortCode, userId) => {
-  // Find existing record by original URL and user
-  let urlRecord = await ShortUrl.findOne({
-    originalUrl,
-    createdBy: userId,
-  });
+  const pool = getPool();
 
-  if (!urlRecord) {
+  // Find existing record by original URL and user
+  const [rows] = await pool.execute(
+    'SELECT * FROM short_urls WHERE original_url = ? AND created_by = ?',
+    [originalUrl, userId]
+  );
+
+  if (!rows || rows.length === 0) {
     throw new Error('URL record not found');
   }
 
+  const urlRecord = rows[0];
+
   // Check if short code already exists
-  const existingCode = await ShortUrl.findOne({ shortCode });
-  if (existingCode && existingCode._id.toString() !== urlRecord._id.toString()) {
+  const [existingCode] = await pool.execute(
+    'SELECT id FROM short_urls WHERE short_code = ?',
+    [shortCode]
+  );
+
+  if (existingCode && existingCode.length > 0 && existingCode[0].id !== urlRecord.id) {
     throw new Error('Short code already exists');
   }
 
   // Update with short code
-  urlRecord.shortCode = shortCode;
-  await urlRecord.save();
+  await pool.execute(
+    'UPDATE short_urls SET short_code = ?, updated_at = NOW() WHERE id = ?',
+    [shortCode, urlRecord.id]
+  );
 
-  return urlRecord;
+  // Fetch updated record
+  const [updated] = await pool.execute(
+    'SELECT * FROM short_urls WHERE id = ?',
+    [urlRecord.id]
+  );
+
+  return updated[0];
 };
 
 /**
