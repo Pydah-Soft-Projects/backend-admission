@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import connectDB from './config/database.js';
+// import connectDB from './config/database.js'; // COMMENTED OUT: Migration to SQL complete
+import connectSQLDB from './config-sql/database.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import leadRoutes from './routes/lead.routes.js';
@@ -19,8 +20,21 @@ import managerRoutes from './routes/manager.routes.js';
 // Load environment variables
 dotenv.config();
 
-// Connect to database
-connectDB();
+// Connect to databases
+// MongoDB connection (existing) - COMMENTED OUT: Migration to SQL complete
+// connectDB();
+
+// MySQL connection (Amazon RDS)
+if (process.env.DB_HOST && process.env.DB_NAME) {
+  console.log('Attempting to connect to MySQL (Amazon RDS)...');
+  connectSQLDB().catch((error) => {
+    console.error('⚠️  MySQL connection failed:', error.message);
+    console.log('⚠️  Server will start but database operations will fail without MySQL connection.');
+    // Don't exit - allow server to start for debugging, but operations will fail
+  });
+} else {
+  console.log('⚠️  MySQL configuration not found - skipping MySQL connection');
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;

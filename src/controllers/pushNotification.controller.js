@@ -31,7 +31,7 @@ export const getVapidKey = async (req, res) => {
 export const subscribeToPush = async (req, res) => {
   try {
     const { subscription } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id || req.user._id;
 
     if (!subscription || !subscription.endpoint || !subscription.keys) {
       return errorResponse(res, 'Valid push subscription is required', 400);
@@ -41,7 +41,7 @@ export const subscribeToPush = async (req, res) => {
 
     return successResponse(
       res,
-      { subscriptionId: savedSubscription._id },
+      { subscriptionId: savedSubscription.id },
       'Successfully subscribed to push notifications',
       200
     );
@@ -57,7 +57,7 @@ export const subscribeToPush = async (req, res) => {
 export const unsubscribeFromPush = async (req, res) => {
   try {
     const { endpoint } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id || req.user._id;
 
     if (!endpoint) {
       return errorResponse(res, 'Subscription endpoint is required', 400);
@@ -81,7 +81,7 @@ export const unsubscribeFromPush = async (req, res) => {
 // @access  Private
 export const sendTestPush = async (req, res) => {
   try {
-    const userId = req.user._id;
+    const userId = req.user.id || req.user._id;
 
     const result = await sendPushNotificationToUser(userId, {
       title: 'Test Notification',
@@ -114,15 +114,13 @@ export const sendTestPush = async (req, res) => {
 // @access  Private
 export const getUserSubscriptions = async (req, res) => {
   try {
-    const userId = req.user._id;
-    const PushSubscription = (await import('../models/PushSubscription.model.js')).default;
+    const userId = req.user.id || req.user._id;
+    const pool = getPool();
 
-    const subscriptions = await PushSubscription.find({
-      userId,
-      isActive: true,
-    })
-      .select('endpoint keys isActive createdAt updatedAt')
-      .lean();
+    const [subscriptions] = await pool.execute(
+      'SELECT id, endpoint, is_active, created_at, updated_at FROM push_subscriptions WHERE user_id = ? AND is_active = ?',
+      [userId, true]
+    );
 
     return successResponse(
       res,
@@ -130,11 +128,11 @@ export const getUserSubscriptions = async (req, res) => {
         userId,
         count: subscriptions.length,
         subscriptions: subscriptions.map((sub) => ({
-          id: sub._id,
+          id: sub.id,
           endpoint: sub.endpoint.substring(0, 50) + '...',
-          isActive: sub.isActive,
-          createdAt: sub.createdAt,
-          updatedAt: sub.updatedAt,
+          isActive: sub.is_active === 1 || sub.is_active === true,
+          createdAt: sub.created_at,
+          updatedAt: sub.updated_at,
         })),
       },
       `Found ${subscriptions.length} active subscription(s)`,
@@ -156,14 +154,16 @@ export const sendTestNotificationsToAll = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only.', 403);
     }
 
-    const User = (await import('../models/User.model.js')).default;
+    const { getPool } = await import('../config-sql/database.js');
     const { sendPushNotificationToUsers } = await import('../services/pushNotification.service.js');
     const { sendEmail } = await import('../services/unifiedEmail.service.js');
+    const pool = getPool();
 
     // Get all active users
-    const users = await User.find({ isActive: true })
-      .select('_id name email')
-      .lean();
+    const [users] = await pool.execute(
+      'SELECT id, name, email FROM users WHERE is_active = ?',
+      [true]
+    );
 
     if (users.length === 0) {
       return errorResponse(res, 'No active users found', 404);
@@ -178,7 +178,7 @@ export const sendTestNotificationsToAll = async (req, res) => {
     try {
       const pushPromises = users.map(async (user) => {
         try {
-          const pushResult = await sendPushNotificationToUser(user._id.toString(), {
+          const pushResult = await sendPushNotificationToUser(user.id, {
             title: `Hello ${user.name}! 👋`,
             body: `This is a personalized test notification. The notification system is working correctly!`,
             icon: '/icon-192x192.png',
@@ -186,7 +186,7 @@ export const sendTestNotificationsToAll = async (req, res) => {
             url: '/superadmin/dashboard',
             data: {
               type: 'test_all',
-              userId: user._id.toString(),
+              userId: user.id,
               userName: user.name,
               timestamp: Date.now(),
             },
@@ -204,10 +204,10 @@ export const sendTestNotificationsToAll = async (req, res) => {
               },
             ],
           });
-          return { userId: user._id.toString(), result: pushResult };
+          return { userId: user.id, result: pushResult };
         } catch (error) {
-          console.error(`Error sending push to user ${user._id}:`, error);
-          return { userId: user._id.toString(), result: { sent: 0, failed: 1 } };
+          console.error(`Error sending push to user ${user.id}:`, error);
+          return { userId: user.id, result: { sent: 0, failed: 1 } };
         }
       });
 

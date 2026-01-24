@@ -1,8 +1,55 @@
 import { successResponse, errorResponse } from '../utils/response.util.js';
-import { buildUtmUrl, createShortUrl, getShortUrl } from '../services/urlShortener.service.js';
-import ShortUrl from '../models/ShortUrl.model.js';
+import { buildUtmUrl } from '../services/urlShortener.service.js';
+import { getPool } from '../config-sql/database.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+
+// Helper functions for short code generation (from service)
+const generateShortCode = (length = 6) => {
+  return crypto.randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length);
+};
+
+const generateMeaningfulCode = (campaign, medium) => {
+  const cleanCampaign = campaign
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 10);
+  const cleanMedium = medium
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 6);
+  const randomSuffix = crypto.randomBytes(2).toString('hex');
+  return `${cleanCampaign}-${cleanMedium}-${randomSuffix}`;
+};
+
+// Helper function to format short URL data
+const formatShortUrl = (urlData, clicks = []) => {
+  if (!urlData) return null;
+  return {
+    id: urlData.id,
+    _id: urlData.id,
+    shortCode: urlData.short_code,
+    originalUrl: urlData.original_url,
+    utmSource: urlData.utm_source,
+    utmMedium: urlData.utm_medium,
+    utmCampaign: urlData.utm_campaign,
+    utmTerm: urlData.utm_term,
+    utmContent: urlData.utm_content,
+    clickCount: urlData.click_count || 0,
+    createdBy: urlData.created_by,
+    isActive: urlData.is_active === 1 || urlData.is_active === true,
+    expiresAt: urlData.expires_at,
+    createdAt: urlData.created_at,
+    updatedAt: urlData.updated_at,
+    clicks: clicks.map(c => ({
+      clickedAt: c.clicked_at,
+      ipAddress: c.ip_address,
+      userAgent: c.user_agent,
+      referer: c.referer,
+    })),
+  };
+};
 
 /**
  * @desc    Build UTM-tracked URL
@@ -32,23 +79,55 @@ export const buildUtmTrackedUrl = async (req, res) => {
       redirect: false, // Long URLs: redirect=false means lead form will count the click
     });
 
-    // Store long URL in database (without short code)
-    const { createOrUpdateLongUrl } = await import('../services/urlShortener.service.js');
-    const urlRecord = await createOrUpdateLongUrl({
-      originalUrl: utmUrl,
-      utmSource,
-      utmMedium,
-      utmCampaign,
-      utmTerm,
-      utmContent,
-      userId: req.user._id,
-    });
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
+
+    // Check if a record with this URL already exists (without short code)
+    const [existing] = await pool.execute(
+      'SELECT * FROM short_urls WHERE original_url = ? AND short_code IS NULL AND created_by = ?',
+      [utmUrl, userId]
+    );
+
+    let urlRecord;
+    if (existing.length > 0) {
+      // Update existing record
+      await pool.execute(
+        `UPDATE short_urls SET 
+          utm_source = ?, utm_medium = ?, utm_campaign = ?, utm_term = ?, utm_content = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [utmSource || null, utmMedium || null, utmCampaign || null, utmTerm || null, utmContent || null, existing[0].id]
+      );
+      urlRecord = existing[0];
+    } else {
+      // Create new record without short code
+      const urlId = uuidv4();
+      await pool.execute(
+        `INSERT INTO short_urls (
+          id, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          click_count, created_by, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          urlId,
+          utmUrl,
+          utmSource || null,
+          utmMedium || null,
+          utmCampaign || null,
+          utmTerm || null,
+          utmContent || null,
+          0,
+          userId,
+          true,
+        ]
+      );
+      const [newRecord] = await pool.execute('SELECT * FROM short_urls WHERE id = ?', [urlId]);
+      urlRecord = newRecord[0];
+    }
 
     return successResponse(
       res,
       {
         url: utmUrl,
-        urlId: urlRecord._id,
+        urlId: urlRecord.id,
       },
       'UTM URL built successfully',
       200
@@ -97,20 +176,18 @@ export const shortenUtmUrl = async (req, res) => {
       redirect: false, // Initial URL stored with redirect=false
     });
 
-    // Check if long URL already exists
-    const { addShortCodeToUrl, createOrUpdateLongUrl } = await import('../services/urlShortener.service.js');
-    let shortUrl;
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
 
     // Try to find existing long URL record
-    const existingUrl = await ShortUrl.findOne({
-      originalUrl: fullUrl,
-      createdBy: req.user._id,
-    });
+    const [existingUrls] = await pool.execute(
+      'SELECT * FROM short_urls WHERE original_url = ? AND created_by = ?',
+      [fullUrl, userId]
+    );
 
-    if (existingUrl && !existingUrl.shortCode) {
+    let shortUrl;
+    if (existingUrls.length > 0 && !existingUrls[0].short_code) {
       // Update existing long URL with short code
-      const { generateShortCode, generateMeaningfulCode } = await import('../services/urlShortener.service.js');
-      
       // Generate short code
       let code = shortCode;
       if (!code) {
@@ -125,8 +202,11 @@ export const shortenUtmUrl = async (req, res) => {
       let attempts = 0;
       let finalCode = code;
       while (attempts < 10) {
-        const existing = await ShortUrl.findOne({ shortCode: finalCode });
-        if (!existing) {
+        const [existing] = await pool.execute(
+          'SELECT id FROM short_urls WHERE short_code = ?',
+          [finalCode]
+        );
+        if (existing.length === 0) {
           break;
         }
         finalCode = `${code}-${crypto.randomBytes(2).toString('hex')}`;
@@ -138,57 +218,118 @@ export const shortenUtmUrl = async (req, res) => {
       }
 
       // Update existing record
-      existingUrl.shortCode = finalCode;
-      if (expiresAt) existingUrl.expiresAt = new Date(expiresAt);
-      await existingUrl.save();
-      shortUrl = existingUrl;
-    } else if (existingUrl && existingUrl.shortCode) {
+      const updateFields = ['short_code = ?', 'updated_at = NOW()'];
+      const updateValues = [finalCode];
+      
+      if (expiresAt) {
+        updateFields.splice(1, 0, 'expires_at = ?');
+        updateValues.push(new Date(expiresAt).toISOString().slice(0, 19).replace('T', ' '));
+      }
+      
+      updateValues.push(existingUrls[0].id);
+      await pool.execute(
+        `UPDATE short_urls SET ${updateFields.join(', ')} WHERE id = ?`,
+        updateValues
+      );
+      
+      const [updated] = await pool.execute('SELECT * FROM short_urls WHERE id = ?', [existingUrls[0].id]);
+      shortUrl = updated[0];
+    } else if (existingUrls.length > 0 && existingUrls[0].short_code) {
       // Short URL already exists - return it
-      shortUrl = existingUrl;
+      shortUrl = existingUrls[0];
     } else {
       // Create new short URL
-      shortUrl = await createShortUrl({
-        originalUrl: fullUrl,
-        shortCode,
-        utmSource,
-        utmMedium,
-        utmCampaign,
-        utmTerm,
-        utmContent,
-        userId: req.user._id,
-        expiresAt: expiresAt ? new Date(expiresAt) : undefined,
-        useMeaningfulCode: useMeaningfulCode || false,
-      });
+      // Generate short code
+      let code = shortCode;
+      if (!code) {
+        if (useMeaningfulCode && utmCampaign && utmMedium) {
+          code = generateMeaningfulCode(utmCampaign, utmMedium);
+        } else {
+          code = generateShortCode(6);
+        }
+      }
+
+      // Ensure code is unique
+      let attempts = 0;
+      let finalCode = code;
+      while (attempts < 10) {
+        const [existing] = await pool.execute(
+          'SELECT id FROM short_urls WHERE short_code = ?',
+          [finalCode]
+        );
+        if (existing.length === 0) {
+          break;
+        }
+        finalCode = `${code}-${crypto.randomBytes(2).toString('hex')}`;
+        attempts++;
+      }
+
+      if (attempts >= 10) {
+        throw new Error('Failed to generate unique short code');
+      }
+
+      const urlId = uuidv4();
+      await pool.execute(
+        `INSERT INTO short_urls (
+          id, short_code, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          click_count, created_by, is_active, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          urlId,
+          finalCode,
+          fullUrl,
+          utmSource || null,
+          utmMedium || null,
+          utmCampaign || null,
+          utmTerm || null,
+          utmContent || null,
+          0,
+          userId,
+          true,
+          expiresAt ? new Date(expiresAt).toISOString().slice(0, 19).replace('T', ' ') : null,
+        ]
+      );
+      
+      const [newUrl] = await pool.execute('SELECT * FROM short_urls WHERE id = ?', [urlId]);
+      shortUrl = newUrl[0];
     }
+
+    // Get clicks for this URL
+    const [clicks] = await pool.execute(
+      'SELECT * FROM short_url_clicks WHERE short_url_id = ? ORDER BY clicked_at DESC',
+      [shortUrl.id]
+    );
+
+    const formattedUrl = formatShortUrl(shortUrl, clicks);
 
     // Get frontend URL from environment
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const shortUrlLink = `${frontendUrl}/s/${shortUrl.shortCode}`;
+    const shortUrlLink = `${frontendUrl}/s/${formattedUrl.shortCode}`;
 
     return successResponse(
       res,
       {
         shortUrl: shortUrlLink,
-        shortCode: shortUrl.shortCode,
+        shortCode: formattedUrl.shortCode,
         originalUrl: fullUrl,
         utmParams: {
-          utmSource: shortUrl.utmSource,
-          utmMedium: shortUrl.utmMedium,
-          utmCampaign: shortUrl.utmCampaign,
-          utmTerm: shortUrl.utmTerm,
-          utmContent: shortUrl.utmContent,
+          utmSource: formattedUrl.utmSource,
+          utmMedium: formattedUrl.utmMedium,
+          utmCampaign: formattedUrl.utmCampaign,
+          utmTerm: formattedUrl.utmTerm,
+          utmContent: formattedUrl.utmContent,
         },
-      clickCount: shortUrl.clickCount,
-      expiresAt: shortUrl.expiresAt,
-      clicks: shortUrl.clicks || [],
-    },
-    'Short URL created successfully',
-    201
-  );
-} catch (error) {
-  console.error('Error creating short URL:', error);
-  return errorResponse(res, error.message || 'Failed to create short URL', 500);
-}
+        clickCount: formattedUrl.clickCount,
+        expiresAt: formattedUrl.expiresAt,
+        clicks: formattedUrl.clicks || [],
+      },
+      'Short URL created successfully',
+      201
+    );
+  } catch (error) {
+    console.error('Error creating short URL:', error);
+    return errorResponse(res, error.message || 'Failed to create short URL', 500);
+  }
 };
 
 /**
@@ -203,59 +344,75 @@ export const getUrlAnalytics = async (req, res) => {
     }
 
     const { urlId } = req.params;
+    const pool = getPool();
 
-    const urlRecord = await ShortUrl.findById(urlId)
-      .populate('createdBy', 'name email')
-      .lean();
+    // Get URL record with user info
+    const [urlRecords] = await pool.execute(
+      `SELECT s.*, u.name as created_by_name, u.email as created_by_email
+       FROM short_urls s
+       LEFT JOIN users u ON s.created_by = u.id
+       WHERE s.id = ?`,
+      [urlId]
+    );
 
-    if (!urlRecord) {
+    if (urlRecords.length === 0) {
       return errorResponse(res, 'URL record not found', 404);
     }
 
+    const urlRecord = urlRecords[0];
+
+    // Get clicks
+    const [clicks] = await pool.execute(
+      'SELECT * FROM short_url_clicks WHERE short_url_id = ? ORDER BY clicked_at DESC',
+      [urlId]
+    );
+
+    const formattedClicks = clicks.map(c => ({
+      clickedAt: c.clicked_at,
+      ipAddress: c.ip_address,
+      userAgent: c.user_agent,
+      referer: c.referer,
+    }));
+
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const shortUrlLink = urlRecord.shortCode
-      ? `${frontendUrl}/s/${urlRecord.shortCode}`
+    const shortUrlLink = urlRecord.short_code
+      ? `${frontendUrl}/s/${urlRecord.short_code}`
       : null;
 
-    // Sort clicks by date (newest first)
-    const clicks = (urlRecord.clicks || []).sort(
-      (a, b) => new Date(b.clickedAt).getTime() - new Date(a.clickedAt).getTime()
-    );
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     return successResponse(
       res,
       {
         url: {
-          _id: urlRecord._id,
-          originalUrl: urlRecord.originalUrl,
+          _id: urlRecord.id,
+          id: urlRecord.id,
+          originalUrl: urlRecord.original_url,
           shortUrl: shortUrlLink,
-          shortCode: urlRecord.shortCode,
-          utmSource: urlRecord.utmSource,
-          utmMedium: urlRecord.utmMedium,
-          utmCampaign: urlRecord.utmCampaign,
-          utmTerm: urlRecord.utmTerm,
-          utmContent: urlRecord.utmContent,
-          clickCount: urlRecord.clickCount || 0,
-          createdAt: urlRecord.createdAt,
-          updatedAt: urlRecord.updatedAt,
+          shortCode: urlRecord.short_code,
+          utmSource: urlRecord.utm_source,
+          utmMedium: urlRecord.utm_medium,
+          utmCampaign: urlRecord.utm_campaign,
+          utmTerm: urlRecord.utm_term,
+          utmContent: urlRecord.utm_content,
+          clickCount: urlRecord.click_count || 0,
+          createdAt: urlRecord.created_at,
+          updatedAt: urlRecord.updated_at,
         },
-        clicks,
+        clicks: formattedClicks,
         analytics: {
-          totalClicks: clicks.length,
-          clicksToday: clicks.filter(
-            (c) => new Date(c.clickedAt).toDateString() === new Date().toDateString()
+          totalClicks: formattedClicks.length,
+          clicksToday: formattedClicks.filter(
+            (c) => new Date(c.clickedAt) >= today
           ).length,
-          clicksThisWeek: clicks.filter((c) => {
-            const clickDate = new Date(c.clickedAt);
-            const weekAgo = new Date();
-            weekAgo.setDate(weekAgo.getDate() - 7);
-            return clickDate >= weekAgo;
+          clicksThisWeek: formattedClicks.filter((c) => {
+            return new Date(c.clickedAt) >= weekAgo;
           }).length,
-          clicksThisMonth: clicks.filter((c) => {
-            const clickDate = new Date(c.clickedAt);
-            const monthAgo = new Date();
-            monthAgo.setMonth(monthAgo.getMonth() - 1);
-            return clickDate >= monthAgo;
+          clicksThisMonth: formattedClicks.filter((c) => {
+            return new Date(c.clickedAt) >= monthAgo;
           }).length,
         },
       },
@@ -281,6 +438,8 @@ export const trackLongUrlClick = async (req, res) => {
       return errorResponse(res, 'Original URL is required', 400);
     }
 
+    const pool = getPool();
+
     // Find URL record by original URL (without redirect parameter)
     const baseUrl = originalUrl.split('?')[0];
     const urlParams = new URLSearchParams(originalUrl.split('?')[1] || '');
@@ -292,17 +451,17 @@ export const trackLongUrlClick = async (req, res) => {
       : baseUrl;
 
     // Find matching URL record
-    const urlRecord = await ShortUrl.findOne({
-      $or: [
-        { originalUrl: urlWithoutRedirect },
-        { originalUrl: { $regex: urlWithoutRedirect.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') } },
-      ],
-    });
+    const [urlRecords] = await pool.execute(
+      'SELECT * FROM short_urls WHERE original_url = ? OR original_url LIKE ?',
+      [urlWithoutRedirect, `${urlWithoutRedirect}%`]
+    );
 
-    if (!urlRecord) {
+    if (urlRecords.length === 0) {
       // URL not found in database, return success anyway (not critical)
       return successResponse(res, { tracked: false }, 'Click tracking attempted', 200);
     }
+
+    const urlRecord = urlRecords[0];
 
     // Track click with metadata
     const clickData = {
@@ -311,14 +470,25 @@ export const trackLongUrlClick = async (req, res) => {
       referer: req.get('referer'),
     };
 
-    urlRecord.clickCount = (urlRecord.clickCount || 0) + 1;
-    urlRecord.clicks.push({
-      clickedAt: new Date(),
-      ipAddress: clickData.ipAddress,
-      userAgent: clickData.userAgent,
-      referer: clickData.referer,
-    });
-    await urlRecord.save();
+    // Increment click count
+    await pool.execute(
+      'UPDATE short_urls SET click_count = click_count + 1, updated_at = NOW() WHERE id = ?',
+      [urlRecord.id]
+    );
+
+    // Insert click record
+    const clickId = uuidv4();
+    await pool.execute(
+      `INSERT INTO short_url_clicks (id, short_url_id, clicked_at, ip_address, user_agent, referer)
+       VALUES (?, ?, NOW(), ?, ?, ?)`,
+      [
+        clickId,
+        urlRecord.id,
+        clickData.ipAddress || null,
+        clickData.userAgent || null,
+        clickData.referer || null,
+      ]
+    );
 
     return successResponse(res, { tracked: true }, 'Click tracked successfully', 200);
   } catch (error) {
@@ -341,6 +511,25 @@ export const redirectShortUrl = async (req, res) => {
       return errorResponse(res, 'Short code is required', 400);
     }
 
+    const pool = getPool();
+
+    // Get short URL
+    const [shortUrls] = await pool.execute(
+      'SELECT * FROM short_urls WHERE short_code = ? AND is_active = ?',
+      [shortCode, true]
+    );
+
+    if (shortUrls.length === 0) {
+      return errorResponse(res, 'Short URL not found or expired', 404);
+    }
+
+    const shortUrl = shortUrls[0];
+
+    // Check if expired
+    if (shortUrl.expires_at && new Date() > new Date(shortUrl.expires_at)) {
+      return errorResponse(res, 'Short URL not found or expired', 404);
+    }
+
     // Track click with metadata
     const clickData = {
       ipAddress: req.ip || req.connection.remoteAddress,
@@ -348,15 +537,29 @@ export const redirectShortUrl = async (req, res) => {
       referer: req.get('referer'),
     };
 
-    const shortUrl = await getShortUrl(shortCode, clickData);
+    // Increment click count
+    await pool.execute(
+      'UPDATE short_urls SET click_count = click_count + 1, updated_at = NOW() WHERE id = ?',
+      [shortUrl.id]
+    );
 
-    if (!shortUrl) {
-      return errorResponse(res, 'Short URL not found or expired', 404);
-    }
+    // Insert click record
+    const clickId = uuidv4();
+    await pool.execute(
+      `INSERT INTO short_url_clicks (id, short_url_id, clicked_at, ip_address, user_agent, referer)
+       VALUES (?, ?, NOW(), ?, ?, ?)`,
+      [
+        clickId,
+        shortUrl.id,
+        clickData.ipAddress || null,
+        clickData.userAgent || null,
+        clickData.referer || null,
+      ]
+    );
 
     // Update the original URL to include redirect=true parameter
     // This tells the lead form NOT to count the click (since we already counted it at redirect)
-    const redirectUrl = new URL(shortUrl.originalUrl);
+    const redirectUrl = new URL(shortUrl.original_url);
     redirectUrl.searchParams.set('redirect', 'true');
     
     // Redirect to original URL with redirect=true parameter
@@ -378,29 +581,45 @@ export const getAllShortUrls = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only.', 403);
     }
 
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const skip = (page - 1) * limit;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = (page - 1) * limit;
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
+
+    // Get total count
+    const [countResult] = await pool.execute(
+      'SELECT COUNT(*) as total FROM short_urls WHERE created_by = ?',
+      [userId]
+    );
+    const total = countResult[0].total;
 
     // Get all URLs (including long URLs without short codes) for current user
-    const shortUrls = await ShortUrl.find({
-      createdBy: req.user._id,
-    })
-      .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
-
-    const total = await ShortUrl.countDocuments({
-      createdBy: req.user._id,
-    });
+    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
+    const [shortUrls] = await pool.execute(
+      `SELECT s.*, u.name as created_by_name, u.email as created_by_email
+       FROM short_urls s
+       LEFT JOIN users u ON s.created_by = u.id
+       WHERE s.created_by = ?
+       ORDER BY s.created_at DESC
+       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
+      [userId]
+    );
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const shortUrlsWithLinks = shortUrls.map((url) => ({
-      ...url,
-      shortUrl: url.shortCode ? `${frontendUrl}/s/${url.shortCode}` : null,
-    }));
+    const shortUrlsWithLinks = shortUrls.map((url) => {
+      const formatted = formatShortUrl(url);
+      return {
+        ...formatted,
+        shortUrl: formatted.shortCode ? `${frontendUrl}/s/${formatted.shortCode}` : null,
+        createdBy: url.created_by_name ? {
+          id: url.created_by,
+          _id: url.created_by,
+          name: url.created_by_name,
+          email: url.created_by_email,
+        } : url.created_by,
+      };
+    });
 
     return successResponse(
       res,

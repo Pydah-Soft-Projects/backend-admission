@@ -1,5 +1,7 @@
-import User from '../models/User.model.js';
+import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
 
 const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'User'];
 
@@ -20,15 +22,43 @@ const sanitizePermissions = (permissions = {}) => {
   return sanitized;
 };
 
+// Helper function to format user data from SQL to camelCase
+const formatUser = (userData) => {
+  if (!userData) return null;
+  return {
+    id: userData.id,
+    _id: userData.id, // Keep _id for backward compatibility
+    name: userData.name,
+    email: userData.email,
+    roleName: userData.role_name,
+    managedBy: userData.managed_by,
+    isManager: userData.is_manager === 1 || userData.is_manager === true,
+    designation: userData.designation,
+    permissions: typeof userData.permissions === 'string' 
+      ? JSON.parse(userData.permissions) 
+      : userData.permissions || {},
+    isActive: userData.is_active === 1 || userData.is_active === true,
+    createdAt: userData.created_at,
+    updatedAt: userData.updated_at,
+  };
+};
+
 // @desc    Get all users
 // @route   GET /api/users
 // @access  Private (Super Admin)
 export const getUsers = async (req, res) => {
   try {
-    const users = await User.find().select('-password').sort({ createdAt: -1 });
+    const pool = getPool();
+    
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users ORDER BY created_at DESC'
+    );
 
-    return successResponse(res, users, 'Users retrieved successfully', 200);
+    const formattedUsers = users.map(formatUser);
+
+    return successResponse(res, formattedUsers, 'Users retrieved successfully', 200);
   } catch (error) {
+    console.error('Get users error:', error);
     return errorResponse(res, error.message || 'Failed to get users', 500);
   }
 };
@@ -46,18 +76,23 @@ export const getUser = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const user = await User.findById(req.params.id).select('-password');
+    const pool = getPool();
+    
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      [req.params.id]
+    );
 
-    if (!user) {
+    if (users.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
+    const user = formatUser(users[0]);
+
     // If manager (not admin), check if the requested user is in their team
     if (isManager && !isAdmin) {
-      // Check if the user is managed by this manager
-      // Handle both ObjectId and populated object cases
-      const managedById = user.managedBy?._id?.toString() || user.managedBy?.toString();
-      const managerId = req.user._id.toString();
+      const managedById = user.managedBy;
+      const managerId = req.user.id || req.user._id;
       
       if (managedById !== managerId) {
         return errorResponse(res, 'Access denied. You can only view your team members.', 403);
@@ -66,6 +101,7 @@ export const getUser = async (req, res) => {
 
     return successResponse(res, user, 'User retrieved successfully', 200);
   } catch (error) {
+    console.error('Get user error:', error);
     return errorResponse(res, error.message || 'Failed to get user', 500);
   }
 };
@@ -93,27 +129,55 @@ export const createUser = async (req, res) => {
       return errorResponse(res, 'Permissions must be provided as an object for sub super admins', 400);
     }
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
+    const pool = getPool();
+    
+    // Check if user exists
+    const [existingUsers] = await pool.execute(
+      'SELECT id FROM users WHERE email = ?',
+      [email.toLowerCase().trim()]
+    );
+    
+    if (existingUsers.length > 0) {
       return errorResponse(res, 'User with this email already exists', 400);
     }
 
     const sanitizedPermissions =
       roleName === 'Sub Super Admin' ? sanitizePermissions(permissions) : {};
 
-    const user = await User.create({
-      name,
-      email,
-      password,
-      roleName,
-      designation: roleName === 'User' ? designation?.trim() : undefined,
-      permissions: sanitizedPermissions,
-    });
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    user.password = undefined;
+    // Generate UUID
+    const userId = uuidv4();
+
+    // Insert user
+    await pool.execute(
+      `INSERT INTO users (id, name, email, password, role_name, designation, permissions, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        userId,
+        name.trim(),
+        email.toLowerCase().trim(),
+        hashedPassword,
+        roleName,
+        roleName === 'User' ? designation?.trim() : null,
+        JSON.stringify(sanitizedPermissions),
+        true
+      ]
+    );
+
+    // Fetch created user
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      [userId]
+    );
+
+    const user = formatUser(users[0]);
 
     return successResponse(res, user, 'User created successfully', 201);
   } catch (error) {
+    console.error('Create user error:', error);
     return errorResponse(res, error.message || 'Failed to create user', 500);
   }
 };
@@ -124,112 +188,163 @@ export const createUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { name, email, roleName, isActive, designation, permissions } = req.body;
+    const pool = getPool();
 
-    const user = await User.findById(req.params.id);
+    // Get current user
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
+      [req.params.id]
+    );
 
-    if (!user) {
+    if (users.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
-    if (name) user.name = name;
+    const currentUser = users[0];
+    const wasManager = currentUser.is_manager === 1 || currentUser.is_manager === true;
+
+    // Build update fields
+    const updateFields = [];
+    const updateValues = [];
+
+    if (name) {
+      updateFields.push('name = ?');
+      updateValues.push(name.trim());
+    }
 
     if (email) {
-      const existingUser = await User.findOne({ email, _id: { $ne: req.params.id } });
-      if (existingUser) {
+      // Check if email is already in use by another user
+      const [existingUsers] = await pool.execute(
+        'SELECT id FROM users WHERE email = ? AND id != ?',
+        [email.toLowerCase().trim(), req.params.id]
+      );
+      if (existingUsers.length > 0) {
         return errorResponse(res, 'Email already in use', 400);
       }
-      user.email = email;
+      updateFields.push('email = ?');
+      updateValues.push(email.toLowerCase().trim());
     }
 
-    // Handle isManager boolean (separate from roleName)
-    // Capture the current state BEFORE modifying
-    const wasManager = user.isManager || false;
+    // Handle isManager boolean
+    let newIsManager = currentUser.is_manager === 1 || currentUser.is_manager === true;
     if (req.body.isManager !== undefined) {
-      user.isManager = Boolean(req.body.isManager);
+      newIsManager = Boolean(req.body.isManager);
+      updateFields.push('is_manager = ?');
+      updateValues.push(newIsManager);
     }
 
+    // Determine final roleName
+    let finalRoleName = currentUser.role_name;
     if (roleName) {
       if (!VALID_ROLES.includes(roleName)) {
         return errorResponse(res, 'Role name must be Super Admin, Sub Super Admin, or User', 400);
       }
-      // Don't allow setting roleName to 'Manager' - use isManager boolean instead
       if (roleName === 'Manager') {
         return errorResponse(res, 'Use isManager boolean field instead of setting roleName to Manager', 400);
       }
-      user.roleName = roleName;
+      finalRoleName = roleName;
+      updateFields.push('role_name = ?');
+      updateValues.push(roleName);
       // If changing role away from Manager-like role, clear isManager
       if (roleName !== 'User' && roleName !== 'Sub Super Admin') {
-        user.isManager = false;
+        newIsManager = false;
+        updateFields.push('is_manager = ?');
+        updateValues.push(false);
       }
     }
 
-    // Handle managedBy field for team management
+    // Handle managedBy field
     if (req.body.managedBy !== undefined) {
       if (req.body.managedBy === null || req.body.managedBy === '') {
-        user.managedBy = null;
+        updateFields.push('managed_by = ?');
+        updateValues.push(null);
       } else {
-        const manager = await User.findById(req.body.managedBy);
-        if (!manager) {
+        // Verify manager exists and is a manager
+        const [managers] = await pool.execute(
+          'SELECT id, is_manager FROM users WHERE id = ?',
+          [req.body.managedBy]
+        );
+        if (managers.length === 0) {
           return errorResponse(res, 'Manager not found', 404);
         }
-        if (!manager.isManager) {
+        if (managers[0].is_manager !== 1 && managers[0].is_manager !== true) {
           return errorResponse(res, 'Only users with Manager privileges can manage team members', 400);
         }
-        user.managedBy = req.body.managedBy;
+        updateFields.push('managed_by = ?');
+        updateValues.push(req.body.managedBy);
       }
     }
 
     if (typeof isActive === 'boolean') {
-      user.isActive = isActive;
+      updateFields.push('is_active = ?');
+      updateValues.push(isActive);
     }
 
-    if (user.roleName === 'User') {
-      // Only validate designation requirement if:
-      // 1. Designation is being explicitly updated (provided in request)
-      // 2. Role is being changed TO User (roleName was provided and is 'User')
-      // Do NOT require designation if we're only updating other fields like managedBy, isManager, isActive, etc.
-      const isRoleChangeToUser = roleName === 'User' && user.roleName !== 'User';
+    // Handle designation and permissions based on role
+    if (finalRoleName === 'User') {
+      const isRoleChangeToUser = roleName === 'User' && currentUser.role_name !== 'User';
       const isDesignationUpdate = designation !== undefined;
       
       if (isDesignationUpdate) {
         if (designation && designation.trim()) {
-          user.designation = designation.trim();
-        } else if (!user.designation) {
-          // If designation is explicitly set to empty and user doesn't have one, require it
+          updateFields.push('designation = ?');
+          updateValues.push(designation.trim());
+        } else if (!currentUser.designation) {
           return errorResponse(res, 'Designation is required for users', 400);
         }
-      } else if (isRoleChangeToUser && !user.designation) {
-        // Only require designation if role is being changed TO User and they don't have one
+      } else if (isRoleChangeToUser && !currentUser.designation) {
         return errorResponse(res, 'Designation is required for users', 400);
       }
-      // If user already has designation, keep it (don't require it for other updates)
-      user.permissions = {};
-    } else if (user.roleName === 'Sub Super Admin') {
+      updateFields.push('permissions = ?');
+      updateValues.push(JSON.stringify({}));
+    } else if (finalRoleName === 'Sub Super Admin') {
       if (permissions && typeof permissions !== 'object') {
         return errorResponse(res, 'Permissions must be provided as an object for sub super admins', 400);
       }
-      user.permissions = sanitizePermissions(permissions);
-      user.designation = undefined;
+      const sanitizedPerms = sanitizePermissions(permissions);
+      updateFields.push('permissions = ?');
+      updateValues.push(JSON.stringify(sanitizedPerms));
+      updateFields.push('designation = ?');
+      updateValues.push(null);
     } else {
-      // Super Admin or other roles
-      user.permissions = {};
-      user.designation = undefined;
+      // Super Admin
+      updateFields.push('permissions = ?');
+      updateValues.push(JSON.stringify({}));
+      updateFields.push('designation = ?');
+      updateValues.push(null);
     }
 
-    await user.save();
-    
-    // If revoking manager, clear managedBy for all team members
-    if (wasManager && !user.isManager) {
-      await User.updateMany(
-        { managedBy: user._id },
-        { $set: { managedBy: null } }
+    // Add updated_at
+    updateFields.push('updated_at = NOW()');
+
+    // Execute update
+    if (updateFields.length > 0) {
+      updateValues.push(req.params.id);
+      await pool.execute(
+        `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`,
+        updateValues
       );
     }
-    
-    user.password = undefined;
+
+    // If revoking manager, clear managedBy for all team members
+    if (wasManager && !newIsManager) {
+      await pool.execute(
+        'UPDATE users SET managed_by = NULL WHERE managed_by = ?',
+        [req.params.id]
+      );
+    }
+
+    // Fetch updated user
+    const [updatedUsers] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      [req.params.id]
+    );
+
+    const user = formatUser(updatedUsers[0]);
 
     return successResponse(res, user, 'User updated successfully', 200);
   } catch (error) {
+    console.error('Update user error:', error);
     return errorResponse(res, error.message || 'Failed to update user', 500);
   }
 };
@@ -239,21 +354,33 @@ export const updateUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const deleteUser = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const pool = getPool();
 
-    if (!user) {
+    // Check if user exists
+    const [users] = await pool.execute(
+      'SELECT id FROM users WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (users.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
     // Don't allow deleting yourself
-    if (user._id.toString() === req.user._id.toString()) {
+    const currentUserId = req.user.id || req.user._id;
+    if (users[0].id === currentUserId) {
       return errorResponse(res, 'You cannot delete your own account', 400);
     }
 
-    await user.deleteOne();
+    // Delete user (foreign key constraints will handle managed_by relationships)
+    await pool.execute(
+      'DELETE FROM users WHERE id = ?',
+      [req.params.id]
+    );
 
     return successResponse(res, null, 'User deleted successfully', 200);
   } catch (error) {
+    console.error('Delete user error:', error);
     return errorResponse(res, error.message || 'Failed to delete user', 500);
   }
 };

@@ -64,12 +64,21 @@ export const decryptSensitiveValue = (value) => {
 
   const key = getKeyBuffer();
   if (!key) {
+    // If encryption key is not set, return value as-is (plain text)
+    return value;
+  }
+
+  // Check if value is encrypted (encrypted values have format: iv:authTag:encrypted)
+  const parts = value.split(':');
+  if (parts.length !== 3) {
+    // Not encrypted format, return as plain text (backward compatibility)
     return value;
   }
 
   try {
-    const [ivPart, authTagPart, encryptedPart] = value.split(':');
+    const [ivPart, authTagPart, encryptedPart] = parts;
     if (!ivPart || !authTagPart || !encryptedPart) {
+      // Invalid format, return as plain text
       return value;
     }
 
@@ -82,8 +91,9 @@ export const decryptSensitiveValue = (value) => {
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
     return decrypted.toString('utf8');
   } catch (error) {
-    console.error('Failed to decrypt sensitive value:', error);
-    return null;
+    // If decryption fails, it might be plain text (backward compatibility)
+    console.warn('Failed to decrypt value, treating as plain text:', error.message);
+    return value;
   }
 };
 

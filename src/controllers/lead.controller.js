@@ -1,10 +1,6 @@
-import mongoose from 'mongoose';
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
-import Lead from '../models/Lead.model.js';
-import User from '../models/User.model.js';
-import ActivityLog from '../models/ActivityLog.model.js';
-import DeleteJob from '../models/DeleteJob.model.js';
+import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
@@ -14,86 +10,209 @@ const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
 });
 
+// Helper function to format lead data from SQL to camelCase
+const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
+  if (!leadData) return null;
+  return {
+    id: leadData.id,
+    _id: leadData.id, // Keep _id for backward compatibility
+    enquiryNumber: leadData.enquiry_number,
+    name: leadData.name,
+    phone: leadData.phone,
+    email: leadData.email,
+    fatherName: leadData.father_name,
+    motherName: leadData.mother_name || '',
+    fatherPhone: leadData.father_phone,
+    hallTicketNumber: leadData.hall_ticket_number || '',
+    village: leadData.village,
+    courseInterested: leadData.course_interested,
+    district: leadData.district,
+    mandal: leadData.mandal,
+    state: leadData.state || '',
+    isNRI: leadData.is_nri === 1 || leadData.is_nri === true,
+    gender: leadData.gender || 'Not Specified',
+    rank: leadData.rank,
+    interCollege: leadData.inter_college || '',
+    quota: leadData.quota || 'Not Applicable',
+    applicationStatus: leadData.application_status || 'Not Provided',
+    dynamicFields: typeof leadData.dynamic_fields === 'string' 
+      ? JSON.parse(leadData.dynamic_fields) 
+      : leadData.dynamic_fields || {},
+    leadStatus: leadData.lead_status || 'New',
+    admissionNumber: leadData.admission_number,
+    assignedTo: assignedToUser || leadData.assigned_to,
+    assignedAt: leadData.assigned_at,
+    assignedBy: leadData.assigned_by,
+    source: leadData.source,
+    utmSource: leadData.utm_source,
+    utmMedium: leadData.utm_medium,
+    utmCampaign: leadData.utm_campaign,
+    utmTerm: leadData.utm_term,
+    utmContent: leadData.utm_content,
+    lastFollowUp: leadData.last_follow_up,
+    notes: leadData.notes,
+    uploadedBy: uploadedByUser || leadData.uploaded_by,
+    uploadBatchId: leadData.upload_batch_id,
+    createdAt: leadData.created_at,
+    updatedAt: leadData.updated_at,
+  };
+};
+
+// Helper function to format user data (for populated fields)
+const formatUser = (userData) => {
+  if (!userData) return null;
+  return {
+    id: userData.id,
+    _id: userData.id,
+    name: userData.name,
+    email: userData.email,
+  };
+};
+
 // @desc    Get all leads with pagination
 // @route   GET /api/leads
 // @access  Private
 export const getLeads = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const skip = (page - 1) * limit;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = (page - 1) * limit;
+    const pool = getPool();
 
-    // Build filter object
-    const filter = {};
-    
-    if (req.query.mandal) filter.mandal = req.query.mandal;
-    if (req.query.state) filter.state = req.query.state;
-    if (req.query.district) filter.district = req.query.district;
-    if (req.query.quota) filter.quota = req.query.quota;
-    if (req.query.leadStatus) filter.leadStatus = req.query.leadStatus;
-    if (req.query.applicationStatus) filter.applicationStatus = req.query.applicationStatus;
-    if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo;
-    if (req.query.courseInterested) filter.courseInterested = req.query.courseInterested;
-    if (req.query.source) filter.source = req.query.source;
-    
-    // Add date filtering for analytics
-    if (req.query.startDate || req.query.endDate) {
-      filter.createdAt = {};
-      if (req.query.startDate) {
-        const start = new Date(req.query.startDate);
-        start.setHours(0, 0, 0, 0);
-        filter.createdAt.$gte = start;
-      }
-      if (req.query.endDate) {
-        const end = new Date(req.query.endDate);
-        end.setHours(23, 59, 59, 999);
-        filter.createdAt.$lte = end;
-      }
+    // Build WHERE conditions
+    const conditions = [];
+    const params = [];
+
+    if (req.query.mandal) {
+      conditions.push('mandal = ?');
+      params.push(req.query.mandal);
     }
+    if (req.query.state) {
+      conditions.push('state = ?');
+      params.push(req.query.state);
+    }
+    if (req.query.district) {
+      conditions.push('district = ?');
+      params.push(req.query.district);
+    }
+    if (req.query.quota) {
+      conditions.push('quota = ?');
+      params.push(req.query.quota);
+    }
+    if (req.query.leadStatus) {
+      conditions.push('lead_status = ?');
+      params.push(req.query.leadStatus);
+    }
+    if (req.query.applicationStatus) {
+      conditions.push('application_status = ?');
+      params.push(req.query.applicationStatus);
+    }
+    if (req.query.assignedTo) {
+      conditions.push('assigned_to = ?');
+      params.push(req.query.assignedTo);
+    }
+    if (req.query.courseInterested) {
+      conditions.push('course_interested = ?');
+      params.push(req.query.courseInterested);
+    }
+    if (req.query.source) {
+      conditions.push('source = ?');
+      params.push(req.query.source);
+    }
+
+    // Date filtering
+    if (req.query.startDate) {
+      conditions.push('created_at >= ?');
+      const start = new Date(req.query.startDate);
+      start.setHours(0, 0, 0, 0);
+      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.endDate) {
+      conditions.push('created_at <= ?');
+      const end = new Date(req.query.endDate);
+      end.setHours(23, 59, 59, 999);
+      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+
+    // Enquiry number search
     if (req.query.enquiryNumber) {
-      // Fast search by enquiry number - handle multiple formats
       const searchTerm = req.query.enquiryNumber.trim();
-      // If it starts with ENQ, search directly
       if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        filter.enquiryNumber = { $regex: `^${searchTerm}`, $options: 'i' };
+        conditions.push('enquiry_number LIKE ?');
+        params.push(`${searchTerm}%`);
       } else {
-        // If it's just numbers, search for enquiry numbers containing those digits anywhere
-        // Examples: "1" matches ENQ2400001, ENQ24000010, ENQ24000011, ENQ24000111 (all contain "1")
-        //          "7456" matches ENQ2407456, ENQ24074560, ENQ24074561 (all contain "7456")
-        filter.enquiryNumber = { $regex: searchTerm, $options: 'i' };
+        conditions.push('enquiry_number LIKE ?');
+        params.push(`%${searchTerm}%`);
       }
     }
+
+    // Full-text search
     if (req.query.search) {
-      // Search only in name, phone, and email fields (not enquiry number)
       const searchTerm = req.query.search.trim();
-      // Use $or to search across name, phone, and email fields
-      filter.$or = [
-        { name: { $regex: searchTerm, $options: 'i' } },
-        { phone: { $regex: searchTerm, $options: 'i' } },
-        { email: { $regex: searchTerm, $options: 'i' } },
-        { district: { $regex: searchTerm, $options: 'i' } },
-      ];
+      conditions.push(`(
+        MATCH(enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college) 
+        AGAINST(? IN NATURAL LANGUAGE MODE)
+        OR name LIKE ?
+        OR phone LIKE ?
+        OR email LIKE ?
+        OR district LIKE ?
+      )`);
+      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
     }
 
-    // If user is not Super Admin, only show assigned leads
+    // Access control - if user is not Super Admin, only show assigned leads
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      filter.assignedTo = req.user._id;
+      const userId = req.user.id || req.user._id;
+      conditions.push('assigned_to = ?');
+      params.push(userId);
     }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Get total count for pagination
-    const total = await Lead.countDocuments(filter);
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
 
-    // Get leads with pagination
-    const leads = await Lead.find(filter)
-      .populate('assignedTo', 'name email')
-      .populate('uploadedBy', 'name')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(); // Use lean() for better performance with large datasets
+    // Get leads with pagination and user info
+    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
+    const query = `
+      SELECT 
+        l.*,
+        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+      FROM leads l
+      LEFT JOIN users u1 ON l.assigned_to = u1.id
+      LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      ${whereClause}
+      ORDER BY l.created_at DESC
+      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+    `;
+
+    const [leads] = await pool.execute(query, params);
+
+    // Format leads
+    const formattedLeads = leads.map(lead => {
+      const assignedToUser = lead.assigned_to_id ? {
+        id: lead.assigned_to_id,
+        _id: lead.assigned_to_id,
+        name: lead.assigned_to_name,
+        email: lead.assigned_to_email,
+      } : null;
+      
+      const uploadedByUser = lead.uploaded_by_id ? {
+        id: lead.uploaded_by_id,
+        _id: lead.uploaded_by_id,
+        name: lead.uploaded_by_name,
+      } : null;
+
+      return formatLead(lead, assignedToUser, uploadedByUser);
+    });
 
     return successResponse(res, {
-      leads,
+      leads: formattedLeads,
       pagination: {
         page,
         limit,
@@ -112,13 +231,27 @@ export const getLeads = async (req, res) => {
 // @access  Private
 export const getLead = async (req, res) => {
   try {
-    const lead = await Lead.findById(req.params.id)
-      .populate('assignedTo', 'name email')
-      .populate('uploadedBy', 'name');
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
 
-    if (!lead) {
+    // Get lead with user info
+    const [leads] = await pool.execute(
+      `SELECT 
+        l.*,
+        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+      FROM leads l
+      LEFT JOIN users u1 ON l.assigned_to = u1.id
+      LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      WHERE l.id = ?`,
+      [req.params.id]
+    );
+
+    if (leads.length === 0) {
       return errorResponse(res, 'Lead not found', 404);
     }
+
+    const leadData = leads[0];
 
     // Check if user has access
     let hasAccess = false;
@@ -128,17 +261,19 @@ export const getLead = async (req, res) => {
       hasAccess = true;
     }
     // If lead is assigned to the user, they have access
-    else if (lead.assignedTo?._id?.toString() === req.user._id.toString()) {
+    else if (leadData.assigned_to === userId) {
       hasAccess = true;
     }
     // If user is a Manager, check if lead is assigned to one of their team members
     else if (req.user.isManager) {
-      const teamMembers = await User.find({ managedBy: req.user._id }).select('_id');
-      const teamMemberIds = teamMembers.map((member) => member._id.toString());
+      const [teamMembers] = await pool.execute(
+        'SELECT id FROM users WHERE managed_by = ?',
+        [userId]
+      );
+      const teamMemberIds = teamMembers.map(m => m.id);
       
       // Check if lead is assigned to manager or any team member
-      const assignedToId = lead.assignedTo?._id?.toString();
-      if (assignedToId && (assignedToId === req.user._id.toString() || teamMemberIds.includes(assignedToId))) {
+      if (leadData.assigned_to && (leadData.assigned_to === userId || teamMemberIds.includes(leadData.assigned_to))) {
         hasAccess = true;
       }
     }
@@ -147,8 +282,24 @@ export const getLead = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
+    const assignedToUser = leadData.assigned_to_id ? {
+      id: leadData.assigned_to_id,
+      _id: leadData.assigned_to_id,
+      name: leadData.assigned_to_name,
+      email: leadData.assigned_to_email,
+    } : null;
+
+    const uploadedByUser = leadData.uploaded_by_id ? {
+      id: leadData.uploaded_by_id,
+      _id: leadData.uploaded_by_id,
+      name: leadData.uploaded_by_name,
+    } : null;
+
+    const lead = formatLead(leadData, assignedToUser, uploadedByUser);
+
     return successResponse(res, lead, 'Lead retrieved successfully', 200);
   } catch (error) {
+    console.error('Error getting lead:', error);
     return errorResponse(res, error.message || 'Failed to get lead', 500);
   }
 };
@@ -205,35 +356,57 @@ export const createPublicLead = async (req, res) => {
     // If UTM source exists, use it as the lead source
     const leadSource = utmSource ? String(utmSource).trim() : (source || 'Public Form');
 
-    const lead = await Lead.create({
-      enquiryNumber,
-      hallTicketNumber: hallTicketNumber ? String(hallTicketNumber).trim() : undefined,
-      name,
-      phone,
-      email,
-      fatherName,
-      fatherPhone,
-      motherName: motherName ? String(motherName).trim() : undefined,
-      village,
-      district,
-      courseInterested,
-      mandal,
-      state: state?.trim() || 'Andhra Pradesh',
-      quota: quota || 'Not Applicable',
-      applicationStatus: applicationStatus || 'Not Provided',
-      gender: gender ? String(gender).trim() : 'Not Specified',
-      rank: rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : undefined,
-      interCollege: interCollege ? String(interCollege).trim() : undefined,
-      dynamicFields: dynamicFields || {},
-      source: leadSource,
-      isNRI: isNRI === true || isNRI === 'true',
-      // UTM Tracking Parameters
-      utmSource: utmSource ? String(utmSource).trim() : undefined,
-      utmMedium: utmMedium ? String(utmMedium).trim() : undefined,
-      utmCampaign: utmCampaign ? String(utmCampaign).trim() : undefined,
-      utmTerm: utmTerm ? String(utmTerm).trim() : undefined,
-      utmContent: utmContent ? String(utmContent).trim() : undefined,
-    });
+    const pool = getPool();
+    const leadId = uuidv4();
+
+    // Insert lead
+    await pool.execute(
+      `INSERT INTO leads (
+        id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
+        hall_ticket_number, village, course_interested, district, mandal, state,
+        is_nri, gender, \`rank\`, inter_college, quota, application_status,
+        dynamic_fields, lead_status, source, utm_source, utm_medium, utm_campaign,
+        utm_term, utm_content, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        leadId,
+        enquiryNumber,
+        name.trim(),
+        phone.trim(),
+        email || null,
+        fatherName.trim(),
+        motherName ? String(motherName).trim() : '',
+        fatherPhone.trim(),
+        hallTicketNumber ? String(hallTicketNumber).trim() : '',
+        village.trim(),
+        courseInterested || null,
+        district.trim(),
+        mandal.trim(),
+        state?.trim() || 'Andhra Pradesh',
+        isNRI === true || isNRI === 'true',
+        gender ? String(gender).trim() : 'Not Specified',
+        rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : null,
+        interCollege ? String(interCollege).trim() : '',
+        quota || 'Not Applicable',
+        applicationStatus || 'Not Provided',
+        JSON.stringify(dynamicFields || {}),
+        'New',
+        leadSource,
+        utmSource ? String(utmSource).trim() : null,
+        utmMedium ? String(utmMedium).trim() : null,
+        utmCampaign ? String(utmCampaign).trim() : null,
+        utmTerm ? String(utmTerm).trim() : null,
+        utmContent ? String(utmContent).trim() : null,
+      ]
+    );
+
+    // Fetch created lead
+    const [leads] = await pool.execute(
+      'SELECT * FROM leads WHERE id = ?',
+      [leadId]
+    );
+
+    const lead = formatLead(leads[0]);
 
     // Send notification to lead (async, don't wait for it)
     notifyLeadCreated(lead).catch((error) => {
@@ -242,6 +415,7 @@ export const createPublicLead = async (req, res) => {
 
     return successResponse(res, lead, 'Lead submitted successfully', 201);
   } catch (error) {
+    console.error('Error creating public lead:', error);
     return errorResponse(res, error.message || 'Failed to submit lead', 500);
   }
 };
@@ -281,29 +455,52 @@ export const createLead = async (req, res) => {
     // Generate enquiry number
     const enquiryNumber = await generateEnquiryNumber();
 
-    const lead = await Lead.create({
-      enquiryNumber,
-      hallTicketNumber: hallTicketNumber ? String(hallTicketNumber).trim() : undefined,
-      name,
-      phone,
-      email,
-      fatherName,
-      fatherPhone,
-      motherName: motherName ? String(motherName).trim() : undefined,
-      village,
-      district,
-      courseInterested,
-      mandal,
-      state: state?.trim() || 'Andhra Pradesh',
-      quota: quota || 'Not Applicable',
-      applicationStatus: applicationStatus || 'Not Provided',
-      gender: gender ? String(gender).trim() : 'Not Specified',
-      rank: rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : undefined,
-      interCollege: interCollege ? String(interCollege).trim() : undefined,
-      dynamicFields: dynamicFields || {},
-      source: source || 'Manual Entry',
-      uploadedBy: req.user._id,
-    });
+    const pool = getPool();
+    const leadId = uuidv4();
+    const userId = req.user.id || req.user._id;
+
+    // Insert lead
+    await pool.execute(
+      `INSERT INTO leads (
+        id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
+        hall_ticket_number, village, course_interested, district, mandal, state,
+        gender, \`rank\`, inter_college, quota, application_status,
+        dynamic_fields, lead_status, source, uploaded_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        leadId,
+        enquiryNumber,
+        name.trim(),
+        phone.trim(),
+        email || null,
+        fatherName.trim(),
+        motherName ? String(motherName).trim() : '',
+        fatherPhone.trim(),
+        hallTicketNumber ? String(hallTicketNumber).trim() : '',
+        village.trim(),
+        courseInterested || null,
+        district.trim(),
+        mandal.trim(),
+        state?.trim() || 'Andhra Pradesh',
+        gender ? String(gender).trim() : 'Not Specified',
+        rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : null,
+        interCollege ? String(interCollege).trim() : '',
+        quota || 'Not Applicable',
+        applicationStatus || 'Not Provided',
+        JSON.stringify(dynamicFields || {}),
+        'New',
+        source || 'Manual Entry',
+        userId,
+      ]
+    );
+
+    // Fetch created lead
+    const [leads] = await pool.execute(
+      'SELECT * FROM leads WHERE id = ?',
+      [leadId]
+    );
+
+    const lead = formatLead(leads[0]);
 
     // Send notification to lead (async, don't wait for it)
     notifyLeadCreated(lead).catch((error) => {
@@ -312,6 +509,7 @@ export const createLead = async (req, res) => {
 
     return successResponse(res, lead, 'Lead created successfully', 201);
   } catch (error) {
+    console.error('Error creating lead:', error);
     return errorResponse(res, error.message || 'Failed to create lead', 500);
   }
 };
@@ -321,14 +519,23 @@ export const createLead = async (req, res) => {
 // @access  Private
 export const updateLead = async (req, res) => {
   try {
-    const lead = await Lead.findById(req.params.id);
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
 
-    if (!lead) {
+    // Get current lead
+    const [leads] = await pool.execute(
+      'SELECT * FROM leads WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (leads.length === 0) {
       return errorResponse(res, 'Lead not found', 404);
     }
 
+    const currentLead = leads[0];
+
     // Check if user has access
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assignedTo?.toString() !== req.user._id.toString()) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && currentLead.assigned_to !== userId) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -337,23 +544,23 @@ export const updateLead = async (req, res) => {
     
     // Store original values for comparison
     const originalLead = {
-      name: lead.name,
-      phone: lead.phone,
-      email: lead.email,
-      fatherName: lead.fatherName,
-      fatherPhone: lead.fatherPhone,
-      motherName: lead.motherName,
-      courseInterested: lead.courseInterested,
-      village: lead.village,
-      district: lead.district,
-      mandal: lead.mandal,
-      state: lead.state,
-      quota: lead.quota,
-      gender: lead.gender,
-      rank: lead.rank,
-      interCollege: lead.interCollege,
-      hallTicketNumber: lead.hallTicketNumber,
-      applicationStatus: lead.applicationStatus,
+      name: currentLead.name,
+      phone: currentLead.phone,
+      email: currentLead.email,
+      fatherName: currentLead.father_name,
+      fatherPhone: currentLead.father_phone,
+      motherName: currentLead.mother_name,
+      courseInterested: currentLead.course_interested,
+      village: currentLead.village,
+      district: currentLead.district,
+      mandal: currentLead.mandal,
+      state: currentLead.state,
+      quota: currentLead.quota,
+      gender: currentLead.gender,
+      rank: currentLead.rank,
+      interCollege: currentLead.inter_college,
+      hallTicketNumber: currentLead.hall_ticket_number,
+      applicationStatus: currentLead.application_status,
     };
     
     // Update fields
@@ -385,82 +592,184 @@ export const updateLead = async (req, res) => {
     } = req.body;
 
     const newLeadStatus = leadStatus ?? legacyStatus;
+    const updateFields = [];
+    const updateValues = [];
+    let oldStatus = currentLead.lead_status || 'New';
+    let oldAssignedTo = currentLead.assigned_to;
+    let assignmentChanged = false;
 
     // Only Super Admin can update these fields
     if (isSuperAdmin) {
       if (hallTicketNumber !== undefined) {
-        lead.hallTicketNumber = hallTicketNumber ? String(hallTicketNumber).trim() : '';
+        updateFields.push('hall_ticket_number = ?');
+        updateValues.push(hallTicketNumber ? String(hallTicketNumber).trim() : '');
       }
-      if (name) lead.name = name;
-      if (phone) lead.phone = phone;
-      if (email !== undefined) lead.email = email;
-      if (fatherName) lead.fatherName = fatherName;
-      if (fatherPhone) lead.fatherPhone = fatherPhone;
+      if (name) {
+        updateFields.push('name = ?');
+        updateValues.push(name.trim());
+      }
+      if (phone) {
+        updateFields.push('phone = ?');
+        updateValues.push(phone.trim());
+      }
+      if (email !== undefined) {
+        updateFields.push('email = ?');
+        updateValues.push(email || null);
+      }
+      if (fatherName) {
+        updateFields.push('father_name = ?');
+        updateValues.push(fatherName.trim());
+      }
+      if (fatherPhone) {
+        updateFields.push('father_phone = ?');
+        updateValues.push(fatherPhone.trim());
+      }
       if (motherName !== undefined) {
-        lead.motherName = motherName ? String(motherName).trim() : '';
+        updateFields.push('mother_name = ?');
+        updateValues.push(motherName ? String(motherName).trim() : '');
       }
-      if (courseInterested !== undefined) lead.courseInterested = courseInterested;
-      if (village) lead.village = village;
-      if (district) lead.district = district;
-      if (mandal) lead.mandal = mandal;
+      if (courseInterested !== undefined) {
+        updateFields.push('course_interested = ?');
+        updateValues.push(courseInterested || null);
+      }
+      if (village) {
+        updateFields.push('village = ?');
+        updateValues.push(village.trim());
+      }
+      if (district) {
+        updateFields.push('district = ?');
+        updateValues.push(district.trim());
+      }
+      if (mandal) {
+        updateFields.push('mandal = ?');
+        updateValues.push(mandal.trim());
+      }
       if (state !== undefined) {
         const trimmedState = typeof state === 'string' ? state.trim() : state;
-        lead.state = trimmedState ? trimmedState : 'Andhra Pradesh';
+        updateFields.push('state = ?');
+        updateValues.push(trimmedState ? trimmedState : 'Andhra Pradesh');
       }
-      if (quota) lead.quota = quota;
+      if (quota) {
+        updateFields.push('quota = ?');
+        updateValues.push(quota);
+      }
       if (gender !== undefined) {
-        lead.gender = gender ? String(gender).trim() : 'Not Specified';
+        updateFields.push('gender = ?');
+        updateValues.push(gender ? String(gender).trim() : 'Not Specified');
       }
       if (rank !== undefined && rank !== null && !Number.isNaN(Number(rank))) {
-        lead.rank = Number(rank);
+        updateFields.push('`rank` = ?');
+        updateValues.push(Number(rank));
       }
       if (interCollege !== undefined) {
-        lead.interCollege = interCollege ? String(interCollege).trim() : '';
+        updateFields.push('inter_college = ?');
+        updateValues.push(interCollege ? String(interCollege).trim() : '');
       }
-      if (applicationStatus !== undefined) lead.applicationStatus = applicationStatus;
-      if (dynamicFields) lead.dynamicFields = { ...lead.dynamicFields, ...dynamicFields };
+      if (applicationStatus !== undefined) {
+        updateFields.push('application_status = ?');
+        updateValues.push(applicationStatus);
+      }
+      if (dynamicFields) {
+        const currentDynamicFields = typeof currentLead.dynamic_fields === 'string' 
+          ? JSON.parse(currentLead.dynamic_fields) 
+          : currentLead.dynamic_fields || {};
+        const mergedFields = { ...currentDynamicFields, ...dynamicFields };
+        updateFields.push('dynamic_fields = ?');
+        updateValues.push(JSON.stringify(mergedFields));
+      }
       if (assignedTo) {
-        const oldAssignedTo = lead.assignedTo?.toString();
         const newAssignedTo = assignedTo.toString();
         
-        // Only log if assignment is actually changing
+        // Only update if assignment is actually changing
         if (oldAssignedTo !== newAssignedTo) {
-          const oldStatus = lead.leadStatus || 'New';
-          lead.assignedTo = assignedTo;
-          lead.assignedAt = new Date();
-          lead.assignedBy = req.user._id;
+          assignmentChanged = true;
+          updateFields.push('assigned_to = ?');
+          updateValues.push(newAssignedTo);
+          updateFields.push('assigned_at = NOW()');
+          updateFields.push('assigned_by = ?');
+          updateValues.push(userId);
           
           // If status is "New", automatically change to "Assigned"
           if (oldStatus === 'New' || !oldStatus) {
-            lead.leadStatus = 'Assigned';
+            oldStatus = oldStatus || 'New';
+            updateFields.push('lead_status = ?');
+            updateValues.push('Assigned');
           }
-          
-          // Create activity log for assignment
-          await ActivityLog.create({
-            leadId: lead._id,
-            type: 'status_change',
-            oldStatus: oldStatus,
-            newStatus: lead.leadStatus,
-            comment: `Assigned to counsellor`,
-            performedBy: req.user._id,
-            metadata: {
-              assignment: {
-                assignedTo: newAssignedTo,
-                assignedBy: req.user._id.toString(),
-              },
-            },
-          });
         }
       }
-      if (source) lead.source = source;
-      if (lastFollowUp) lead.lastFollowUp = lastFollowUp;
+      if (source) {
+        updateFields.push('source = ?');
+        updateValues.push(source);
+      }
+      if (lastFollowUp) {
+        updateFields.push('last_follow_up = ?');
+        updateValues.push(new Date(lastFollowUp).toISOString().slice(0, 19).replace('T', ' '));
+      }
     }
 
     // Both Super Admin and regular users can update status and notes
-    if (newLeadStatus) lead.leadStatus = newLeadStatus;
-    if (notes !== undefined) lead.notes = notes;
+    if (newLeadStatus && newLeadStatus !== currentLead.lead_status) {
+      updateFields.push('lead_status = ?');
+      updateValues.push(newLeadStatus);
+    }
+    if (notes !== undefined) {
+      updateFields.push('notes = ?');
+      updateValues.push(notes || null);
+    }
 
-    await lead.save();
+    // Execute update
+    if (updateFields.length > 0) {
+      updateFields.push('updated_at = NOW()');
+      updateValues.push(req.params.id);
+      await pool.execute(
+        `UPDATE leads SET ${updateFields.join(', ')} WHERE id = ?`,
+        updateValues
+      );
+    }
+
+    // Create activity logs
+    const finalStatus = newLeadStatus || currentLead.lead_status;
+    
+    // Log assignment change
+    if (assignmentChanged && assignedTo) {
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          req.params.id,
+          'status_change',
+          oldStatus,
+          finalStatus,
+          'Assigned to counsellor',
+          userId,
+          JSON.stringify({
+            assignment: {
+              assignedTo: assignedTo.toString(),
+              assignedBy: userId,
+            },
+          }),
+        ]
+      );
+    }
+
+    // Log status change (if status changed and not due to assignment)
+    if (newLeadStatus && newLeadStatus !== currentLead.lead_status && !assignmentChanged) {
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, performed_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          req.params.id,
+          'status_change',
+          currentLead.lead_status,
+          newLeadStatus,
+          userId,
+        ]
+      );
+    }
 
     // Log field updates (if any fields were changed by Super Admin)
     if (isSuperAdmin) {
@@ -485,22 +794,57 @@ export const updateLead = async (req, res) => {
       
       // Only create activity log if fields were actually changed (excluding assignment which is already logged)
       if (updatedFields.length > 0 && !assignedTo) {
-        await ActivityLog.create({
-          leadId: lead._id,
-          type: 'comment',
-          comment: `Student details updated: ${updatedFields.join(', ')}`,
-          performedBy: req.user._id,
-          metadata: {
-            fieldUpdate: {
-              updatedFields,
-            },
-          },
-        });
+        const activityLogId = uuidv4();
+        await pool.execute(
+          `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            activityLogId,
+            req.params.id,
+            'comment',
+            `Student details updated: ${updatedFields.join(', ')}`,
+            userId,
+            JSON.stringify({
+              fieldUpdate: {
+                updatedFields,
+              },
+            }),
+          ]
+        );
       }
     }
 
+    // Fetch updated lead
+    const [updatedLeads] = await pool.execute(
+      `SELECT 
+        l.*,
+        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+      FROM leads l
+      LEFT JOIN users u1 ON l.assigned_to = u1.id
+      LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      WHERE l.id = ?`,
+      [req.params.id]
+    );
+
+    const assignedToUser = updatedLeads[0].assigned_to_id ? {
+      id: updatedLeads[0].assigned_to_id,
+      _id: updatedLeads[0].assigned_to_id,
+      name: updatedLeads[0].assigned_to_name,
+      email: updatedLeads[0].assigned_to_email,
+    } : null;
+
+    const uploadedByUser = updatedLeads[0].uploaded_by_id ? {
+      id: updatedLeads[0].uploaded_by_id,
+      _id: updatedLeads[0].uploaded_by_id,
+      name: updatedLeads[0].uploaded_by_name,
+    } : null;
+
+    const lead = formatLead(updatedLeads[0], assignedToUser, uploadedByUser);
+
     return successResponse(res, lead, 'Lead updated successfully', 200);
   } catch (error) {
+    console.error('Error updating lead:', error);
     return errorResponse(res, error.message || 'Failed to update lead', 500);
   }
 };
@@ -510,9 +854,15 @@ export const updateLead = async (req, res) => {
 // @access  Private (Super Admin only)
 export const deleteLead = async (req, res) => {
   try {
-    const lead = await Lead.findById(req.params.id);
+    const pool = getPool();
 
-    if (!lead) {
+    // Check if lead exists
+    const [leads] = await pool.execute(
+      'SELECT id FROM leads WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (leads.length === 0) {
       return errorResponse(res, 'Lead not found', 404);
     }
 
@@ -521,25 +871,41 @@ export const deleteLead = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only', 403);
     }
 
-    // Delete all activity logs for this lead first
-    await ActivityLog.deleteMany({ leadId: lead._id });
+    // Delete all activity logs for this lead first (CASCADE will handle this, but explicit for clarity)
+    await pool.execute(
+      'DELETE FROM activity_logs WHERE lead_id = ?',
+      [req.params.id]
+    );
 
-    // Then delete the lead
-    await lead.deleteOne();
+    // Then delete the lead (CASCADE will also delete related records)
+    await pool.execute(
+      'DELETE FROM leads WHERE id = ?',
+      [req.params.id]
+    );
 
     return successResponse(res, null, 'Lead and associated activity logs deleted successfully', 200);
   } catch (error) {
+    console.error('Error deleting lead:', error);
     return errorResponse(res, error.message || 'Failed to delete lead', 500);
   }
 };
 
 // Process delete job in background
 const processDeleteJob = async (jobId) => {
-  const job = await DeleteJob.findOne({ jobId });
-  if (!job) {
+  const pool = getPool();
+
+  // Get job
+  const [jobs] = await pool.execute(
+    'SELECT * FROM delete_jobs WHERE job_id = ?',
+    [jobId]
+  );
+
+  if (jobs.length === 0) {
     console.error(`Delete job ${jobId} not found`);
     return;
   }
+
+  const job = jobs[0];
 
   if (job.status !== 'queued') {
     console.warn(`Delete job ${jobId} is not in queued status: ${job.status}`);
@@ -547,72 +913,78 @@ const processDeleteJob = async (jobId) => {
   }
 
   const startTime = Date.now();
-  job.status = 'processing';
-  job.startedAt = new Date();
-  await job.save();
+  
+  // Update job status to processing
+  await pool.execute(
+    'UPDATE delete_jobs SET status = ?, started_at = NOW(), updated_at = NOW() WHERE job_id = ?',
+    ['processing', jobId]
+  );
 
   try {
-    const validIds = job.leadIds.filter((id) => {
-      try {
-        return mongoose.Types.ObjectId.isValid(id);
-      } catch {
-        return false;
-      }
-    });
+    // Get all lead IDs for this job
+    const [leadIdsRows] = await pool.execute(
+      'SELECT lead_id FROM delete_job_lead_ids WHERE delete_job_id = ?',
+      [job.id]
+    );
+
+    const validIds = leadIdsRows
+      .map(row => row.lead_id)
+      .filter(id => id && typeof id === 'string' && id.length === 36); // UUID validation
 
     if (validIds.length === 0) {
-      job.status = 'completed';
-      job.completedAt = new Date();
-      job.stats = {
-        requestedCount: job.leadIds.length,
-        validCount: 0,
-        deletedLeadCount: 0,
-        deletedLogCount: 0,
-        durationMs: Date.now() - startTime,
-      };
-      job.message = 'No valid lead IDs to delete';
-      await job.save();
+      await pool.execute(
+        `UPDATE delete_jobs SET 
+          status = ?, completed_at = NOW(), updated_at = NOW(),
+          stats_requested_count = ?, stats_valid_count = ?, stats_deleted_lead_count = ?,
+          stats_deleted_log_count = ?, stats_duration_ms = ?, message = ?
+         WHERE job_id = ?`,
+        ['completed', job.stats_requested_count || 0, 0, 0, 0, Date.now() - startTime, 'No valid lead IDs to delete', jobId]
+      );
       return;
     }
 
-    const uniqueValidIds = Array.from(new Set(validIds.map((id) => id.toString())));
+    const uniqueValidIds = Array.from(new Set(validIds));
     const chunkSize = uniqueValidIds.length > 20000 ? 10000 : uniqueValidIds.length > 5000 ? 5000 : 1000;
-    const objectIds = uniqueValidIds.map((id) => new mongoose.Types.ObjectId(id));
 
     let totalLeadDeleted = 0;
     let totalLogDeleted = 0;
     const errorDetails = [];
 
-    // Process in chunks without transactions to avoid timeout
-    for (let index = 0; index < objectIds.length; index += chunkSize) {
-      const chunk = objectIds.slice(index, index + chunkSize);
+    // Process in chunks
+    for (let index = 0; index < uniqueValidIds.length; index += chunkSize) {
+      const chunk = uniqueValidIds.slice(index, index + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
 
       try {
-        const [logsResult, leadsResult] = await Promise.all([
-          ActivityLog.deleteMany({ leadId: { $in: chunk } }),
-          Lead.deleteMany({ _id: { $in: chunk } }),
-        ]);
+        // Delete activity logs first
+        const [logResult] = await pool.execute(
+          `DELETE FROM activity_logs WHERE lead_id IN (${placeholders})`,
+          chunk
+        );
+        totalLogDeleted += logResult.affectedRows || 0;
 
-        totalLogDeleted += logsResult?.deletedCount || 0;
-        totalLeadDeleted += leadsResult?.deletedCount || 0;
+        // Delete leads (CASCADE will handle related records)
+        const [leadResult] = await pool.execute(
+          `DELETE FROM leads WHERE id IN (${placeholders})`,
+          chunk
+        );
+        totalLeadDeleted += leadResult.affectedRows || 0;
 
         // Update job progress periodically
-        if ((index + chunkSize) % (chunkSize * 5) === 0 || index + chunkSize >= objectIds.length) {
-          job.stats = {
-            requestedCount: job.leadIds.length,
-            validCount: uniqueValidIds.length,
-            deletedLeadCount: totalLeadDeleted,
-            deletedLogCount: totalLogDeleted,
-            durationMs: Date.now() - startTime,
-          };
-          await job.save();
+        if ((index + chunkSize) % (chunkSize * 5) === 0 || index + chunkSize >= uniqueValidIds.length) {
+          await pool.execute(
+            `UPDATE delete_jobs SET 
+              stats_requested_count = ?, stats_valid_count = ?, stats_deleted_lead_count = ?,
+              stats_deleted_log_count = ?, stats_duration_ms = ?, updated_at = NOW()
+             WHERE job_id = ?`,
+            [job.stats_requested_count || 0, uniqueValidIds.length, totalLeadDeleted, totalLogDeleted, Date.now() - startTime, jobId]
+          );
         }
 
-        // Yield the event loop to keep the Node.js process responsive
+        // Yield the event loop
         await new Promise((resolve) => setImmediate(resolve));
       } catch (chunkError) {
         console.error(`Error deleting chunk ${index}-${index + chunkSize}:`, chunkError);
-        // Continue with next chunk even if one fails
         chunk.forEach((id) => {
           errorDetails.push({
             leadId: id,
@@ -624,33 +996,55 @@ const processDeleteJob = async (jobId) => {
 
     const durationMs = Date.now() - startTime;
 
-    job.status = 'completed';
-    job.completedAt = new Date();
-    job.stats = {
-      requestedCount: job.leadIds.length,
-      validCount: uniqueValidIds.length,
-      deletedLeadCount: totalLeadDeleted,
-      deletedLogCount: totalLogDeleted,
-      durationMs,
-    };
-    job.errorDetails = errorDetails.slice(0, 200); // Limit error details
-    job.message = `Deleted ${totalLeadDeleted} lead(s) and ${totalLogDeleted} activity log(s) in ${durationMs} ms`;
-    await job.save();
+    // Insert error details (limit to 200)
+    const limitedErrors = errorDetails.slice(0, 200);
+    for (const errorDetail of limitedErrors) {
+      const errorId = uuidv4();
+      await pool.execute(
+        'INSERT INTO delete_job_error_details (id, delete_job_id, lead_id, error, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [errorId, job.id, errorDetail.leadId, errorDetail.error]
+      );
+    }
+
+    // Update job to completed
+    await pool.execute(
+      `UPDATE delete_jobs SET 
+        status = ?, completed_at = NOW(), updated_at = NOW(),
+        stats_requested_count = ?, stats_valid_count = ?, stats_deleted_lead_count = ?,
+        stats_deleted_log_count = ?, stats_duration_ms = ?, message = ?
+       WHERE job_id = ?`,
+      [
+        'completed',
+        job.stats_requested_count || 0,
+        uniqueValidIds.length,
+        totalLeadDeleted,
+        totalLogDeleted,
+        durationMs,
+        `Deleted ${totalLeadDeleted} lead(s) and ${totalLogDeleted} activity log(s) in ${durationMs} ms`,
+        jobId
+      ]
+    );
 
     console.log(`Delete job ${jobId} completed: ${totalLeadDeleted} leads deleted`);
   } catch (error) {
     console.error(`Delete job ${jobId} failed:`, error);
-    job.status = 'failed';
-    job.completedAt = new Date();
-    job.stats = {
-      requestedCount: job.leadIds.length,
-      validCount: 0,
-      deletedLeadCount: 0,
-      deletedLogCount: 0,
-      durationMs: Date.now() - startTime,
-    };
-    job.message = error.message || 'Failed to process delete job';
-    await job.save();
+    await pool.execute(
+      `UPDATE delete_jobs SET 
+        status = ?, completed_at = NOW(), updated_at = NOW(),
+        stats_requested_count = ?, stats_valid_count = ?, stats_deleted_lead_count = ?,
+        stats_deleted_log_count = ?, stats_duration_ms = ?, message = ?
+       WHERE job_id = ?`,
+      [
+        'failed',
+        job.stats_requested_count || 0,
+        0,
+        0,
+        0,
+        Date.now() - startTime,
+        error.message || 'Failed to process delete job',
+        jobId
+      ]
+    );
   }
 };
 
@@ -669,12 +1063,9 @@ export const bulkDeleteLeads = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only', 403);
     }
 
+    // Validate UUIDs (36 characters)
     const validIds = leadIds.filter((id) => {
-      try {
-        return mongoose.Types.ObjectId.isValid(id);
-      } catch {
-        return false;
-      }
+      return id && typeof id === 'string' && id.length === 36;
     });
 
     if (validIds.length === 0) {
@@ -682,23 +1073,40 @@ export const bulkDeleteLeads = async (req, res) => {
     }
 
     const uniqueValidIds = Array.from(new Set(validIds));
-    const objectIds = uniqueValidIds.map((id) => new mongoose.Types.ObjectId(id));
+    const pool = getPool();
+    const userId = req.user.id || req.user._id;
 
     // Create delete job
     const jobId = uuidv4();
-    const job = await DeleteJob.create({
-      jobId,
-      leadIds: objectIds,
-      status: 'queued',
-      deletedBy: req.user._id,
-      stats: {
-        requestedCount: leadIds.length,
-        validCount: uniqueValidIds.length,
-        deletedLeadCount: 0,
-        deletedLogCount: 0,
-        durationMs: 0,
-      },
-    });
+    const deleteJobId = uuidv4();
+
+    await pool.execute(
+      `INSERT INTO delete_jobs (
+        id, job_id, status, deleted_by, stats_requested_count, stats_valid_count,
+        stats_deleted_lead_count, stats_deleted_log_count, stats_duration_ms,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        deleteJobId,
+        jobId,
+        'queued',
+        userId,
+        leadIds.length,
+        uniqueValidIds.length,
+        0,
+        0,
+        0,
+      ]
+    );
+
+    // Insert lead IDs
+    for (const leadId of uniqueValidIds) {
+      const leadIdRecordId = uuidv4();
+      await pool.execute(
+        'INSERT INTO delete_job_lead_ids (id, delete_job_id, lead_id, created_at) VALUES (?, ?, ?, NOW())',
+        [leadIdRecordId, deleteJobId, leadId]
+      );
+    }
 
     // Queue the job for processing
     deleteQueue.add(() => processDeleteJob(jobId)).catch((error) => {
@@ -734,23 +1142,42 @@ export const getDeleteJobStatus = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only', 403);
     }
 
-    const job = await DeleteJob.findOne({ jobId });
+    const pool = getPool();
 
-    if (!job) {
+    const [jobs] = await pool.execute(
+      'SELECT * FROM delete_jobs WHERE job_id = ?',
+      [jobId]
+    );
+
+    if (jobs.length === 0) {
       return errorResponse(res, 'Delete job not found', 404);
     }
+
+    const job = jobs[0];
+
+    // Get error details
+    const [errorDetails] = await pool.execute(
+      'SELECT lead_id, error FROM delete_job_error_details WHERE delete_job_id = ? LIMIT 200',
+      [job.id]
+    );
 
     return successResponse(
       res,
       {
-        jobId: job.jobId,
+        jobId: job.job_id,
         status: job.status,
-        stats: job.stats,
-        errorDetails: job.errorDetails || [],
+        stats: {
+          requestedCount: job.stats_requested_count,
+          validCount: job.stats_valid_count,
+          deletedLeadCount: job.stats_deleted_lead_count,
+          deletedLogCount: job.stats_deleted_log_count,
+          durationMs: job.stats_duration_ms,
+        },
+        errorDetails: errorDetails.map(e => ({ leadId: e.lead_id, error: e.error })),
         message: job.message,
-        startedAt: job.startedAt,
-        completedAt: job.completedAt,
-        createdAt: job.createdAt,
+        startedAt: job.started_at,
+        completedAt: job.completed_at,
+        createdAt: job.created_at,
       },
       'Delete job status retrieved successfully',
       200,
@@ -766,48 +1193,86 @@ export const getDeleteJobStatus = async (req, res) => {
 // @access  Private
 export const getAllLeadIds = async (req, res) => {
   try {
-    // Build filter object (same as getLeads)
-    const filter = {};
-    
-    if (req.query.mandal) filter.mandal = req.query.mandal;
-    if (req.query.state) filter.state = req.query.state;
-    if (req.query.district) filter.district = req.query.district;
-    if (req.query.quota) filter.quota = req.query.quota;
-    if (req.query.leadStatus) filter.leadStatus = req.query.leadStatus;
-    if (req.query.applicationStatus) filter.applicationStatus = req.query.applicationStatus;
-    if (req.query.assignedTo) filter.assignedTo = req.query.assignedTo;
+    const pool = getPool();
+
+    // Build WHERE conditions (same as getLeads)
+    const conditions = [];
+    const params = [];
+
+    if (req.query.mandal) {
+      conditions.push('mandal = ?');
+      params.push(req.query.mandal);
+    }
+    if (req.query.state) {
+      conditions.push('state = ?');
+      params.push(req.query.state);
+    }
+    if (req.query.district) {
+      conditions.push('district = ?');
+      params.push(req.query.district);
+    }
+    if (req.query.quota) {
+      conditions.push('quota = ?');
+      params.push(req.query.quota);
+    }
+    if (req.query.leadStatus) {
+      conditions.push('lead_status = ?');
+      params.push(req.query.leadStatus);
+    }
+    if (req.query.applicationStatus) {
+      conditions.push('application_status = ?');
+      params.push(req.query.applicationStatus);
+    }
+    if (req.query.assignedTo) {
+      conditions.push('assigned_to = ?');
+      params.push(req.query.assignedTo);
+    }
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
       if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        filter.enquiryNumber = { $regex: `^${searchTerm}`, $options: 'i' };
+        conditions.push('enquiry_number LIKE ?');
+        params.push(`${searchTerm}%`);
       } else {
-        filter.enquiryNumber = { $regex: searchTerm, $options: 'i' };
+        conditions.push('enquiry_number LIKE ?');
+        params.push(`%${searchTerm}%`);
       }
     }
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      filter.$or = [
-        { name: { $regex: searchTerm, $options: 'i' } },
-        { phone: { $regex: searchTerm, $options: 'i' } },
-        { email: { $regex: searchTerm, $options: 'i' } },
-        { district: { $regex: searchTerm, $options: 'i' } },
-      ];
+      conditions.push(`(
+        MATCH(enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college) 
+        AGAINST(? IN NATURAL LANGUAGE MODE)
+        OR name LIKE ?
+        OR phone LIKE ?
+        OR email LIKE ?
+        OR district LIKE ?
+      )`);
+      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
     }
 
-    // If user is not Super Admin, only show assigned leads
+    // Access control
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      filter.assignedTo = req.user._id;
+      const userId = req.user.id || req.user._id;
+      conditions.push('assigned_to = ?');
+      params.push(userId);
     }
 
-    // Get only IDs (lean query for performance)
-    const leadIds = await Lead.find(filter).select('_id').lean();
-    const ids = leadIds.map(lead => lead._id.toString());
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    // Get only IDs
+    const [leadIds] = await pool.execute(
+      `SELECT id FROM leads ${whereClause}`,
+      params
+    );
+
+    const ids = leadIds.map(row => row.id);
 
     return successResponse(res, {
       ids,
       count: ids.length,
     }, 'Lead IDs retrieved successfully', 200);
   } catch (error) {
+    console.error('Error getting lead IDs:', error);
     return errorResponse(res, error.message || 'Failed to get lead IDs', 500);
   }
 };
@@ -817,23 +1282,24 @@ export const getAllLeadIds = async (req, res) => {
 // @access  Public
 export const getPublicFilterOptions = async (req, res) => {
   try {
-    // Public endpoint - get all options without filtering by user
-    const [mandals, districts, states, quotas, applicationStatuses] = await Promise.all([
-      Lead.distinct('mandal').sort(),
-      Lead.distinct('district').sort(),
-      Lead.distinct('state').sort(),
-      Lead.distinct('quota').sort(),
-      Lead.distinct('applicationStatus').sort(),
-    ]);
+    const pool = getPool();
+
+    // Get distinct values for each field
+    const [mandals] = await pool.execute('SELECT DISTINCT mandal FROM leads WHERE mandal IS NOT NULL AND mandal != "" ORDER BY mandal ASC');
+    const [districts] = await pool.execute('SELECT DISTINCT district FROM leads WHERE district IS NOT NULL AND district != "" ORDER BY district ASC');
+    const [states] = await pool.execute('SELECT DISTINCT state FROM leads WHERE state IS NOT NULL AND state != "" ORDER BY state ASC');
+    const [quotas] = await pool.execute('SELECT DISTINCT quota FROM leads WHERE quota IS NOT NULL AND quota != "" ORDER BY quota ASC');
+    const [applicationStatuses] = await pool.execute('SELECT DISTINCT application_status FROM leads WHERE application_status IS NOT NULL AND application_status != "" ORDER BY application_status ASC');
 
     return successResponse(res, {
-      mandals,
-      districts,
-      states,
-      quotas,
-      applicationStatuses,
+      mandals: mandals.map(r => r.mandal),
+      districts: districts.map(r => r.district),
+      states: states.map(r => r.state),
+      quotas: quotas.map(r => r.quota),
+      applicationStatuses: applicationStatuses.map(r => r.application_status),
     }, 'Filter options retrieved successfully', 200);
   } catch (error) {
+    console.error('Error getting public filter options:', error);
     return errorResponse(res, error.message || 'Failed to get filter options', 500);
   }
 };
@@ -843,31 +1309,65 @@ export const getPublicFilterOptions = async (req, res) => {
 // @access  Private
 export const getFilterOptions = async (req, res) => {
   try {
-    const filter = {};
-    
-    // If user is not Super Admin, only show assigned leads
+    const pool = getPool();
+
+    // Build WHERE clause for access control
+    const conditions = [];
+
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      filter.assignedTo = req.user._id;
+      const userId = req.user.id || req.user._id;
+      conditions.push('assigned_to = ?');
     }
 
-    const [mandals, districts, states, quotas, leadStatuses, applicationStatuses] = await Promise.all([
-      Lead.distinct('mandal', filter).sort(),
-      Lead.distinct('district', filter).sort(),
-      Lead.distinct('state', filter).sort(),
-      Lead.distinct('quota', filter).sort(),
-      Lead.distinct('leadStatus', filter).sort(),
-      Lead.distinct('applicationStatus', filter).sort(),
-    ]);
+    // Add field-specific conditions
+    const mandalCondition = [...conditions, 'mandal IS NOT NULL AND mandal != ""'];
+    const districtCondition = [...conditions, 'district IS NOT NULL AND district != ""'];
+    const stateCondition = [...conditions, 'state IS NOT NULL AND state != ""'];
+    const quotaCondition = [...conditions, 'quota IS NOT NULL AND quota != ""'];
+    const leadStatusCondition = [...conditions, 'lead_status IS NOT NULL AND lead_status != ""'];
+    const appStatusCondition = [...conditions, 'application_status IS NOT NULL AND application_status != ""'];
+
+    const whereClause = (conditions) => conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const params = !hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin' 
+      ? [req.user.id || req.user._id] 
+      : [];
+
+    // Get distinct values for each field
+    const [mandals] = await pool.execute(
+      `SELECT DISTINCT mandal FROM leads ${whereClause(mandalCondition)} ORDER BY mandal ASC`,
+      params
+    );
+    const [districts] = await pool.execute(
+      `SELECT DISTINCT district FROM leads ${whereClause(districtCondition)} ORDER BY district ASC`,
+      params
+    );
+    const [states] = await pool.execute(
+      `SELECT DISTINCT state FROM leads ${whereClause(stateCondition)} ORDER BY state ASC`,
+      params
+    );
+    const [quotas] = await pool.execute(
+      `SELECT DISTINCT quota FROM leads ${whereClause(quotaCondition)} ORDER BY quota ASC`,
+      params
+    );
+    const [leadStatuses] = await pool.execute(
+      `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
+      params
+    );
+    const [applicationStatuses] = await pool.execute(
+      `SELECT DISTINCT application_status FROM leads ${whereClause(appStatusCondition)} ORDER BY application_status ASC`,
+      params
+    );
 
     return successResponse(res, {
-      mandals,
-      districts,
-      states,
-      quotas,
-      leadStatuses,
-      applicationStatuses,
+      mandals: mandals.map(r => r.mandal),
+      districts: districts.map(r => r.district),
+      states: states.map(r => r.state),
+      quotas: quotas.map(r => r.quota),
+      leadStatuses: leadStatuses.map(r => r.lead_status),
+      applicationStatuses: applicationStatuses.map(r => r.application_status),
     }, 'Filter options retrieved successfully', 200);
   } catch (error) {
+    console.error('Error getting filter options:', error);
     return errorResponse(res, error.message || 'Failed to get filter options', 500);
   }
 };

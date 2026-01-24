@@ -1,6 +1,7 @@
-import User from '../models/User.model.js';
+import { getPool } from '../config-sql/database.js';
 import { generateToken } from '../utils/generateToken.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import bcrypt from 'bcryptjs';
 
 // @desc    Login user
 // @route   POST /api/auth/login
@@ -17,37 +18,95 @@ export const login = async (req, res) => {
       return errorResponse(res, 'Please provide email and password', 400);
     }
 
-    // Check for user
-    const user = await User.findOne({ email }).select('+password');
+    // Get database pool
+    let pool;
+    try {
+      pool = getPool();
+    } catch (error) {
+      console.error('Database connection error:', error);
+      return errorResponse(res, 'Database connection failed', 500);
+    }
 
-    if (!user) {
-      console.log('User not found for email:', email);
+    // Check for user in SQL database
+    const normalizedEmail = email.toLowerCase().trim();
+    const [users] = await pool.execute(
+      'SELECT id, name, email, password, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE email = ?',
+      [normalizedEmail]
+    );
+
+    if (!users || users.length === 0) {
+      console.log('User not found for email:', normalizedEmail);
       return errorResponse(res, 'Invalid credentials', 401);
     }
 
-    console.log('User found:', user.email, 'Active:', user.isActive);
+    const userData = users[0];
+    
+    // Validate userData structure
+    if (!userData || !userData.id || !userData.email || !userData.password) {
+      console.error('Invalid user data structure:', userData);
+      return errorResponse(res, 'Database error: Invalid user data', 500);
+    }
+    
+    console.log('User found:', userData.email, 'Active:', userData.is_active);
 
-    // Check if user is active
-    if (!user.isActive) {
+    // Check if user is active (MySQL returns 0/1 for BOOLEAN, handle both)
+    if (userData.is_active === 0 || userData.is_active === false || userData.is_active === null) {
       console.log('User account is inactive');
       return errorResponse(res, 'Your account has been deactivated', 403);
     }
 
     // Check if password matches
-    const isMatch = await user.matchPassword(password);
+    if (!userData.password) {
+      console.error('User has no password set:', userData.email);
+      return errorResponse(res, 'Database error: User password not found', 500);
+    }
+    
+    const isMatch = await bcrypt.compare(password, userData.password);
 
     if (!isMatch) {
-      console.log('Password mismatch for user:', email);
+      console.log('Password mismatch for user:', normalizedEmail);
       return errorResponse(res, 'Invalid credentials', 401);
     }
 
     console.log('Password matched, generating token');
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Format user object to match expected structure (camelCase)
+    let permissions = {};
+    try {
+      if (userData.permissions) {
+        if (typeof userData.permissions === 'string') {
+          permissions = JSON.parse(userData.permissions);
+        } else if (typeof userData.permissions === 'object') {
+          permissions = userData.permissions;
+        }
+      }
+    } catch (parseError) {
+      console.error('Error parsing permissions JSON:', parseError);
+      permissions = {};
+    }
 
-    // Remove password from response
-    user.password = undefined;
+    const user = {
+      id: userData.id,
+      _id: userData.id, // Keep _id for backward compatibility
+      name: userData.name,
+      email: userData.email,
+      roleName: userData.role_name,
+      managedBy: userData.managed_by,
+      isManager: userData.is_manager === 1 || userData.is_manager === true,
+      designation: userData.designation,
+      permissions,
+      isActive: userData.is_active === 1 || userData.is_active === true,
+      createdAt: userData.created_at,
+      updatedAt: userData.updated_at,
+    };
+
+    // Generate token
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET is not set in environment variables');
+      return errorResponse(res, 'Server configuration error', 500);
+    }
+    
+    const token = generateToken(user.id);
 
     console.log('Login successful for user:', user.email);
 
@@ -57,6 +116,7 @@ export const login = async (req, res) => {
     }, 'Login successful', 200);
   } catch (error) {
     console.error('Login error:', error);
+    console.error('Error stack:', error.stack);
     return errorResponse(res, error.message || 'Login failed', 500);
   }
 };
@@ -66,11 +126,56 @@ export const login = async (req, res) => {
 // @access  Private
 export const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    // Get database pool
+    let pool;
+    try {
+      pool = getPool();
+    } catch (error) {
+      console.error('Database connection error:', error);
+      return errorResponse(res, 'Database connection failed', 500);
+    }
 
-    if (!user) {
+    // Get user from SQL database
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      [req.user.id || req.user._id]
+    );
+
+    if (users.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
+
+    const userData = users[0];
+
+    // Format user object to match expected structure (camelCase)
+    let permissions = {};
+    try {
+      if (userData.permissions) {
+        if (typeof userData.permissions === 'string') {
+          permissions = JSON.parse(userData.permissions);
+        } else if (typeof userData.permissions === 'object') {
+          permissions = userData.permissions;
+        }
+      }
+    } catch (parseError) {
+      console.error('Error parsing permissions JSON:', parseError);
+      permissions = {};
+    }
+
+    const user = {
+      id: userData.id,
+      _id: userData.id, // Keep _id for backward compatibility
+      name: userData.name,
+      email: userData.email,
+      roleName: userData.role_name,
+      managedBy: userData.managed_by,
+      isManager: userData.is_manager === 1 || userData.is_manager === true,
+      designation: userData.designation,
+      permissions,
+      isActive: userData.is_active === 1 || userData.is_active === true,
+      createdAt: userData.created_at,
+      updatedAt: userData.updated_at,
+    };
 
     return successResponse(res, user, 'User retrieved successfully', 200);
   } catch (error) {

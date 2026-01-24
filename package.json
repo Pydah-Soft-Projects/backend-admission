@@ -7,6 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seedSuperAdmin.js",
+    "seed:sql": "node src/scripts-sql/seedSuperAdmin.js",
+    "schema:create": "node src/scripts-sql/createSchema.js",
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -25,6 +27,7 @@
     "express-validator": "^7.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.3",
+    "mysql2": "^3.11.5",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.10",
     "p-queue": "^8.0.1",
