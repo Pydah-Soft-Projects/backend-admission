@@ -41,8 +41,8 @@ const seedSuperAdmin = async () => {
     );
 
     console.log('Super Admin user created successfully!');
-    console.log('Email: admin@leadtracker.com');
-    console.log('Password: Admin@123');
+    // console.log('Email: admin@leadtracker.com');
+    // console.log('Password: Admin@123');
     console.log('⚠️  Please change the password after first login!');
 
     await closeDB();
