@@ -17,6 +17,7 @@ import notificationRoutes from './routes/notification.routes.js';
 import reportRoutes from './routes/report.routes.js';
 import utmRoutes from './routes/utm.routes.js';
 import managerRoutes from './routes/manager.routes.js';
+import formBuilderRoutes from './routes/formBuilder.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -86,6 +87,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/utm', utmRoutes);
 app.use('/api/manager', managerRoutes);
+app.use('/api/form-builder', formBuilderRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

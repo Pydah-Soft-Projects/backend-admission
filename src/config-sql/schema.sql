@@ -689,6 +689,7 @@ CREATE TABLE IF NOT EXISTS short_urls (
     utm_campaign VARCHAR(255),
     utm_term VARCHAR(255),
     utm_content VARCHAR(255),
+    form_id CHAR(36) NULL,
     click_count INT DEFAULT 0 NOT NULL,
     created_by CHAR(36) NULL,
     is_active BOOLEAN DEFAULT TRUE NOT NULL,
@@ -696,8 +697,10 @@ CREATE TABLE IF NOT EXISTS short_urls (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (form_id) REFERENCES form_builder_forms(id) ON DELETE SET NULL,
     INDEX idx_short_urls_short_code (short_code),
     INDEX idx_short_urls_is_active (is_active),
+    INDEX idx_short_urls_form_id (form_id),
     INDEX idx_short_urls_short_code_active (short_code, is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -823,4 +826,56 @@ CREATE TABLE IF NOT EXISTS admission_sequences (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_admission_sequences_year (year)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 31. FORM BUILDER FORMS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS form_builder_forms (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    is_default BOOLEAN DEFAULT FALSE NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_by CHAR(36) NULL,
+    updated_by CHAR(36) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_form_builder_forms_name (name),
+    INDEX idx_form_builder_forms_is_active (is_active),
+    INDEX idx_form_builder_forms_is_default (is_default)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 32. FORM BUILDER FIELDS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS form_builder_fields (
+    id CHAR(36) PRIMARY KEY,
+    form_id CHAR(36) NOT NULL,
+    field_name VARCHAR(255) NOT NULL,
+    field_type VARCHAR(50) NOT NULL CHECK (field_type IN ('text', 'number', 'email', 'tel', 'date', 'dropdown', 'checkbox', 'radio', 'textarea', 'file')),
+    field_label VARCHAR(255) NOT NULL,
+    placeholder VARCHAR(255),
+    is_required BOOLEAN DEFAULT FALSE NOT NULL,
+    validation_rules JSON DEFAULT (JSON_OBJECT()),
+    display_order INT DEFAULT 0 NOT NULL,
+    options JSON DEFAULT (JSON_ARRAY()),
+    default_value TEXT,
+    help_text TEXT,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_by CHAR(36) NULL,
+    updated_by CHAR(36) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (form_id) REFERENCES form_builder_forms(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_form_builder_fields_form_id (form_id),
+    INDEX idx_form_builder_fields_field_name (field_name),
+    INDEX idx_form_builder_fields_field_type (field_type),
+    INDEX idx_form_builder_fields_display_order (display_order),
+    INDEX idx_form_builder_fields_is_active (is_active),
+    INDEX idx_form_builder_fields_form_order (form_id, display_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

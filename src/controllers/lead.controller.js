@@ -345,9 +345,46 @@ export const createPublicLead = async (req, res) => {
     const utmTerm = utm_term || req.query.utm_term;
     const utmContent = utm_content || req.query.utm_content;
 
-    // Validate required fields
-    if (!name || !phone || !fatherName || !fatherPhone || !village || !district || !mandal) {
-      return errorResponse(res, 'Please provide all required fields', 400);
+    // Helper function to extract value from dynamicFields if direct field is missing
+    const getFieldValue = (directValue, fieldVariations, dynamicFieldsObj) => {
+      if (directValue && String(directValue).trim()) {
+        return String(directValue).trim();
+      }
+      
+      if (dynamicFieldsObj && typeof dynamicFieldsObj === 'object') {
+        for (const variation of fieldVariations) {
+          const key = Object.keys(dynamicFieldsObj).find(
+            k => k.toLowerCase() === variation.toLowerCase()
+          );
+          if (key && dynamicFieldsObj[key] && String(dynamicFieldsObj[key]).trim()) {
+            return String(dynamicFieldsObj[key]).trim();
+          }
+        }
+      }
+      
+      return null;
+    };
+
+    // Extract required fields from direct values or dynamicFields
+    const finalName = getFieldValue(name, ['name', 'fullname', 'full_name', 'studentname', 'student_name'], dynamicFields);
+    const finalPhone = getFieldValue(phone, ['phone', 'phonenumber', 'phone_number', 'mobile', 'mobilenumber', 'mobile_number', 'contactnumber', 'contact_number', 'primaryphone', 'primary_phone'], dynamicFields);
+    const finalFatherName = getFieldValue(fatherName, ['fathername', 'father_name', 'fathersname', 'fathers_name'], dynamicFields) || 'Not Provided';
+    const finalFatherPhone = getFieldValue(fatherPhone, ['fatherphone', 'father_phone', 'fathersphone', 'fathers_phone', 'fatherphonenumber', 'father_phone_number'], dynamicFields) || 'Not Provided';
+    const finalVillage = getFieldValue(village, ['village', 'city', 'town'], dynamicFields) || 'Not Provided';
+    const finalDistrict = getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
+    const finalMandal = getFieldValue(mandal, ['mandal', 'tehsil'], dynamicFields) || 'Not Provided';
+
+    // Validate only name and phone as truly required
+    if (!finalName || !finalPhone) {
+      const missingFields = [];
+      if (!finalName) missingFields.push('name');
+      if (!finalPhone) missingFields.push('phone');
+      
+      return errorResponse(
+        res, 
+        `Please provide required fields: ${missingFields.join(', ')}. Make sure your form includes a student name field and a primary phone number field.`, 
+        400
+      );
     }
 
     // Generate enquiry number
@@ -371,22 +408,29 @@ export const createPublicLead = async (req, res) => {
       [
         leadId,
         enquiryNumber,
-        name.trim(),
-        phone.trim(),
-        email || null,
-        fatherName.trim(),
-        motherName ? String(motherName).trim() : '',
-        fatherPhone.trim(),
-        hallTicketNumber ? String(hallTicketNumber).trim() : '',
-        village.trim(),
-        courseInterested || null,
-        district.trim(),
-        mandal.trim(),
-        state?.trim() || 'Andhra Pradesh',
-        isNRI === true || isNRI === 'true',
-        gender ? String(gender).trim() : 'Not Specified',
-        rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : null,
-        interCollege ? String(interCollege).trim() : '',
+        finalName,
+        finalPhone,
+        email || getFieldValue(email, ['email', 'emailaddress', 'email_address'], dynamicFields) || null,
+        finalFatherName,
+        motherName ? String(motherName).trim() : (getFieldValue(motherName, ['mothername', 'mother_name', 'mothersname', 'mothers_name'], dynamicFields) || ''),
+        finalFatherPhone,
+        hallTicketNumber ? String(hallTicketNumber).trim() : (getFieldValue(hallTicketNumber, ['hallticketnumber', 'hall_ticket_number', 'ticketnumber', 'ticket_number'], dynamicFields) || ''),
+        finalVillage,
+        courseInterested || getFieldValue(courseInterested, ['courseinterested', 'course_interested', 'course', 'coursename', 'course_name'], dynamicFields) || null,
+        finalDistrict,
+        finalMandal,
+        state?.trim() || getFieldValue(state, ['state'], dynamicFields) || 'Andhra Pradesh',
+        (() => {
+          if (isNRI === true || isNRI === 'true') return true;
+          const nriValue = getFieldValue(isNRI, ['isnri', 'is_nri', 'nri'], dynamicFields);
+          return nriValue === true || nriValue === 'true';
+        })(),
+        gender ? String(gender).trim() : (getFieldValue(gender, ['gender'], dynamicFields) || 'Not Specified'),
+        rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : (() => {
+          const rankValue = getFieldValue(rank, ['rank'], dynamicFields);
+          return rankValue && !Number.isNaN(Number(rankValue)) ? Number(rankValue) : null;
+        })(),
+        interCollege ? String(interCollege).trim() : (getFieldValue(interCollege, ['intercollege', 'inter_college', 'college', 'collegename', 'college_name'], dynamicFields) || ''),
         quota || 'Not Applicable',
         applicationStatus || 'Not Provided',
         JSON.stringify(dynamicFields || {}),
