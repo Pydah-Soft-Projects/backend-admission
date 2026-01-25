@@ -1,104 +1,56 @@
-import { getPool } from '../config-sql/database.js';
+import { getPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
-import { v4 as uuidv4 } from 'uuid';
 
-// Helper function to format course data from SQL to camelCase
+// Helper function to format course data from secondary database to camelCase
+// Secondary DB schema: id (int), college_id (int), name, code, total_years, semesters_per_year, 
+// year_semester_config (json), metadata (json), is_active (tinyint), created_at, updated_at
 const formatCourse = (courseData) => {
   if (!courseData) return null;
   return {
-    id: courseData.id,
-    _id: courseData.id, // Keep _id for backward compatibility
+    id: String(courseData.id), // Convert int to string for frontend compatibility
+    _id: String(courseData.id), // Keep _id for backward compatibility
     name: courseData.name,
-    code: courseData.code,
-    description: courseData.description,
+    code: courseData.code || null,
+    description: courseData.metadata?.description || null, // Extract from metadata if available
     isActive: courseData.is_active === 1 || courseData.is_active === true,
-    createdBy: courseData.created_by,
-    updatedBy: courseData.updated_by,
+    // Additional fields from secondary DB
+    collegeId: courseData.college_id ? String(courseData.college_id) : null,
+    totalYears: courseData.total_years || null,
+    semestersPerYear: courseData.semesters_per_year || null,
+    yearSemesterConfig: courseData.year_semester_config || null,
+    metadata: courseData.metadata || null,
     createdAt: courseData.created_at,
     updatedAt: courseData.updated_at,
   };
 };
 
-// Helper function to format branch data from SQL to camelCase
+// Helper function to format branch data from secondary database to camelCase
+// Secondary DB schema: id (int), course_id (int), name, code, total_years, semesters_per_year,
+// year_semester_config (json), metadata (json), is_active (tinyint), created_at, updated_at, academic_year_id (int)
 const formatBranch = (branchData) => {
   if (!branchData) return null;
   return {
-    id: branchData.id,
-    _id: branchData.id, // Keep _id for backward compatibility
-    courseId: branchData.course_id,
+    id: String(branchData.id), // Convert int to string
+    _id: String(branchData.id), // Keep _id for backward compatibility
+    courseId: String(branchData.course_id), // Convert int to string
     name: branchData.name,
-    code: branchData.code,
-    description: branchData.description,
+    code: branchData.code || null,
+    description: branchData.metadata?.description || null, // Extract from metadata if available
     isActive: branchData.is_active === 1 || branchData.is_active === true,
-    createdBy: branchData.created_by,
-    updatedBy: branchData.updated_by,
+    // Additional fields from secondary DB
+    totalYears: branchData.total_years || null,
+    semestersPerYear: branchData.semesters_per_year || null,
+    yearSemesterConfig: branchData.year_semester_config || null,
+    metadata: branchData.metadata || null,
+    academicYearId: branchData.academic_year_id ? String(branchData.academic_year_id) : null,
     createdAt: branchData.created_at,
     updatedAt: branchData.updated_at,
   };
 };
 
+// Note: Create, Update, and Delete operations are disabled since courses/branches are read-only from secondary database
 export const createCourse = async (req, res) => {
-  try {
-    const { name, code, description } = req.body;
-
-    if (!name || !name.trim()) {
-      return errorResponse(res, 'Course name is required', 422);
-    }
-
-    const pool = getPool();
-    const normalizedName = name.trim();
-    const userId = req.user?.id || req.user?._id;
-
-    // Check if course with same name exists
-    const [existingByName] = await pool.execute(
-      'SELECT id FROM courses WHERE name = ?',
-      [normalizedName]
-    );
-    if (existingByName.length > 0) {
-      return errorResponse(res, 'A course with the same name already exists', 409);
-    }
-
-    // Check if course with same code exists
-    if (code && code.trim()) {
-      const [existingByCode] = await pool.execute(
-        'SELECT id FROM courses WHERE code = ?',
-        [code.trim()]
-      );
-      if (existingByCode.length > 0) {
-        return errorResponse(res, 'A course with the same code already exists', 409);
-      }
-    }
-
-    // Generate UUID
-    const courseId = uuidv4();
-
-    // Insert course
-    await pool.execute(
-      `INSERT INTO courses (id, name, code, description, created_by, updated_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        courseId,
-        normalizedName,
-        code?.trim() || null,
-        description || null,
-        userId || null,
-        userId || null
-      ]
-    );
-
-    // Fetch created course
-    const [courses] = await pool.execute(
-      'SELECT id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM courses WHERE id = ?',
-      [courseId]
-    );
-
-    const course = formatCourse(courses[0]);
-
-    return successResponse(res, course, 'Course created successfully', 201);
-  } catch (error) {
-    console.error('Create course error:', error);
-    return errorResponse(res, error.message || 'Failed to create course', 500);
-  }
+  return errorResponse(res, 'Courses are managed in the external system. Cannot create courses from this API.', 403);
 };
 
 export const listCourses = async (req, res) => {
@@ -107,13 +59,13 @@ export const listCourses = async (req, res) => {
     const includeBranches = req.query.includeBranches === 'true';
     const pool = getPool();
 
-    // Build query
-    let query = 'SELECT id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM courses';
+    // Build query for secondary database
+    let query = 'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses';
     const params = [];
     
     if (!showInactive) {
       query += ' WHERE is_active = ?';
-      params.push(true);
+      params.push(1); // tinyint(1) uses 1 for true
     }
     
     query += ' ORDER BY name ASC';
@@ -125,15 +77,19 @@ export const listCourses = async (req, res) => {
       return successResponse(res, formattedCourses);
     }
 
-    // Get branches for all courses
-    const courseIds = formattedCourses.map(c => c.id);
-    let branchQuery = 'SELECT id, course_id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM branches WHERE course_id IN (';
+    // Get branches for all courses from course_branches table
+    const courseIds = formattedCourses.map(c => parseInt(c.id)); // Convert back to int for query
+    if (courseIds.length === 0) {
+      return successResponse(res, formattedCourses.map(course => ({ ...course, branches: [] })));
+    }
+
+    let branchQuery = 'SELECT DISTINCT id, course_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, academic_year_id, created_at, updated_at FROM course_branches WHERE course_id IN (';
     branchQuery += courseIds.map(() => '?').join(',');
     branchQuery += ')';
     
     if (!showInactive) {
       branchQuery += ' AND is_active = ?';
-      courseIds.push(true);
+      courseIds.push(1); // tinyint(1) uses 1 for true
     }
     
     branchQuery += ' ORDER BY name ASC';
@@ -141,11 +97,25 @@ export const listCourses = async (req, res) => {
     const [branches] = await pool.execute(branchQuery, courseIds);
     const formattedBranches = branches.map(formatBranch);
 
-    // Group branches by course_id
-    const branchMap = formattedBranches.reduce((acc, branch) => {
+    // Deduplicate branches by ID first (in case of any duplicates from secondary DB)
+    const uniqueBranchesMap = new Map();
+    formattedBranches.forEach((branch) => {
+      const branchId = branch.id || branch._id;
+      if (branchId && !uniqueBranchesMap.has(branchId)) {
+        uniqueBranchesMap.set(branchId, branch);
+      }
+    });
+    const deduplicatedBranches = Array.from(uniqueBranchesMap.values());
+
+    // Group deduplicated branches by course_id (as string for matching)
+    const branchMap = deduplicatedBranches.reduce((acc, branch) => {
       const key = branch.courseId;
       if (!acc[key]) acc[key] = [];
-      acc[key].push(branch);
+      // Additional check to prevent duplicates within the same course
+      const existingBranch = acc[key].find((b) => (b.id || b._id) === (branch.id || branch._id));
+      if (!existingBranch) {
+        acc[key].push(branch);
+      }
       return acc;
     }, {});
 
@@ -169,10 +139,16 @@ export const getCourse = async (req, res) => {
     const showInactive = req.query.showInactive === 'true';
     const pool = getPool();
 
-    // Get course
+    // Convert courseId to int for query (secondary DB uses int IDs)
+    const courseIdInt = parseInt(courseId);
+    if (isNaN(courseIdInt)) {
+      return errorResponse(res, 'Invalid course ID', 400);
+    }
+
+    // Get course from secondary database
     const [courses] = await pool.execute(
-      'SELECT id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM courses WHERE id = ?',
-      [courseId]
+      'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses WHERE id = ?',
+      [courseIdInt]
     );
 
     if (courses.length === 0) {
@@ -185,13 +161,13 @@ export const getCourse = async (req, res) => {
       return successResponse(res, course);
     }
 
-    // Get branches
-    let branchQuery = 'SELECT id, course_id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM branches WHERE course_id = ?';
-    const branchParams = [courseId];
+    // Get branches from course_branches table
+    let branchQuery = 'SELECT DISTINCT id, course_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, academic_year_id, created_at, updated_at FROM course_branches WHERE course_id = ?';
+    const branchParams = [courseIdInt];
     
     if (!showInactive) {
       branchQuery += ' AND is_active = ?';
-      branchParams.push(true);
+      branchParams.push(1); // tinyint(1) uses 1 for true
     }
     
     branchQuery += ' ORDER BY name ASC';
@@ -199,7 +175,17 @@ export const getCourse = async (req, res) => {
     const [branches] = await pool.execute(branchQuery, branchParams);
     const formattedBranches = branches.map(formatBranch);
 
-    return successResponse(res, { ...course, branches: formattedBranches });
+    // Deduplicate branches by ID (in case of any duplicates from secondary DB)
+    const uniqueBranchesMap = new Map();
+    formattedBranches.forEach((branch) => {
+      const branchId = branch.id || branch._id;
+      if (branchId && !uniqueBranchesMap.has(branchId)) {
+        uniqueBranchesMap.set(branchId, branch);
+      }
+    });
+    const deduplicatedBranches = Array.from(uniqueBranchesMap.values());
+
+    return successResponse(res, { ...course, branches: deduplicatedBranches });
   } catch (error) {
     console.error('Get course error:', error);
     return errorResponse(res, error.message || 'Failed to retrieve course', 500);
@@ -207,166 +193,11 @@ export const getCourse = async (req, res) => {
 };
 
 export const updateCourse = async (req, res) => {
-  try {
-    const { courseId } = req.params;
-    const { name, code, description, isActive } = req.body;
-    const pool = getPool();
-    const userId = req.user?.id || req.user?._id;
-
-    // Get current course
-    const [courses] = await pool.execute(
-      'SELECT id, name, code FROM courses WHERE id = ?',
-      [courseId]
-    );
-
-    if (courses.length === 0) {
-      return errorResponse(res, 'Course not found', 404);
-    }
-
-    const currentCourse = courses[0];
-    const updateFields = [];
-    const updateValues = [];
-
-    if (name && name.trim() && name.trim() !== currentCourse.name) {
-      // Check if name already exists
-      const [existing] = await pool.execute(
-        'SELECT id FROM courses WHERE name = ? AND id != ?',
-        [name.trim(), courseId]
-      );
-      if (existing.length > 0) {
-        return errorResponse(res, 'Another course with the same name exists', 409);
-      }
-      updateFields.push('name = ?');
-      updateValues.push(name.trim());
-    }
-
-    if (code !== undefined) {
-      if (code && code.trim() && code.trim() !== currentCourse.code) {
-        // Check if code already exists
-        const [existingCode] = await pool.execute(
-          'SELECT id FROM courses WHERE code = ? AND id != ?',
-          [code.trim(), courseId]
-        );
-        if (existingCode.length > 0) {
-          return errorResponse(res, 'Another course with the same code exists', 409);
-        }
-        updateFields.push('code = ?');
-        updateValues.push(code.trim());
-      } else if (code === '') {
-        updateFields.push('code = ?');
-        updateValues.push(null);
-      }
-    }
-
-    if (description !== undefined) {
-      updateFields.push('description = ?');
-      updateValues.push(description || null);
-    }
-
-    if (typeof isActive === 'boolean') {
-      updateFields.push('is_active = ?');
-      updateValues.push(isActive);
-    }
-
-    if (updateFields.length > 0) {
-      updateFields.push('updated_by = ?');
-      updateValues.push(userId || null);
-      updateFields.push('updated_at = NOW()');
-      updateValues.push(courseId);
-
-      await pool.execute(
-        `UPDATE courses SET ${updateFields.join(', ')} WHERE id = ?`,
-        updateValues
-      );
-    }
-
-    // Fetch updated course
-    const [updatedCourses] = await pool.execute(
-      'SELECT id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM courses WHERE id = ?',
-      [courseId]
-    );
-
-    const course = formatCourse(updatedCourses[0]);
-
-    return successResponse(res, course, 'Course updated successfully');
-  } catch (error) {
-    console.error('Update course error:', error);
-    return errorResponse(res, error.message || 'Failed to update course', 500);
-  }
+  return errorResponse(res, 'Courses are managed in the external system. Cannot update courses from this API.', 403);
 };
 
 export const createBranch = async (req, res) => {
-  try {
-    const { courseId } = req.params;
-    const { name, code, description } = req.body;
-
-    if (!name || !name.trim()) {
-      return errorResponse(res, 'Branch name is required', 422);
-    }
-
-    const pool = getPool();
-    const userId = req.user?.id || req.user?._id;
-
-    // Check if course exists
-    const [courses] = await pool.execute(
-      'SELECT id FROM courses WHERE id = ?',
-      [courseId]
-    );
-    if (courses.length === 0) {
-      return errorResponse(res, 'Course not found', 404);
-    }
-
-    // Check if branch with same name exists for this course
-    const [existingByName] = await pool.execute(
-      'SELECT id FROM branches WHERE course_id = ? AND name = ?',
-      [courseId, name.trim()]
-    );
-    if (existingByName.length > 0) {
-      return errorResponse(res, 'Branch already exists for this course', 409);
-    }
-
-    // Check if branch with same code exists for this course
-    if (code && code.trim()) {
-      const [existingByCode] = await pool.execute(
-        'SELECT id FROM branches WHERE course_id = ? AND code = ?',
-        [courseId, code.trim()]
-      );
-      if (existingByCode.length > 0) {
-        return errorResponse(res, 'Branch code already exists for this course', 409);
-      }
-    }
-
-    // Generate UUID
-    const branchId = uuidv4();
-
-    // Insert branch
-    await pool.execute(
-      `INSERT INTO branches (id, course_id, name, code, description, created_by, updated_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        branchId,
-        courseId,
-        name.trim(),
-        code?.trim() || null,
-        description || null,
-        userId || null,
-        userId || null
-      ]
-    );
-
-    // Fetch created branch
-    const [branches] = await pool.execute(
-      'SELECT id, course_id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM branches WHERE id = ?',
-      [branchId]
-    );
-
-    const branch = formatBranch(branches[0]);
-
-    return successResponse(res, branch, 'Branch created successfully', 201);
-  } catch (error) {
-    console.error('Create branch error:', error);
-    return errorResponse(res, error.message || 'Failed to create branch', 500);
-  }
+  return errorResponse(res, 'Branches are managed in the external system. Cannot create branches from this API.', 403);
 };
 
 export const listBranches = async (req, res) => {
@@ -375,19 +206,23 @@ export const listBranches = async (req, res) => {
     const showInactive = req.query.showInactive === 'true';
     const pool = getPool();
 
-    // Build query
-    let query = 'SELECT id, course_id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM branches';
+    // Build query for course_branches table
+    let query = 'SELECT DISTINCT id, course_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, academic_year_id, created_at, updated_at FROM course_branches';
     const params = [];
     const conditions = [];
 
     if (courseId) {
+      const courseIdInt = parseInt(courseId);
+      if (isNaN(courseIdInt)) {
+        return errorResponse(res, 'Invalid course ID', 400);
+      }
       conditions.push('course_id = ?');
-      params.push(courseId);
+      params.push(courseIdInt);
     }
 
     if (!showInactive) {
       conditions.push('is_active = ?');
-      params.push(true);
+      params.push(1); // tinyint(1) uses 1 for true
     }
 
     if (conditions.length > 0) {
@@ -399,7 +234,17 @@ export const listBranches = async (req, res) => {
     const [branches] = await pool.execute(query, params);
     const formattedBranches = branches.map(formatBranch);
 
-    return successResponse(res, formattedBranches);
+    // Deduplicate branches by ID (in case of any duplicates from secondary DB)
+    const uniqueBranchesMap = new Map();
+    formattedBranches.forEach((branch) => {
+      const branchId = branch.id || branch._id;
+      if (branchId && !uniqueBranchesMap.has(branchId)) {
+        uniqueBranchesMap.set(branchId, branch);
+      }
+    });
+    const deduplicatedBranches = Array.from(uniqueBranchesMap.values());
+
+    return successResponse(res, deduplicatedBranches);
   } catch (error) {
     console.error('List branches error:', error);
     return errorResponse(res, error.message || 'Failed to fetch branches', 500);
@@ -407,162 +252,13 @@ export const listBranches = async (req, res) => {
 };
 
 export const updateBranch = async (req, res) => {
-  try {
-    const { courseId, branchId } = req.params;
-    const { name, code, description, isActive } = req.body;
-    const pool = getPool();
-    const userId = req.user?.id || req.user?._id;
-
-    // Check if branch exists for this course
-    const [branches] = await pool.execute(
-      'SELECT id, name, code FROM branches WHERE id = ? AND course_id = ?',
-      [branchId, courseId]
-    );
-
-    if (branches.length === 0) {
-      return errorResponse(res, 'Branch not found for the specified course', 404);
-    }
-
-    const currentBranch = branches[0];
-    const updateFields = [];
-    const updateValues = [];
-
-    if (name && name.trim() && name.trim() !== currentBranch.name) {
-      // Check if name already exists for this course
-      const [existing] = await pool.execute(
-        'SELECT id FROM branches WHERE course_id = ? AND name = ? AND id != ?',
-        [courseId, name.trim(), branchId]
-      );
-      if (existing.length > 0) {
-        return errorResponse(res, 'Another branch with the same name exists', 409);
-      }
-      updateFields.push('name = ?');
-      updateValues.push(name.trim());
-    }
-
-    if (code !== undefined) {
-      if (code && code.trim() && code.trim() !== currentBranch.code) {
-        // Check if code already exists for this course
-        const [existingCode] = await pool.execute(
-          'SELECT id FROM branches WHERE course_id = ? AND code = ? AND id != ?',
-          [courseId, code.trim(), branchId]
-        );
-        if (existingCode.length > 0) {
-          return errorResponse(res, 'Another branch with the same code exists', 409);
-        }
-        updateFields.push('code = ?');
-        updateValues.push(code.trim());
-      } else if (code === '') {
-        updateFields.push('code = ?');
-        updateValues.push(null);
-      }
-    }
-
-    if (description !== undefined) {
-      updateFields.push('description = ?');
-      updateValues.push(description || null);
-    }
-
-    if (typeof isActive === 'boolean') {
-      updateFields.push('is_active = ?');
-      updateValues.push(isActive);
-    }
-
-    if (updateFields.length > 0) {
-      updateFields.push('updated_by = ?');
-      updateValues.push(userId || null);
-      updateFields.push('updated_at = NOW()');
-      updateValues.push(branchId);
-
-      await pool.execute(
-        `UPDATE branches SET ${updateFields.join(', ')} WHERE id = ?`,
-        updateValues
-      );
-    }
-
-    // Fetch updated branch
-    const [updatedBranches] = await pool.execute(
-      'SELECT id, course_id, name, code, description, is_active, created_by, updated_by, created_at, updated_at FROM branches WHERE id = ?',
-      [branchId]
-    );
-
-    const branch = formatBranch(updatedBranches[0]);
-
-    return successResponse(res, branch, 'Branch updated successfully');
-  } catch (error) {
-    console.error('Update branch error:', error);
-    return errorResponse(res, error.message || 'Failed to update branch', 500);
-  }
+  return errorResponse(res, 'Branches are managed in the external system. Cannot update branches from this API.', 403);
 };
 
 export const deleteBranch = async (req, res) => {
-  try {
-    const { courseId, branchId } = req.params;
-    const pool = getPool();
-
-    // Check if branch exists for this course
-    const [branches] = await pool.execute(
-      'SELECT id FROM branches WHERE id = ? AND course_id = ?',
-      [branchId, courseId]
-    );
-
-    if (branches.length === 0) {
-      return errorResponse(res, 'Branch not found', 404);
-    }
-
-    // Delete branch (foreign key constraints will handle related records)
-    await pool.execute(
-      'DELETE FROM branches WHERE id = ?',
-      [branchId]
-    );
-
-    return successResponse(res, null, 'Branch deleted successfully');
-  } catch (error) {
-    console.error('Delete branch error:', error);
-    return errorResponse(res, error.message || 'Failed to delete branch', 500);
-  }
+  return errorResponse(res, 'Branches are managed in the external system. Cannot delete branches from this API.', 403);
 };
 
 export const deleteCourse = async (req, res) => {
-  try {
-    const { courseId } = req.params;
-    const pool = getPool();
-
-    // Check if course exists
-    const [courses] = await pool.execute(
-      'SELECT id FROM courses WHERE id = ?',
-      [courseId]
-    );
-
-    if (courses.length === 0) {
-      return errorResponse(res, 'Course not found', 404);
-    }
-
-    // Check if course has branches
-    const [branches] = await pool.execute(
-      'SELECT COUNT(*) as count FROM branches WHERE course_id = ?',
-      [courseId]
-    );
-
-    if (branches[0].count > 0) {
-      return errorResponse(
-        res,
-        'Cannot delete course with existing branches. Please remove branches first.',
-        409
-      );
-    }
-
-    // Delete course (foreign key constraints will handle related records)
-    await pool.execute(
-      'DELETE FROM courses WHERE id = ?',
-      [courseId]
-    );
-
-    return successResponse(res, null, 'Course deleted successfully');
-  } catch (error) {
-    console.error('Delete course error:', error);
-    return errorResponse(res, error.message || 'Failed to delete course', 500);
-  }
+  return errorResponse(res, 'Courses are managed in the external system. Cannot delete courses from this API.', 403);
 };
-
-

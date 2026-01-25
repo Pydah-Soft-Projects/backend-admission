@@ -36,6 +36,7 @@ const formatShortUrl = (urlData, clicks = []) => {
     utmCampaign: urlData.utm_campaign,
     utmTerm: urlData.utm_term,
     utmContent: urlData.utm_content,
+    formId: urlData.form_id,
     clickCount: urlData.click_count || 0,
     createdBy: urlData.created_by,
     isActive: urlData.is_active === 1 || urlData.is_active === true,
@@ -62,7 +63,7 @@ export const buildUtmTrackedUrl = async (req, res) => {
       return errorResponse(res, 'Access denied. Super Admin only.', 403);
     }
 
-    const { baseUrl, utmSource, utmMedium, utmCampaign, utmTerm, utmContent } = req.body;
+    const { baseUrl, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, formId } = req.body;
 
     if (!baseUrl) {
       return errorResponse(res, 'Base URL is required', 400);
@@ -93,9 +94,9 @@ export const buildUtmTrackedUrl = async (req, res) => {
       // Update existing record
       await pool.execute(
         `UPDATE short_urls SET 
-          utm_source = ?, utm_medium = ?, utm_campaign = ?, utm_term = ?, utm_content = ?, updated_at = NOW()
+          utm_source = ?, utm_medium = ?, utm_campaign = ?, utm_term = ?, utm_content = ?, form_id = ?, updated_at = NOW()
          WHERE id = ?`,
-        [utmSource || null, utmMedium || null, utmCampaign || null, utmTerm || null, utmContent || null, existing[0].id]
+        [utmSource || null, utmMedium || null, utmCampaign || null, utmTerm || null, utmContent || null, (formId && formId.trim() !== '') ? formId.trim() : null, existing[0].id]
       );
       urlRecord = existing[0];
     } else {
@@ -103,9 +104,9 @@ export const buildUtmTrackedUrl = async (req, res) => {
       const urlId = uuidv4();
       await pool.execute(
         `INSERT INTO short_urls (
-          id, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          id, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content, form_id,
           click_count, created_by, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           urlId,
           utmUrl,
@@ -114,6 +115,7 @@ export const buildUtmTrackedUrl = async (req, res) => {
           utmCampaign || null,
           utmTerm || null,
           utmContent || null,
+          (formId && formId.trim() !== '') ? formId.trim() : null,
           0,
           userId,
           true,
@@ -156,6 +158,7 @@ export const shortenUtmUrl = async (req, res) => {
       utmCampaign,
       utmTerm,
       utmContent,
+      formId,
       shortCode,
       useMeaningfulCode,
       expiresAt,
@@ -218,12 +221,12 @@ export const shortenUtmUrl = async (req, res) => {
       }
 
       // Update existing record
-      const updateFields = ['short_code = ?', 'updated_at = NOW()'];
-      const updateValues = [finalCode];
+      const updateFields = ['short_code = ?', 'form_id = ?', 'updated_at = NOW()'];
+      const updateValues = [finalCode, (formId && formId.trim() !== '') ? formId.trim() : null];
       
       if (expiresAt) {
-        updateFields.splice(1, 0, 'expires_at = ?');
-        updateValues.push(new Date(expiresAt).toISOString().slice(0, 19).replace('T', ' '));
+        updateFields.splice(2, 0, 'expires_at = ?');
+        updateValues.splice(2, 0, new Date(expiresAt).toISOString().slice(0, 19).replace('T', ' '));
       }
       
       updateValues.push(existingUrls[0].id);
@@ -271,9 +274,9 @@ export const shortenUtmUrl = async (req, res) => {
       const urlId = uuidv4();
       await pool.execute(
         `INSERT INTO short_urls (
-          id, short_code, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+          id, short_code, original_url, utm_source, utm_medium, utm_campaign, utm_term, utm_content, form_id,
           click_count, created_by, is_active, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           urlId,
           finalCode,
@@ -283,6 +286,7 @@ export const shortenUtmUrl = async (req, res) => {
           utmCampaign || null,
           utmTerm || null,
           utmContent || null,
+          (formId && formId.trim() !== '') ? formId.trim() : null,
           0,
           userId,
           true,
@@ -458,7 +462,7 @@ export const trackLongUrlClick = async (req, res) => {
 
     if (urlRecords.length === 0) {
       // URL not found in database, return success anyway (not critical)
-      return successResponse(res, { tracked: false }, 'Click tracking attempted', 200);
+      return successResponse(res, { tracked: false, formId: null }, 'Click tracking attempted', 200);
     }
 
     const urlRecord = urlRecords[0];
@@ -490,11 +494,22 @@ export const trackLongUrlClick = async (req, res) => {
       ]
     );
 
-    return successResponse(res, { tracked: true }, 'Click tracked successfully', 200);
+    // Return form_id if available
+    const formIdValue = urlRecord.form_id || null;
+    
+    return successResponse(
+      res,
+      {
+        tracked: true,
+        formId: formIdValue,
+      },
+      'Click tracked successfully',
+      200
+    );
   } catch (error) {
     console.error('Error tracking long URL click:', error);
     // Don't fail the request if tracking fails
-    return successResponse(res, { tracked: false }, 'Click tracking attempted', 200);
+    return successResponse(res, { tracked: false, formId: null }, 'Click tracking attempted', 200);
   }
 };
 
@@ -562,7 +577,12 @@ export const redirectShortUrl = async (req, res) => {
     const redirectUrl = new URL(shortUrl.original_url);
     redirectUrl.searchParams.set('redirect', 'true');
     
-    // Redirect to original URL with redirect=true parameter
+    // Add form_id to URL if available
+    if (shortUrl.form_id) {
+      redirectUrl.searchParams.set('form_id', shortUrl.form_id);
+    }
+    
+    // Redirect to original URL with redirect=true and form_id parameters
     return res.redirect(302, redirectUrl.toString());
   } catch (error) {
     console.error('Error redirecting short URL:', error);

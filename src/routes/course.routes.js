@@ -1,41 +1,31 @@
 import express from 'express';
 import {
-  createBranch,
-  createCourse,
-  deleteBranch,
-  deleteCourse,
   getCourse,
   listBranches,
   listCourses,
-  updateBranch,
-  updateCourse,
 } from '../controllers/course.controller.js';
-import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
+import { protect } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
-router.use(protect, isSuperAdmin);
+// All routes require authentication
+router.use(protect);
 
+// Read-only routes (courses and branches are fetched from secondary database)
 router.route('/')
-  .get(listCourses)
-  .post(createCourse);
+  .get(listCourses);
 
 router.route('/branches')
   .get(listBranches);
 
 router.route('/:courseId')
-  .get(getCourse)
-  .put(updateCourse)
-  .delete(deleteCourse);
+  .get(getCourse);
 
 router.route('/:courseId/branches')
-  .get(listBranches)
-  .post(createBranch);
+  .get(listBranches);
 
-router.route('/:courseId/branches/:branchId')
-  .put(updateBranch)
-  .delete(deleteBranch);
-
+// Note: Create, Update, and Delete operations are disabled
+// Courses and branches are managed in the external secondary database system
 export default router;
 
 

@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 // import connectDB from './config/database.js'; // COMMENTED OUT: Migration to SQL complete
 import connectSQLDB from './config-sql/database.js';
+import connectSecondaryDB from './config-sql/database-secondary.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import leadRoutes from './routes/lead.routes.js';
@@ -16,6 +17,7 @@ import notificationRoutes from './routes/notification.routes.js';
 import reportRoutes from './routes/report.routes.js';
 import utmRoutes from './routes/utm.routes.js';
 import managerRoutes from './routes/manager.routes.js';
+import formBuilderRoutes from './routes/formBuilder.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -24,7 +26,7 @@ dotenv.config();
 // MongoDB connection (existing) - COMMENTED OUT: Migration to SQL complete
 // connectDB();
 
-// MySQL connection (Amazon RDS)
+// MySQL connection (Amazon RDS) - Primary database
 if (process.env.DB_HOST && process.env.DB_NAME) {
   console.log('Attempting to connect to MySQL (Amazon RDS)...');
   connectSQLDB().catch((error) => {
@@ -34,6 +36,18 @@ if (process.env.DB_HOST && process.env.DB_NAME) {
   });
 } else {
   console.log('⚠️  MySQL configuration not found - skipping MySQL connection');
+}
+
+// Secondary MySQL connection (Courses & Branches database)
+if (process.env.DB_SECONDARY_HOST && process.env.DB_SECONDARY_NAME) {
+  console.log('Attempting to connect to Secondary MySQL (Courses & Branches)...');
+  connectSecondaryDB().catch((error) => {
+    console.error('⚠️  Secondary MySQL connection failed:', error.message);
+    console.log('⚠️  Server will start but course/branch operations will fail without secondary MySQL connection.');
+    // Don't exit - allow server to start for debugging, but course/branch operations will fail
+  });
+} else {
+  console.log('⚠️  Secondary MySQL configuration not found - skipping secondary MySQL connection');
 }
 
 const app = express();
@@ -73,6 +87,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/utm', utmRoutes);
 app.use('/api/manager', managerRoutes);
+app.use('/api/form-builder', formBuilderRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

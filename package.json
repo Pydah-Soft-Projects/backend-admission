@@ -8,7 +8,9 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seedSuperAdmin.js",
     "seed:sql": "node src/scripts-sql/seedSuperAdmin.js",
+    "seed:student-form": "node src/scripts-sql/seedDefaultStudentForm.js",
     "schema:create": "node src/scripts-sql/createSchema.js",
+    "migrate:add-form-id": "node src/scripts-sql/addFormIdToShortUrls.js",
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
