@@ -221,15 +221,81 @@ export const createForm = async (req, res) => {
       ]
     );
 
-    // Fetch the created form
+    // Automatically create mandatory fields: Student Name and Primary Phone Number
+    const mandatoryFields = [
+      {
+        fieldName: 'name',
+        fieldType: 'text',
+        fieldLabel: 'Student Name',
+        placeholder: 'Enter student name',
+        isRequired: true,
+        displayOrder: 0,
+        helpText: 'Full name of the student',
+      },
+      {
+        fieldName: 'phone',
+        fieldType: 'tel',
+        fieldLabel: 'Primary Phone Number',
+        placeholder: 'Enter phone number',
+        isRequired: true,
+        displayOrder: 1,
+        helpText: 'Primary contact phone number',
+      },
+    ];
+
+    // Insert mandatory fields
+    for (const field of mandatoryFields) {
+      const fieldId = uuidv4();
+      await pool.execute(
+        `INSERT INTO form_builder_fields (
+          id, form_id, field_name, field_type, field_label, placeholder, is_required,
+          validation_rules, display_order, options, default_value, help_text, is_active,
+          created_by, updated_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          fieldId,
+          formId,
+          field.fieldName,
+          field.fieldType,
+          field.fieldLabel,
+          field.placeholder || null,
+          field.isRequired,
+          JSON.stringify({}),
+          field.displayOrder,
+          JSON.stringify([]),
+          field.defaultValue || null,
+          field.helpText || null,
+          true,
+          userId || null,
+          userId || null,
+        ]
+      );
+    }
+
+    // Fetch the created form with fields
     const [forms] = await pool.execute(
       'SELECT * FROM form_builder_forms WHERE id = ?',
       [formId]
     );
 
-    const form = formatForm(forms[0]);
+    // Fetch the created fields
+    const [fields] = await pool.execute(
+      'SELECT * FROM form_builder_fields WHERE form_id = ? ORDER BY display_order ASC',
+      [formId]
+    );
 
-    return successResponse(res, form, 'Form created successfully', 201);
+    const form = formatForm(forms[0]);
+    const formattedFields = fields.map(formatField);
+
+    return successResponse(
+      res,
+      {
+        ...form,
+        fields: formattedFields,
+      },
+      'Form created successfully with mandatory fields (Student Name and Primary Phone Number)',
+      201
+    );
   } catch (error) {
     console.error('Create form error:', error);
     if (error.code === 'ER_DUP_ENTRY') {
