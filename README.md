@@ -118,3 +118,7 @@ backend/
 - Error handling
 - Protected routes
 
+## CI/CD
+
+A GitHub Actions workflow runs on pushes to `main`/`master`: **build & smoke test**, then **deploy via SSH** (optional). See **[CI_CD_DEPLOYMENT.md](./CI_CD_DEPLOYMENT.md)** for setup, required secrets, and troubleshooting.
+
