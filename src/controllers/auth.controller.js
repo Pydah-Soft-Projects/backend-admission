@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { generateToken } from '../utils/generateToken.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
+import axios from 'axios';
 
 // @desc    Login user
 // @route   POST /api/auth/login
@@ -193,6 +194,126 @@ export const logout = async (req, res) => {
     return successResponse(res, null, 'Logged out successfully', 200);
   } catch (error) {
     return errorResponse(res, error.message || 'Logout failed', 500);
+  }
+};
+
+// @desc    Create SSO session from CRM token
+// @route   POST /api/auth/sso-session
+// @access  Public (but requires valid SSO token verification)
+export const createSSOSession = async (req, res) => {
+  try {
+    const { userId, role, portalId, ssoToken } = req.body;
+
+    console.log('SSO session creation request for userId:', userId);
+
+    // Validate input
+    if (!userId || !ssoToken) {
+      return errorResponse(res, 'User ID and SSO token are required', 400);
+    }
+
+    // Optional: Verify the SSO token again with CRM backend for extra security
+    const CRM_BACKEND_URL = process.env.CRM_BACKEND_URL || 'http://localhost:3000';
+    
+    try {
+      const verifyResponse = await axios.post(`${CRM_BACKEND_URL}/auth/verify-token`, {
+        encryptedToken: ssoToken,
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const verifyResult = verifyResponse.data;
+
+      if (!verifyResult.success || !verifyResult.valid) {
+        console.log('SSO token verification failed:', verifyResult.message);
+        return errorResponse(res, 'Invalid SSO token', 401);
+      }
+
+      // Verify the userId matches
+      if (verifyResult.data.userId !== userId) {
+        console.log('User ID mismatch in SSO token');
+        return errorResponse(res, 'Token user ID mismatch', 401);
+      }
+    } catch (verifyError) {
+      console.error('Error verifying SSO token with CRM backend:', verifyError.message);
+      // Continue anyway if CRM backend is not available (for development)
+      // In production, you might want to fail here
+      if (process.env.NODE_ENV === 'production') {
+        return errorResponse(res, 'SSO token verification failed', 500);
+      }
+    }
+
+    // Get database pool
+    let pool;
+    try {
+      pool = getPool();
+    } catch (error) {
+      console.error('Database connection error:', error);
+      return errorResponse(res, 'Database connection failed', 500);
+    }
+
+    // Find user in admissions database
+    const [users] = await pool.execute(
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
+      [userId]
+    );
+
+    if (users.length === 0) {
+      console.log('User not found in admissions database:', userId);
+      return errorResponse(res, 'User not found in admissions database', 404);
+    }
+
+    const userData = users[0];
+
+    // Format user object to match expected structure (camelCase)
+    let permissions = {};
+    try {
+      if (userData.permissions) {
+        if (typeof userData.permissions === 'string') {
+          permissions = JSON.parse(userData.permissions);
+        } else if (typeof userData.permissions === 'object') {
+          permissions = userData.permissions;
+        }
+      }
+    } catch (parseError) {
+      console.error('Error parsing permissions JSON:', parseError);
+      permissions = {};
+    }
+
+    const user = {
+      id: userData.id,
+      _id: userData.id, // Keep _id for backward compatibility
+      name: userData.name,
+      email: userData.email,
+      roleName: userData.role_name,
+      managedBy: userData.managed_by,
+      isManager: userData.is_manager === 1 || userData.is_manager === true,
+      designation: userData.designation,
+      permissions,
+      isActive: userData.is_active === 1 || userData.is_active === true,
+      createdAt: userData.created_at,
+      updatedAt: userData.updated_at,
+    };
+
+    // Generate local session token
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET is not set in environment variables');
+      return errorResponse(res, 'Server configuration error', 500);
+    }
+
+    const token = generateToken(user.id);
+
+    console.log('SSO session created successfully for user:', user.email);
+
+    return successResponse(res, {
+      token,
+      user,
+    }, 'SSO session created successfully', 200);
+  } catch (error) {
+    console.error('SSO session creation error:', error);
+    console.error('Error stack:', error.stack);
+    return errorResponse(res, error.message || 'Failed to create SSO session', 500);
   }
 };
 

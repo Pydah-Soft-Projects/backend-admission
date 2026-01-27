@@ -16,7 +16,11 @@ MONGODB_URI=mongodb://localhost:27017/lead-tracker
 JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
 JWT_EXPIRE=7d
 CORS_ORIGIN=http://localhost:3000
+CRM_BACKEND_URL=http://localhost:3000
 ```
+
+**SSO Configuration:**
+- `CRM_BACKEND_URL`: URL of the CRM backend for SSO token verification (default: http://localhost:3000)
 
 ### 3. Start MongoDB
 Make sure MongoDB is running on your system. If using MongoDB Atlas, update the `MONGODB_URI` in `.env`.
@@ -52,6 +56,7 @@ Server will run on `http://localhost:5000`
 - `POST /api/auth/login` - Login user
 - `GET /api/auth/me` - Get current user (Protected)
 - `POST /api/auth/logout` - Logout user (Protected)
+- `POST /api/auth/sso-session` - Create SSO session from CRM token (Public)
 
 ### Users (Super Admin Only)
 - `GET /api/users` - Get all users

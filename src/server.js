@@ -54,9 +54,23 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
+// CORS configuration - allow multiple known frontends (including local dev on 3000/3001)
+const allowedOrigins = [
+  process.env.CORS_ORIGIN,
+  'https://frontend-admission.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+].filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN  || "https://frontend-admission.vercel.app" || 'http://localhost:3000',
-  credentials: true
+  origin: (origin, callback) => {
+    // Allow non-browser tools (no origin) or any origin explicitly whitelisted above
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  credentials: true,
 }));
 // Increase JSON payload limit for bulk uploads (50MB)
 app.use(express.json({ limit: '100mb' }));
