@@ -491,9 +491,78 @@ export const createLead = async (req, res) => {
       source,
     } = req.body;
 
-    // Validate required fields
-    if (!name || !phone || !fatherName || !fatherPhone || !village || !district || !mandal) {
-      return errorResponse(res, 'Please provide all required fields', 400);
+    // Helper function to extract a value from direct fields or dynamicFields
+    const getFieldValue = (directValue, fieldVariations, dynamicFieldsObj) => {
+      if (directValue && String(directValue).trim()) {
+        return String(directValue).trim();
+      }
+
+      if (dynamicFieldsObj && typeof dynamicFieldsObj === 'object') {
+        for (const variation of fieldVariations) {
+          const key = Object.keys(dynamicFieldsObj).find(
+            (k) => k.toLowerCase() === variation.toLowerCase()
+          );
+          if (key && dynamicFieldsObj[key] && String(dynamicFieldsObj[key]).trim()) {
+            return String(dynamicFieldsObj[key]).trim();
+          }
+        }
+      }
+
+      return null;
+    };
+
+    // Resolve key fields from either direct body values or dynamicFields
+    const finalName = getFieldValue(
+      name,
+      ['name', 'fullname', 'full_name', 'studentname', 'student_name'],
+      dynamicFields
+    );
+    const finalPhone = getFieldValue(
+      phone,
+      [
+        'phone',
+        'phonenumber',
+        'phone_number',
+        'mobile',
+        'mobilenumber',
+        'mobile_number',
+        'contactnumber',
+        'contact_number',
+        'primaryphone',
+        'primary_phone',
+      ],
+      dynamicFields
+    );
+
+    const finalFatherName =
+      getFieldValue(
+        fatherName,
+        ['fathername', 'father_name', 'fathersname', 'fathers_name'],
+        dynamicFields
+      ) || 'Not Provided';
+    const finalFatherPhone =
+      getFieldValue(
+        fatherPhone,
+        [
+          'fatherphone',
+          'father_phone',
+          'fathersphone',
+          'fathers_phone',
+          'fatherphonenumber',
+          'father_phone_number',
+        ],
+        dynamicFields
+      ) || 'Not Provided';
+    const finalVillage =
+      getFieldValue(village, ['village', 'city', 'town'], dynamicFields) || 'Not Provided';
+    const finalDistrict =
+      getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
+    const finalMandal =
+      getFieldValue(mandal, ['mandal', 'tehsil'], dynamicFields) || 'Not Provided';
+
+    // For internal lead creation, only name and phone are truly required.
+    if (!finalName || !finalPhone) {
+      return errorResponse(res, 'Please provide name and phone', 400);
     }
 
     // Generate enquiry number
@@ -514,17 +583,17 @@ export const createLead = async (req, res) => {
       [
         leadId,
         enquiryNumber,
-        name.trim(),
-        phone.trim(),
+        finalName,
+        finalPhone,
         email || null,
-        fatherName.trim(),
+        finalFatherName,
         motherName ? String(motherName).trim() : '',
-        fatherPhone.trim(),
+        finalFatherPhone,
         hallTicketNumber ? String(hallTicketNumber).trim() : '',
-        village.trim(),
+        finalVillage,
         courseInterested || null,
-        district.trim(),
-        mandal.trim(),
+        finalDistrict,
+        finalMandal,
         state?.trim() || 'Andhra Pradesh',
         gender ? String(gender).trim() : 'Not Specified',
         rank !== undefined && rank !== null && !Number.isNaN(Number(rank)) ? Number(rank) : null,
