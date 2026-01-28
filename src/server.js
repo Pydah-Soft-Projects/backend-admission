@@ -58,6 +58,7 @@ const PORT = process.env.PORT || 5000;
 const allowedOrigins = [
   process.env.CORS_ORIGIN,
   'https://frontend-admission.vercel.app',
+  'https://pydah-admissions.vercel.app',
   'http://localhost:3000',
   'http://localhost:3001',
 ].filter(Boolean);
