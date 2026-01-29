@@ -139,28 +139,41 @@ const defaultStudentFormFields = [
     },
   },
   {
-    fieldName: 'address_mandal',
-    fieldType: 'text',
-    fieldLabel: 'Mandal',
-    placeholder: 'Enter mandal name',
+    fieldName: 'state',
+    fieldType: 'dropdown',
+    fieldLabel: 'State',
+    placeholder: 'Select state',
     isRequired: true,
     displayOrder: 12,
-    validationRules: {
-      minLength: 2,
-      maxLength: 255,
-    },
+    options: [],
+    validationRules: {},
+    helpText: 'Select state first; then district and mandal will be available.',
   },
   {
     fieldName: 'address_district',
     fieldType: 'text',
     fieldLabel: 'District',
-    placeholder: 'Enter district name',
+    placeholder: 'Select district',
     isRequired: true,
     displayOrder: 13,
     validationRules: {
       minLength: 2,
       maxLength: 255,
     },
+    helpText: 'Select state first to see districts.',
+  },
+  {
+    fieldName: 'address_mandal',
+    fieldType: 'text',
+    fieldLabel: 'Mandal',
+    placeholder: 'Select mandal',
+    isRequired: true,
+    displayOrder: 14,
+    validationRules: {
+      minLength: 2,
+      maxLength: 255,
+    },
+    helpText: 'Select state and district first to see mandals.',
   },
   {
     fieldName: 'address_pin_code',
@@ -168,7 +181,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'PIN Code',
     placeholder: 'Enter 6-digit PIN code',
     isRequired: true,
-    displayOrder: 14,
+    displayOrder: 15,
     validationRules: {
       pattern: '^[0-9]{6}$',
       minLength: 6,
@@ -181,7 +194,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Course Interested',
     placeholder: 'Enter course name',
     isRequired: false,
-    displayOrder: 15,
+    displayOrder: 16,
     validationRules: {
       maxLength: 255,
     },
@@ -192,13 +205,52 @@ const defaultStudentFormFields = [
     fieldLabel: 'Quota',
     placeholder: 'Select quota',
     isRequired: false,
-    displayOrder: 16,
+    displayOrder: 17,
     options: [
       { value: 'Management', label: 'Management' },
       { value: 'Convenor', label: 'Convenor' },
       { value: 'Not Applicable', label: 'Not Applicable' },
     ],
     validationRules: {},
+  },
+  {
+    fieldName: 'data_collection_type',
+    fieldType: 'dropdown',
+    fieldLabel: 'Data Collection Type',
+    placeholder: 'Select data collection type',
+    isRequired: true,
+    displayOrder: 18,
+    options: [
+      { value: 'Direct', label: 'Direct' },
+      { value: 'Exam Center', label: 'Exam Center' },
+      { value: 'College Visit', label: 'College Visit' },
+    ],
+    validationRules: {},
+  },
+  {
+    fieldName: 'staff_name',
+    fieldType: 'text',
+    fieldLabel: 'Staff Name',
+    placeholder: 'Enter staff name',
+    isRequired: false,
+    displayOrder: 19,
+    validationRules: {
+      minLength: 2,
+      maxLength: 255,
+    },
+    helpText: 'Required when Data Collection Type is Direct or Exam Center',
+  },
+  {
+    fieldName: 'school_or_college_name',
+    fieldType: 'text',
+    fieldLabel: 'School or College Name',
+    placeholder: 'Enter school or college name',
+    isRequired: false,
+    displayOrder: 20,
+    validationRules: {
+      minLength: 2,
+      maxLength: 255,
+    },
   },
 ];
 
@@ -245,9 +297,9 @@ const seedDefaultStudentForm = async () => {
       await pool.execute(
         `INSERT INTO form_builder_fields (
           id, form_id, field_name, field_type, field_label, placeholder,
-          is_required, validation_rules, display_order, options, is_active,
+          is_required, validation_rules, display_order, options, help_text, is_active,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           fieldId,
           formId,
@@ -259,6 +311,7 @@ const seedDefaultStudentForm = async () => {
           JSON.stringify(field.validationRules || {}),
           field.displayOrder,
           JSON.stringify(field.options || []),
+          field.helpText || null,
           true,
         ]
       );
