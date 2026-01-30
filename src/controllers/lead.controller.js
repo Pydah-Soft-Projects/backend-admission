@@ -370,7 +370,7 @@ export const createPublicLead = async (req, res) => {
     const finalPhone = getFieldValue(phone, ['phone', 'phonenumber', 'phone_number', 'student_phone', 'studentphone', 'mobile', 'mobilenumber', 'mobile_number', 'contactnumber', 'contact_number', 'primaryphone', 'primary_phone'], dynamicFields);
     const finalFatherName = getFieldValue(fatherName, ['fathername', 'father_name', 'fathersname', 'fathers_name'], dynamicFields) || 'Not Provided';
     const finalFatherPhone = getFieldValue(fatherPhone, ['fatherphone', 'father_phone', 'fathersphone', 'fathers_phone', 'fatherphonenumber', 'father_phone_number'], dynamicFields) || 'Not Provided';
-    const finalVillage = getFieldValue(village, ['village', 'city', 'town'], dynamicFields) || 'Not Provided';
+    const finalVillage = getFieldValue(village, ['village', 'city', 'town', 'address_village_city', 'address_village'], dynamicFields) || 'Not Provided';
     const finalDistrict = getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
     const finalMandal = getFieldValue(mandal, ['mandal', 'tehsil'], dynamicFields) || 'Not Provided';
 
@@ -556,7 +556,7 @@ export const createLead = async (req, res) => {
         dynamicFields
       ) || 'Not Provided';
     const finalVillage =
-      getFieldValue(village, ['village', 'city', 'town'], dynamicFields) || 'Not Provided';
+      getFieldValue(village, ['village', 'city', 'town', 'address_village_city', 'address_village'], dynamicFields) || 'Not Provided';
     const finalDistrict =
       getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
     const finalMandal =
