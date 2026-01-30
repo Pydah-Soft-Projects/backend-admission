@@ -367,7 +367,7 @@ export const createPublicLead = async (req, res) => {
 
     // Extract required fields from direct values or dynamicFields
     const finalName = getFieldValue(name, ['name', 'fullname', 'full_name', 'studentname', 'student_name'], dynamicFields);
-    const finalPhone = getFieldValue(phone, ['phone', 'phonenumber', 'phone_number', 'mobile', 'mobilenumber', 'mobile_number', 'contactnumber', 'contact_number', 'primaryphone', 'primary_phone'], dynamicFields);
+    const finalPhone = getFieldValue(phone, ['phone', 'phonenumber', 'phone_number', 'student_phone', 'studentphone', 'mobile', 'mobilenumber', 'mobile_number', 'contactnumber', 'contact_number', 'primaryphone', 'primary_phone'], dynamicFields);
     const finalFatherName = getFieldValue(fatherName, ['fathername', 'father_name', 'fathersname', 'fathers_name'], dynamicFields) || 'Not Provided';
     const finalFatherPhone = getFieldValue(fatherPhone, ['fatherphone', 'father_phone', 'fathersphone', 'fathers_phone', 'fatherphonenumber', 'father_phone_number'], dynamicFields) || 'Not Provided';
     const finalVillage = getFieldValue(village, ['village', 'city', 'town'], dynamicFields) || 'Not Provided';
@@ -523,6 +523,8 @@ export const createLead = async (req, res) => {
         'phone',
         'phonenumber',
         'phone_number',
+        'student_phone',
+        'studentphone',
         'mobile',
         'mobilenumber',
         'mobile_number',
