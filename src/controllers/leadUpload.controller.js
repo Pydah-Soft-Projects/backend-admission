@@ -55,19 +55,25 @@ const normalizeKey = (value) => {
     const canonicalFieldSet = new Set(canonicalFields);
 
 const aliasPairs = [
+  // name
   ['candidate name', 'name'],
   ['candidate', 'name'],
-      ['student', 'name'],
+  ['student', 'name'],
   ['student name', 'name'],
   ['studentname', 'name'],
   ['student full name', 'name'],
   ['name of the student', 'name'],
+  ['full name', 'name'],
+  ['applicant name', 'name'],
   ['name', 'name'],
+  // phone
   ['contact', 'phone'],
   ['contact number', 'phone'],
   ['contact no', 'phone'],
   ['contact no 1', 'phone'],
   ['contact number 1', 'phone'],
+  ['phone number 1', 'phone'],
+  ['phone number1', 'phone'],
   ['mobile', 'phone'],
   ['mobile number', 'phone'],
   ['phone number', 'phone'],
@@ -89,17 +95,23 @@ const aliasPairs = [
   ['father', 'fatherName'],
   ['father name', 'fatherName'],
   ['fathers name', 'fatherName'],
+  ['father s name', 'fatherName'],
+  ['father  name', 'fatherName'],
   ['fathername', 'fatherName'],
   ['fname', 'fatherName'],
   ['guardian name', 'fatherName'],
   ['mother', 'motherName'],
   ['mother name', 'motherName'],
+  ['mothers name', 'motherName'],
+  ['mother s name', 'motherName'],
   ['mothername', 'motherName'],
   ['mname', 'motherName'],
       ['contact2', 'fatherPhone'],
       ['contact 2', 'fatherPhone'],
   ['contact no 2', 'fatherPhone'],
   ['contact number 2', 'fatherPhone'],
+  ['phone number 2', 'fatherPhone'],
+  ['phone number2', 'fatherPhone'],
   ['contact no2', 'fatherPhone'],
   ['contact number2', 'fatherPhone'],
   ['phone2', 'fatherPhone'],
@@ -143,25 +155,38 @@ const aliasPairs = [
       ['inter college', 'interCollege'],
   ['college studied', 'interCollege'],
   ['college name', 'interCollege'],
+  ['school name', 'interCollege'],
   ['preference', 'courseInterested'],
   ['village/town', 'village'],
+  ['village town', 'village'],
   ['village name', 'village'],
   ['city', 'village'],
   ['mandal/town', 'mandal'],
+  ['mandal town', 'mandal'],
   ['mandal name', 'mandal'],
+  ['taluk', 'mandal'],
+  ['mandal taluk', 'mandal'],
   ['district name', 'district'],
   ['district', 'district'],
   ['state name', 'state'],
+  ['state', 'state'],
   ['gender', 'gender'],
   ['sex', 'gender'],
   ['quota', 'quota'],
   ['category', 'quota'],
   ['notes', 'notes'],
   ['remarks', 'notes'],
+  ['remarks telecalling', 'notes'],
+  ['remarks if any doorstep', 'notes'],
   ['comments', 'notes'],
   ['comment', 'notes'],
   ['source', 'source'],
-  
+  // email (add after phone/contact aliases - email often in spreadsheets)
+  ['email', 'email'],
+  ['email id', 'email'],
+  ['email address', 'email'],
+  ['e mail', 'email'],
+  ['mail', 'email'],
 ];
 
 const aliasMap = new Map();
@@ -728,23 +753,33 @@ const processImportJob = async (jobId) => {
         }
       });
 
-      const requiredFields = ['name', 'phone', 'fatherName', 'fatherPhone', 'mandal', 'village', 'district'];
-      const missing = requiredFields.filter((field) => !toTrimmedString(normalizedLead[field]));
-      if (missing.length > 0) {
-        throw new Error(`Missing required core fields: ${missing.join(', ')}`);
+      // Require only: student name + at least one phone (phone or fatherPhone)
+      const nameVal = toTrimmedString(normalizedLead.name);
+      const phoneVal = toTrimmedString(normalizedLead.phone);
+      const fatherPhoneVal = toTrimmedString(normalizedLead.fatherPhone);
+      const hasAnyPhone = phoneVal || fatherPhoneVal;
+      if (!nameVal) {
+        throw new Error('__SKIP_ROW__');
+      }
+      if (!hasAnyPhone) {
+        throw new Error('Missing required: student name and at least one phone number (Phone 1 or Phone 2)');
       }
 
       const now = new Date();
       const enquiryNumber = getNextEnquiryNumber();
 
+      // Use whichever phone(s) we have; DB requires both phone and father_phone so fill from the other if missing
+      const primaryPhone = phoneVal || fatherPhoneVal;
+      const secondaryPhone = fatherPhoneVal || phoneVal || '';
+
       const leadDocument = {
             enquiryNumber,
         hallTicketNumber: toTrimmedString(normalizedLead.hallTicketNumber) || '',
-            name: String(normalizedLead.name).trim(),
-            phone: String(normalizedLead.phone).trim(),
+            name: String(nameVal).trim(),
+            phone: String(primaryPhone).trim(),
         email: toTrimmedString(normalizedLead.email)?.toLowerCase(),
-            fatherName: String(normalizedLead.fatherName).trim(),
-            fatherPhone: String(normalizedLead.fatherPhone).trim(),
+            fatherName: toTrimmedString(normalizedLead.fatherName) || '',
+            fatherPhone: String(secondaryPhone).trim(),
         motherName: toTrimmedString(normalizedLead.motherName),
         courseInterested: toTrimmedString(normalizedLead.courseInterested),
         village: toTrimmedString(normalizedLead.village) || 'Unknown',
@@ -787,10 +822,20 @@ const processImportJob = async (jobId) => {
       let failedInBatch = 0;
 
       try {
-        // Bulk insert leads using prepared statements
+        // Bulk insert leads using prepared statements (check duplicate by phone before insert)
         const insertPromises = documents.map(async (doc) => {
           const leadId = uuidv4();
           try {
+            const phoneTrimmed = doc.phone ? String(doc.phone).trim() : '';
+            if (phoneTrimmed) {
+              const [existing] = await pool.execute(
+                'SELECT id FROM leads WHERE phone = ? LIMIT 1',
+                [phoneTrimmed]
+              );
+              if (existing && existing.length > 0) {
+                return { success: false, error: new Error('Duplicate phone number') };
+              }
+            }
             await pool.execute(
               `INSERT INTO leads (
                 id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
@@ -908,6 +953,10 @@ const processImportJob = async (jobId) => {
           }
         }
       } catch (error) {
+        if (error.message === '__SKIP_ROW__') {
+          stats.totalProcessed -= 1;
+          return;
+        }
         stats.totalErrors += 1;
         pushErrorDetail(meta, rawLead, error.message || 'Validation failed');
         // Don't await updateJobProgress to avoid blocking
