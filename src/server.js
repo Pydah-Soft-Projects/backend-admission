@@ -18,6 +18,7 @@ import reportRoutes from './routes/report.routes.js';
 import utmRoutes from './routes/utm.routes.js';
 import managerRoutes from './routes/manager.routes.js';
 import formBuilderRoutes from './routes/formBuilder.routes.js';
+import masterDataRoutes from './routes/masterData.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -103,6 +104,7 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/utm', utmRoutes);
 app.use('/api/manager', managerRoutes);
 app.use('/api/form-builder', formBuilderRoutes);
+app.use('/api/master-data', masterDataRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

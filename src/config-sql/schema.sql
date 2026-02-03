@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS leads (
     application_status VARCHAR(100) DEFAULT 'Not Provided',
     dynamic_fields JSON DEFAULT (JSON_OBJECT()),
     lead_status VARCHAR(50) DEFAULT 'New',
+    academic_year SMALLINT UNSIGNED NULL,
+    student_group VARCHAR(50) NULL,
     admission_number VARCHAR(100) UNIQUE,
     assigned_to CHAR(36) NULL,
     assigned_at DATETIME,
@@ -94,6 +96,8 @@ CREATE TABLE IF NOT EXISTS leads (
     INDEX idx_leads_state (state),
     INDEX idx_leads_quota (quota),
     INDEX idx_leads_lead_status (lead_status),
+    INDEX idx_leads_academic_year (academic_year),
+    INDEX idx_leads_student_group (student_group),
     INDEX idx_leads_assigned_to (assigned_to),
     INDEX idx_leads_assigned_at (assigned_at),
     INDEX idx_leads_upload_batch_id (upload_batch_id),
@@ -165,6 +169,82 @@ CREATE TABLE IF NOT EXISTS branches (
     UNIQUE KEY uk_branches_course_code (course_id, code),
     INDEX idx_branches_course_id (course_id),
     INDEX idx_branches_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 5a. STATES TABLE (hierarchy: state -> district -> mandal)
+-- ============================================
+CREATE TABLE IF NOT EXISTS states (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL UNIQUE,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    display_order INT UNSIGNED DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_states_name (name),
+    INDEX idx_states_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 5b. DISTRICTS TABLE (belongs to state)
+-- ============================================
+CREATE TABLE IF NOT EXISTS districts (
+    id CHAR(36) PRIMARY KEY,
+    state_id CHAR(36) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    display_order INT UNSIGNED DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (state_id) REFERENCES states(id) ON DELETE CASCADE,
+    UNIQUE KEY uk_districts_state_name (state_id, name),
+    INDEX idx_districts_state_id (state_id),
+    INDEX idx_districts_name (name),
+    INDEX idx_districts_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 5c. MANDALS TABLE (belongs to district)
+-- ============================================
+CREATE TABLE IF NOT EXISTS mandals (
+    id CHAR(36) PRIMARY KEY,
+    district_id CHAR(36) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    display_order INT UNSIGNED DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (district_id) REFERENCES districts(id) ON DELETE CASCADE,
+    UNIQUE KEY uk_mandals_district_name (district_id, name),
+    INDEX idx_mandals_district_id (district_id),
+    INDEX idx_mandals_name (name),
+    INDEX idx_mandals_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 5d. SCHOOLS TABLE (names only)
+-- ============================================
+CREATE TABLE IF NOT EXISTS schools (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_schools_name (name),
+    INDEX idx_schools_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 5e. COLLEGES TABLE (names only)
+-- ============================================
+CREATE TABLE IF NOT EXISTS colleges (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_colleges_name (name),
+    INDEX idx_colleges_is_active (is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

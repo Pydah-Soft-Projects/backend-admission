@@ -411,33 +411,52 @@ export const getOverviewAnalytics = async (req, res) => {
     const startDateStr = startDate.toISOString().slice(0, 19).replace('T', ' ');
     const endDateStr = endDate.toISOString().slice(0, 19).replace('T', ' ');
 
+    const leadFilters = [];
+    const leadParams = [];
+    if (req.query.academicYear != null && req.query.academicYear !== '') {
+      leadFilters.push('academic_year = ?');
+      leadParams.push(Number(req.query.academicYear));
+    }
+    if (req.query.studentGroup) {
+      leadFilters.push('student_group = ?');
+      leadParams.push(req.query.studentGroup);
+    }
+    const leadWhere = leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')}` : '';
+    const leadWhereAnd = (suffix) =>
+      leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')} AND ${suffix}` : `WHERE ${suffix}`;
+
     // Get basic counts
-    const [totalLeadsResult] = await pool.execute('SELECT COUNT(*) as total FROM leads');
+    const [totalLeadsResult] = await pool.execute(`SELECT COUNT(*) as total FROM leads ${leadWhere}`, leadParams);
     const totalLeads = totalLeadsResult[0].total;
 
     const [confirmedLeadsResult] = await pool.execute(
-      "SELECT COUNT(*) as total FROM leads WHERE lead_status = 'Confirmed'"
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd("lead_status = 'Confirmed'")}`,
+      leadParams
     );
     const confirmedLeads = confirmedLeadsResult[0].total;
 
     const [admittedLeadsResult] = await pool.execute(
-      "SELECT COUNT(*) as total FROM leads WHERE lead_status = 'Admitted'"
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd("lead_status = 'Admitted'")}`,
+      leadParams
     );
     const admittedLeads = admittedLeadsResult[0].total;
 
     const [assignedLeadsResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM leads WHERE assigned_to IS NOT NULL'
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to IS NOT NULL')}`,
+      leadParams
     );
     const assignedLeads = assignedLeadsResult[0].total;
 
     const [unassignedLeadsResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM leads WHERE assigned_to IS NULL'
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to IS NULL')}`,
+      leadParams
     );
     const unassignedLeads = unassignedLeadsResult[0].total;
 
     // Get lead status breakdown
     const [leadStatusAgg] = await pool.execute(
-      'SELECT lead_status, COUNT(*) as count FROM leads GROUP BY lead_status'
+      `SELECT lead_status, COUNT(*) as count FROM leads ${leadWhere} GROUP BY lead_status`,
+      leadParams
     );
 
     // Get joining status breakdown (NOTE: Requires joinings table - will be updated when joining controller is migrated)
@@ -455,13 +474,16 @@ export const getOverviewAnalytics = async (req, res) => {
     const admissionsTotal = admissionsTotalResult[0].total;
 
     // Get leads created by date
+    const leadsCreatedWhere = leadFilters.length > 0
+      ? `${leadWhere} AND created_at >= ? AND created_at <= ?`
+      : 'WHERE created_at >= ? AND created_at <= ?';
     const [leadsCreatedAgg] = await pool.execute(
       `SELECT DATE(created_at) as date, COUNT(*) as count 
        FROM leads 
-       WHERE created_at >= ? AND created_at <= ?
+       ${leadsCreatedWhere}
        GROUP BY DATE(created_at)
        ORDER BY date ASC`,
-      [startDateStr, endDateStr]
+      [...leadParams, startDateStr, endDateStr]
     );
 
     // Get status changes by date

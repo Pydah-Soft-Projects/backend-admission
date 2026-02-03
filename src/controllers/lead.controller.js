@@ -51,6 +51,8 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     utmContent: leadData.utm_content,
     lastFollowUp: leadData.last_follow_up,
     nextScheduledCall: leadData.next_scheduled_call,
+    academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
+    studentGroup: leadData.student_group || undefined,
     notes: leadData.notes,
     uploadedBy: uploadedByUser || leadData.uploaded_by,
     uploadBatchId: leadData.upload_batch_id,
@@ -137,6 +139,14 @@ export const getLeads = async (req, res) => {
     if (req.query.scheduledOn) {
       conditions.push('DATE(next_scheduled_call) = ?');
       params.push(req.query.scheduledOn);
+    }
+    if (req.query.academicYear != null && req.query.academicYear !== '') {
+      conditions.push('academic_year = ?');
+      params.push(Number(req.query.academicYear));
+    }
+    if (req.query.studentGroup) {
+      conditions.push('student_group = ?');
+      params.push(req.query.studentGroup);
     }
 
     // Enquiry number search
@@ -710,6 +720,8 @@ export const updateLead = async (req, res) => {
       notes,
       lastFollowUp,
       nextScheduledCall,
+      academicYear,
+      studentGroup,
     } = req.body;
 
     const newLeadStatus = leadStatus ?? legacyStatus;
@@ -844,6 +856,14 @@ export const updateLead = async (req, res) => {
           ? new Date(nextScheduledCall).toISOString().slice(0, 19).replace('T', ' ')
           : null
       );
+    }
+    if (academicYear !== undefined) {
+      updateFields.push('academic_year = ?');
+      updateValues.push(academicYear != null && academicYear !== '' ? Number(academicYear) : null);
+    }
+    if (studentGroup !== undefined) {
+      updateFields.push('student_group = ?');
+      updateValues.push(studentGroup ? String(studentGroup).trim() || null : null);
     }
 
     // Execute update
@@ -1487,6 +1507,27 @@ export const getFilterOptions = async (req, res) => {
       params
     );
 
+    const academicYearCondition = [...conditions, 'academic_year IS NOT NULL'];
+    const studentGroupCondition = [...conditions, 'student_group IS NOT NULL AND student_group != ""'];
+    const [academicYearsRows] = await pool.execute(
+      `SELECT DISTINCT academic_year FROM leads ${whereClause(academicYearCondition)} ORDER BY academic_year DESC`,
+      params
+    );
+    const [studentGroupsRows] = await pool.execute(
+      `SELECT DISTINCT student_group FROM leads ${whereClause(studentGroupCondition)} ORDER BY student_group ASC`,
+      params
+    );
+    const academicYears = academicYearsRows.map(r => r.academic_year).filter(Boolean);
+    const currentYear = new Date().getFullYear();
+    for (let y = currentYear; y >= currentYear - 3; y -= 1) {
+      if (!academicYears.includes(y)) academicYears.unshift(y);
+    }
+    academicYears.sort((a, b) => b - a);
+
+    const studentGroupOptions = ['10th', 'Inter-MPC', 'Inter-BIPC', 'Degree', 'Diploma'];
+    const studentGroupsFromDb = studentGroupsRows.map(r => r.student_group).filter(Boolean);
+    const studentGroups = [...new Set([...studentGroupOptions, ...studentGroupsFromDb])].sort();
+
     return successResponse(res, {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
@@ -1494,6 +1535,8 @@ export const getFilterOptions = async (req, res) => {
       quotas: quotas.map(r => r.quota),
       leadStatuses: leadStatuses.map(r => r.lead_status),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
+      academicYears,
+      studentGroups,
     }, 'Filter options retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting filter options:', error);

@@ -38,6 +38,8 @@ const formatLead = (leadData, assignedToUser = null) => {
     source: leadData.source,
     lastFollowUp: leadData.last_follow_up,
     nextScheduledCall: leadData.next_scheduled_call,
+    academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
+    studentGroup: leadData.student_group || undefined,
     notes: leadData.notes,
     createdAt: leadData.created_at,
     updatedAt: leadData.updated_at,

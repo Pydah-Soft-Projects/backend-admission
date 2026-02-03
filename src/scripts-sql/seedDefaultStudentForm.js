@@ -214,12 +214,28 @@ const defaultStudentFormFields = [
     validationRules: {},
   },
   {
+    fieldName: 'student_group',
+    fieldType: 'dropdown',
+    fieldLabel: 'Student Group',
+    placeholder: 'Select student group',
+    isRequired: true,
+    displayOrder: 18,
+    options: [
+      { value: '10th', label: '10th' },
+      { value: 'Inter-MPC', label: 'Inter-MPC' },
+      { value: 'Inter-BIPC', label: 'Inter-BIPC' },
+      { value: 'Degree', label: 'Degree' },
+      { value: 'Diploma', label: 'Diploma' },
+    ],
+    validationRules: {},
+  },
+  {
     fieldName: 'data_collection_type',
     fieldType: 'dropdown',
     fieldLabel: 'Data Collection Type',
     placeholder: 'Select data collection type',
     isRequired: true,
-    displayOrder: 18,
+    displayOrder: 19,
     options: [
       { value: 'Direct', label: 'Direct' },
       { value: 'Exam Center', label: 'Exam Center' },
@@ -233,7 +249,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Staff Name',
     placeholder: 'Enter staff name',
     isRequired: false,
-    displayOrder: 19,
+    displayOrder: 20,
     validationRules: {
       minLength: 2,
       maxLength: 255,
@@ -246,7 +262,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'School or College Name',
     placeholder: 'Enter school or college name',
     isRequired: false,
-    displayOrder: 20,
+    displayOrder: 21,
     validationRules: {
       minLength: 2,
       maxLength: 255,
