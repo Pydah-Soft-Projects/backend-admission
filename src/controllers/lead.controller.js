@@ -50,6 +50,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     utmTerm: leadData.utm_term,
     utmContent: leadData.utm_content,
     lastFollowUp: leadData.last_follow_up,
+    nextScheduledCall: leadData.next_scheduled_call,
     notes: leadData.notes,
     uploadedBy: uploadedByUser || leadData.uploaded_by,
     uploadBatchId: leadData.upload_batch_id,
@@ -132,6 +133,10 @@ export const getLeads = async (req, res) => {
       const end = new Date(req.query.endDate);
       end.setHours(23, 59, 59, 999);
       params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.scheduledOn) {
+      conditions.push('DATE(next_scheduled_call) = ?');
+      params.push(req.query.scheduledOn);
     }
 
     // Enquiry number search
@@ -704,6 +709,7 @@ export const updateLead = async (req, res) => {
       source,
       notes,
       lastFollowUp,
+      nextScheduledCall,
     } = req.body;
 
     const newLeadStatus = leadStatus ?? legacyStatus;
@@ -830,6 +836,14 @@ export const updateLead = async (req, res) => {
     if (notes !== undefined) {
       updateFields.push('notes = ?');
       updateValues.push(notes || null);
+    }
+    if (nextScheduledCall !== undefined) {
+      updateFields.push('next_scheduled_call = ?');
+      updateValues.push(
+        nextScheduledCall
+          ? new Date(nextScheduledCall).toISOString().slice(0, 19).replace('T', ' ')
+          : null
+      );
     }
 
     // Execute update

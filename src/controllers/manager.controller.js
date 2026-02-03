@@ -37,6 +37,7 @@ const formatLead = (leadData, assignedToUser = null) => {
     assignedBy: leadData.assigned_by,
     source: leadData.source,
     lastFollowUp: leadData.last_follow_up,
+    nextScheduledCall: leadData.next_scheduled_call,
     notes: leadData.notes,
     createdAt: leadData.created_at,
     updatedAt: leadData.updated_at,

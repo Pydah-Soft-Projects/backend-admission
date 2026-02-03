@@ -3,7 +3,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
-const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'User'];
+const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'User', 'Student Counselor', 'Data Entry User'];
 
 const sanitizePermissions = (permissions = {}) => {
   if (!permissions || typeof permissions !== 'object') {
@@ -118,7 +118,7 @@ export const createUser = async (req, res) => {
     }
 
     if (!VALID_ROLES.includes(roleName)) {
-      return errorResponse(res, 'Role name must be Super Admin, Sub Super Admin, or User', 400);
+      return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, User, Student Counselor, Data Entry User', 400);
     }
 
     if (roleName === 'User' && (!designation || !designation.trim())) {
@@ -161,7 +161,7 @@ export const createUser = async (req, res) => {
         email.toLowerCase().trim(),
         hashedPassword,
         roleName,
-        roleName === 'User' ? designation?.trim() : null,
+        roleName === 'User' ? designation?.trim() : (roleName === 'Student Counselor' || roleName === 'Data Entry User' ? (designation?.trim() || null) : null),
         JSON.stringify(sanitizedPermissions),
         true
       ]
@@ -237,7 +237,7 @@ export const updateUser = async (req, res) => {
     let finalRoleName = currentUser.role_name;
     if (roleName) {
       if (!VALID_ROLES.includes(roleName)) {
-        return errorResponse(res, 'Role name must be Super Admin, Sub Super Admin, or User', 400);
+        return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, User, Student Counselor, Data Entry User', 400);
       }
       if (roleName === 'Manager') {
         return errorResponse(res, 'Use isManager boolean field instead of setting roleName to Manager', 400);
@@ -294,6 +294,13 @@ export const updateUser = async (req, res) => {
         }
       } else if (isRoleChangeToUser && !currentUser.designation) {
         return errorResponse(res, 'Designation is required for users', 400);
+      }
+      updateFields.push('permissions = ?');
+      updateValues.push(JSON.stringify({}));
+    } else if (finalRoleName === 'Student Counselor' || finalRoleName === 'Data Entry User') {
+      if (designation !== undefined) {
+        updateFields.push('designation = ?');
+        updateValues.push(designation && designation.trim() ? designation.trim() : null);
       }
       updateFields.push('permissions = ?');
       updateValues.push(JSON.stringify({}));
