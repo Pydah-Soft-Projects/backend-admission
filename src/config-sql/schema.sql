@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS leads (
     last_follow_up DATETIME,
     next_scheduled_call DATETIME,
     notes TEXT,
+    needs_manual_update BOOLEAN DEFAULT FALSE NOT NULL,
     uploaded_by CHAR(36) NULL,
     upload_batch_id VARCHAR(255),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS leads (
     INDEX idx_leads_mandal_state (mandal, state),
     INDEX idx_leads_status_assigned (lead_status, assigned_to),
     INDEX idx_leads_phone_name (phone, name),
+    INDEX idx_leads_needs_manual_update (needs_manual_update),
     FULLTEXT INDEX idx_leads_fulltext (enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

@@ -34,7 +34,7 @@ const normalizeKey = (value) => {
       'phone',
       'email',
       'fatherName',
-  'fatherPhone',
+      'fatherPhone',
       'motherName',
       'courseInterested',
       'village',
@@ -44,12 +44,15 @@ const normalizeKey = (value) => {
       'gender',
       'rank',
       'interCollege',
-  'quota',
-  'applicationStatus',
-  'leadStatus',
-  'source',
-  'notes',
-  'dynamicFields',
+      'quota',
+      'applicationStatus',
+      'leadStatus',
+      'source',
+      'notes',
+      'academicYear',
+      'studentGroup',
+      'schoolOrCollegeName',
+      'dynamicFields',
     ];
 
     const canonicalFieldSet = new Set(canonicalFields);
@@ -187,6 +190,24 @@ const aliasPairs = [
   ['email address', 'email'],
   ['e mail', 'email'],
   ['mail', 'email'],
+  // academic year
+  ['academic year', 'academicYear'],
+  ['academicyear', 'academicYear'],
+  ['academic_year', 'academicYear'],
+  ['year', 'academicYear'],
+  // student group
+  ['student group', 'studentGroup'],
+  ['studentgroup', 'studentGroup'],
+  ['student_group', 'studentGroup'],
+  ['group', 'studentGroup'],
+  // school or college name
+  ['school or college name', 'schoolOrCollegeName'],
+  ['school or college', 'schoolOrCollegeName'],
+  ['school name', 'schoolOrCollegeName'],
+  ['schoolname', 'schoolOrCollegeName'],
+  ['college name', 'schoolOrCollegeName'],
+  ['collegename', 'schoolOrCollegeName'],
+  ['school_or_college_name', 'schoolOrCollegeName'],
 ];
 
 const aliasMap = new Map();
@@ -210,14 +231,16 @@ canonicalFields.forEach((field) => {
             'district',
             'mandal',
             'state',
-  'gender',
-  'interCollege',
+            'gender',
+            'interCollege',
             'quota',
             'applicationStatus',
-  'leadStatus',
+            'leadStatus',
             'source',
-  'notes',
-];
+            'notes',
+            'studentGroup',
+            'schoolOrCollegeName',
+          ];
 
 const buildPreviewFromArray = (headers, row) => {
   const preview = {};
@@ -691,6 +714,143 @@ const processImportJob = async (jobId) => {
       return `${enquiryPrefix}${formattedSequence}`;
     };
 
+    // Normalize string for lookup: trim, collapse spaces, lowercase (avoids Excel/DB spacing differences)
+    const norm = (s) => (s == null || s === '' ? '' : String(s).trim().replace(/\s+/g, ' ').toLowerCase());
+
+    // Strip common Excel suffixes so "Kakinada Dist" / "East Godavari Dist" match DB "Kakinada" / "East Godavari"
+    const stripDistrictSuffix = (normalizedStr) => {
+      if (!normalizedStr || typeof normalizedStr !== 'string') return normalizedStr || '';
+      return normalizedStr.replace(/\s+(dist(rict)?|dt\.?)\s*$/i, '').trim();
+    };
+    const stripMandalSuffix = (normalizedStr) => {
+      if (!normalizedStr || typeof normalizedStr !== 'string') return normalizedStr || '';
+      return normalizedStr.replace(/\s+(mandal|mandalam|mndl\.?)\s*$/i, '').trim();
+    };
+    // Same suffix stripping for saving clean values (keeps original case)
+    const stripDistrictSuffixForStorage = (s) => (s == null || s === '' ? '' : String(s).trim().replace(/\s+(dist(rict)?|dt\.?)\s*$/i, '').trim());
+    const stripMandalSuffixForStorage = (s) => (s == null || s === '' ? '' : String(s).trim().replace(/\s+(mandal|mandalam|mndl\.?)\s*$/i, '').trim());
+
+    // Load master data for district/mandal/school/college matching
+    // Use String() for all IDs so Map.get() works (MySQL2 can return CHAR(36) as Buffer)
+    const loadMasterLookup = async () => {
+      const [statesRows] = await pool.execute('SELECT id, name FROM states WHERE is_active = 1');
+      const stateIdByName = new Map();
+      statesRows.forEach((r) => stateIdByName.set(norm(r.name), String(r.id)));
+
+      const [districtsRows] = await pool.execute('SELECT id, state_id, name FROM districts WHERE is_active = 1');
+      const districtsByStateId = new Map();
+      districtsRows.forEach((r) => {
+        const stateKey = String(r.state_id);
+        if (!districtsByStateId.has(stateKey)) {
+          districtsByStateId.set(stateKey, new Map());
+        }
+        districtsByStateId.get(stateKey).set(norm(r.name), String(r.id));
+      });
+
+      const [mandalsRows] = await pool.execute('SELECT id, district_id, name FROM mandals WHERE is_active = 1');
+      const mandalsByDistrictId = new Map();
+      mandalsRows.forEach((r) => {
+        const distKey = String(r.district_id);
+        if (!mandalsByDistrictId.has(distKey)) {
+          mandalsByDistrictId.set(distKey, new Set());
+        }
+        mandalsByDistrictId.get(distKey).add(norm(r.name));
+      });
+
+      const [schoolsRows] = await pool.execute('SELECT name FROM schools WHERE is_active = 1');
+      const schoolNames = new Set(schoolsRows.map((r) => norm(r.name)));
+
+      const [collegesRows] = await pool.execute('SELECT name FROM colleges WHERE is_active = 1');
+      const collegeNames = new Set(collegesRows.map((r) => norm(r.name)));
+
+      return { stateIdByName, districtsByStateId, mandalsByDistrictId, schoolNames, collegeNames };
+    };
+
+    /**
+     * Normalize raw student group from Excel to canonical form.
+     * 10th: "10th", "10", "x", "ssc", "class 10" -> "10th"
+     * Inter-MPC / Inter-BIPC: "inter mpc", "mpc", "inter bipc", "bipc" -> "Inter-MPC" / "Inter-BIPC"
+     * "Inter" or "Intermediate" alone -> "Inter" (ambiguous; will trigger needs_manual_update)
+     */
+    const normalizeStudentGroup = (raw) => {
+      if (raw === undefined || raw === null) return null;
+      const s = String(raw).trim();
+      if (!s) return null;
+      const lower = s.toLowerCase();
+      // 10th variants
+      if (lower === '10th' || lower === '10' || lower === 'x' || lower === 'ssc' ||
+          lower === 'class 10' || lower === 'class 10th' || lower === 's.s.c' || lower === 's.sc') {
+        return '10th';
+      }
+      // Inter-MPC variants
+      if (lower === 'inter-mpc' || lower === 'inter mpc' || lower === 'intermpc' ||
+          lower === 'mpc' || lower === 'intermediate mpc' || lower === 'intermediate mpc stream') {
+        return 'Inter-MPC';
+      }
+      // Inter-BIPC variants
+      if (lower === 'inter-bipc' || lower === 'inter bipc' || lower === 'interbipc' ||
+          lower === 'bipc' || lower === 'intermediate bipc' || lower === 'intermediate bipc stream') {
+        return 'Inter-BIPC';
+      }
+      // Inter / Intermediate without MPC/BIPC -> keep as "Inter" for needs_manual_update
+      if (lower === 'inter' || lower === 'intermediate' || lower === 'inter mediate') {
+        return 'Inter';
+      }
+      // Degree, Diploma as-is (case-normalized)
+      if (lower === 'degree') return 'Degree';
+      if (lower === 'diploma') return 'Diploma';
+      return s;
+    };
+
+    const checkNeedsManualUpdate = (doc, lookup) => {
+      // Ambiguous student group (e.g. "Inter" without MPC/BIPC) needs manual update
+      const sg = (doc.studentGroup || '').toString().trim();
+      if (sg === 'Inter') return true;
+
+      const stateKey = norm(doc.state || '');
+      if (!stateKey) return true;
+      // Allow "Andhra Pradesh (AP)" or "AP" to match "Andhra Pradesh"
+      const stateId = lookup.stateIdByName.get(stateKey)
+        || lookup.stateIdByName.get(stateKey.replace(/\s*\(ap\)\s*$/i, '').trim() || stateKey)
+        || (stateKey === 'ap' ? lookup.stateIdByName.get('andhra pradesh') : undefined);
+      if (!stateId) return true;
+
+      const districtKeyRaw = norm(doc.district || '');
+      if (!districtKeyRaw) return true;
+      const districtKey = stripDistrictSuffix(districtKeyRaw) || districtKeyRaw;
+      const districtMap = lookup.districtsByStateId.get(String(stateId));
+      const districtId = districtMap?.get(districtKey) ?? districtMap?.get(districtKeyRaw);
+      if (!districtMap || !districtId) return true;
+
+      const mandalKeyRaw = norm(doc.mandal || '');
+      if (!mandalKeyRaw) return true;
+      const mandalKey = stripMandalSuffix(mandalKeyRaw) || mandalKeyRaw;
+      const mandalSet = lookup.mandalsByDistrictId.get(String(districtId));
+      const mandalMatches = mandalSet && (mandalSet.has(mandalKey) || mandalSet.has(mandalKeyRaw));
+      if (!mandalMatches) return true;
+
+      const dyn = doc.dynamicFields || {};
+      const schoolOrCollege = dyn.school_or_college_name || dyn.schoolOrCollegeName;
+      const scTrimmed = typeof schoolOrCollege === 'string' ? schoolOrCollege.trim() : '';
+      if (scTrimmed) {
+        const scKey = norm(schoolOrCollege);
+        const studentGroup = (doc.studentGroup || '').toString().toLowerCase().trim();
+        if (studentGroup === '10th') {
+          if (lookup.schoolNames.size > 0 && !lookup.schoolNames.has(scKey)) return true;
+        } else {
+          if (lookup.collegeNames.size > 0 && !lookup.collegeNames.has(scKey)) return true;
+        }
+      }
+      return false;
+    };
+
+    let masterLookup = null;
+    try {
+      masterLookup = await loadMasterLookup();
+    } catch (err) {
+      console.warn('[Import] Could not load master lookup; all leads will be marked needs_manual_update:', err.message);
+    }
+
     const buildLeadDocument = (rawLead) => {
       const normalizedLead = {};
       const dynamicFieldsFromPayload = {};
@@ -745,6 +905,32 @@ const processImportJob = async (jobId) => {
             }
           }
 
+      // academic_year: parse as number (e.g. 2024, 2025)
+      if (normalizedLead.academicYear !== undefined && normalizedLead.academicYear !== null && normalizedLead.academicYear !== '') {
+        const yearNum = Number(normalizedLead.academicYear);
+        if (!Number.isNaN(yearNum) && yearNum >= 2000 && yearNum <= 2100) {
+          normalizedLead.academicYear = yearNum;
+        } else {
+          delete normalizedLead.academicYear;
+        }
+      }
+
+      // student_group: normalize variants (10, X -> 10th; Inter MPC -> Inter-MPC; Inter only -> Inter for manual update)
+      const rawStudentGroup = toTrimmedString(normalizedLead.studentGroup);
+      const normalizedStudentGroupVal = normalizeStudentGroup(rawStudentGroup);
+      if (normalizedStudentGroupVal) {
+        normalizedLead.studentGroup = normalizedStudentGroupVal;
+      } else {
+        normalizedLead.studentGroup = 'Not Specified';
+      }
+
+      // schoolOrCollegeName -> store in dynamicFields for matching
+      const schoolOrCollegeVal = toTrimmedString(normalizedLead.schoolOrCollegeName);
+      if (schoolOrCollegeVal) {
+        dynamicFieldsFromPayload.school_or_college_name = schoolOrCollegeVal;
+      }
+      delete normalizedLead.schoolOrCollegeName;
+
       const cleanedDynamicFields = {};
       Object.entries(dynamicFieldsFromPayload).forEach(([key, value]) => {
         const cleanedValue = toTrimmedString(value);
@@ -783,11 +969,10 @@ const processImportJob = async (jobId) => {
         motherName: toTrimmedString(normalizedLead.motherName),
         courseInterested: toTrimmedString(normalizedLead.courseInterested),
         village: toTrimmedString(normalizedLead.village) || 'Unknown',
-        district: toTrimmedString(normalizedLead.district) || 'Unknown',
-        mandal:
-          toTrimmedString(normalizedLead.mandal) ||
-          toTrimmedString(normalizedLead.village) ||
-          'Unknown',
+        district: stripDistrictSuffixForStorage(toTrimmedString(normalizedLead.district) || '') || 'Unknown',
+        mandal: stripMandalSuffixForStorage(
+          toTrimmedString(normalizedLead.mandal) || toTrimmedString(normalizedLead.village) || ''
+        ) || 'Unknown',
         state: toTrimmedString(normalizedLead.state) || 'Andhra Pradesh',
         gender: toTrimmedString(normalizedLead.gender) || 'Not Specified',
             rank: normalizedLead.rank !== undefined ? Number(normalizedLead.rank) : undefined,
@@ -800,6 +985,8 @@ const processImportJob = async (jobId) => {
         uploadedBy: job.created_by,
         uploadBatchId: job.upload_batch_id,
         leadStatus: toTrimmedString(normalizedLead.leadStatus) || 'New',
+        academicYear: normalizedLead.academicYear !== undefined ? normalizedLead.academicYear : null,
+        studentGroup: normalizedLead.studentGroup || 'Not Specified',
         createdAt: now,
         updatedAt: now,
       };
@@ -822,6 +1009,10 @@ const processImportJob = async (jobId) => {
       let failedInBatch = 0;
 
       try {
+        // Lead INSERT: 31 columns, 29 placeholders + NOW(), NOW().
+        // "Column count doesn't match value count" causes: (1) undefined in values array,
+        // (2) triggers on leads doing another INSERT with wrong count, (3) wrong DB/schema.
+        // Run: SHOW TRIGGERS LIKE 'leads'; and DESCRIBE leads; to verify.
         // Bulk insert leads using prepared statements (check duplicate by phone before insert)
         const insertPromises = documents.map(async (doc) => {
           const leadId = uuidv4();
@@ -836,45 +1027,70 @@ const processImportJob = async (jobId) => {
                 return { success: false, error: new Error('Duplicate phone number') };
               }
             }
+            // Bulk insert: 31 columns, 31 placeholders, 31 params (no NOW() to avoid driver/server count mismatch)
+            const LEAD_INSERT_COLUMN_COUNT = 31;
+            const nil = (v, d) => (v === undefined || v === null ? d : v);
+            const now = new Date();
+            const insertValues = [
+              leadId,
+              nil(doc.enquiryNumber, null),
+              nil(doc.name, ''),
+              nil(doc.phone, ''),
+              nil(doc.email, null),
+              nil(doc.fatherName, ''),
+              nil(doc.motherName, ''),
+              nil(doc.fatherPhone, ''),
+              nil(doc.hallTicketNumber, ''),
+              nil(doc.village, ''),
+              nil(doc.courseInterested, null),
+              nil(doc.district, ''),
+              nil(doc.mandal, ''),
+              nil(doc.state, 'Andhra Pradesh'),
+              doc.isNRI === true || doc.isNRI === 'true' ? 1 : 0,
+              nil(doc.gender, 'Not Specified'),
+              doc.rank !== undefined && doc.rank !== null && !Number.isNaN(Number(doc.rank)) ? Number(doc.rank) : null,
+              nil(doc.interCollege, ''),
+              nil(doc.quota, 'Not Applicable'),
+              nil(doc.applicationStatus, 'Not Provided'),
+              typeof doc.dynamicFields === 'object' && doc.dynamicFields !== null ? JSON.stringify(doc.dynamicFields) : '{}',
+              nil(doc.leadStatus, 'New'),
+              (doc.academicYear !== undefined && doc.academicYear !== null && !Number.isNaN(Number(doc.academicYear))) ? Number(doc.academicYear) : null,
+              nil(doc.studentGroup, 'Not Specified'),
+              doc.needsManualUpdate === true ? 1 : 0,
+              nil(doc.source, 'Bulk Upload'),
+              nil(job.created_by, null),
+              nil(job.upload_batch_id, null),
+              nil(doc.notes, null),
+              now,
+              now,
+            ];
+            if (insertValues.length !== LEAD_INSERT_COLUMN_COUNT) {
+              throw new Error(
+                `Lead INSERT value count mismatch: expected ${LEAD_INSERT_COLUMN_COUNT}, got ${insertValues.length}.`
+              );
+            }
             await pool.execute(
               `INSERT INTO leads (
                 id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
                 hall_ticket_number, village, course_interested, district, mandal, state,
                 is_nri, gender, \`rank\`, inter_college, quota, application_status,
-                dynamic_fields, lead_status, source, uploaded_by, upload_batch_id,
-                notes, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-              [
-                leadId,
-                doc.enquiryNumber,
-                doc.name,
-                doc.phone,
-                doc.email || null,
-                doc.fatherName,
-                doc.motherName || '',
-                doc.fatherPhone,
-                doc.hallTicketNumber || '',
-                doc.village,
-                doc.courseInterested || null,
-                doc.district,
-                doc.mandal,
-                doc.state || 'Andhra Pradesh',
-                doc.isNRI === true || doc.isNRI === 'true' ? 1 : 0,
-                doc.gender || 'Not Specified',
-                doc.rank !== undefined && doc.rank !== null ? doc.rank : null,
-                doc.interCollege || '',
-                doc.quota || 'Not Applicable',
-                doc.applicationStatus || 'Not Provided',
-                JSON.stringify(doc.dynamicFields || {}),
-                doc.leadStatus || 'New',
-                doc.source || 'Bulk Upload',
-                job.created_by || null,
-                job.upload_batch_id || null,
-                doc.notes || null,
-              ]
+                dynamic_fields, lead_status, academic_year, student_group, needs_manual_update,
+                source, uploaded_by, upload_batch_id, notes, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              insertValues
             );
             return { success: true };
           } catch (insertError) {
+            const err = insertError?.message || String(insertError);
+            const isColumnCountError = /column count|value count|doesn't match/i.test(err);
+            if (isColumnCountError) {
+              console.error('[Import] Lead INSERT failed (column/value count):', {
+                code: insertError?.code,
+                sqlMessage: insertError?.sqlMessage,
+                sqlState: insertError?.sqlState,
+                hint: 'Check SHOW TRIGGERS and that leads table has no extra/missing columns vs schema.',
+              });
+            }
             return { success: false, error: insertError };
           }
         });
@@ -937,6 +1153,9 @@ const processImportJob = async (jobId) => {
 
       try {
         const leadDoc = buildLeadDocument(rawLead);
+        leadDoc.needsManualUpdate = masterLookup
+          ? checkNeedsManualUpdate(leadDoc, masterLookup)
+          : true;
         leadsBuffer.push({ doc: leadDoc, meta });
         if (leadsBuffer.length >= DEFAULT_CHUNK_SIZE) {
           const entries = leadsBuffer.splice(0, leadsBuffer.length);

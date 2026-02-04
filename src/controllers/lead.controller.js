@@ -53,6 +53,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     nextScheduledCall: leadData.next_scheduled_call,
     academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
     studentGroup: leadData.student_group || undefined,
+    needsManualUpdate: leadData.needs_manual_update === 1 || leadData.needs_manual_update === true,
     notes: leadData.notes,
     uploadedBy: uploadedByUser || leadData.uploaded_by,
     uploadBatchId: leadData.upload_batch_id,
@@ -864,6 +865,11 @@ export const updateLead = async (req, res) => {
     if (studentGroup !== undefined) {
       updateFields.push('student_group = ?');
       updateValues.push(studentGroup ? String(studentGroup).trim() || null : null);
+    }
+    // Clear needs_manual_update when lead is updated (user has reviewed/corrected)
+    if (isSuperAdmin && updateFields.length > 0) {
+      updateFields.push('needs_manual_update = ?');
+      updateValues.push(0);
     }
 
     // Execute update
