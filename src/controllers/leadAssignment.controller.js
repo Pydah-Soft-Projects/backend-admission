@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, count, leadIds, assignNow = true } = req.body;
+    const { userId, mandal, state, academicYear, count, leadIds, assignNow = true } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -67,10 +67,14 @@ export const assignLeads = async (req, res) => {
       if (!count || count <= 0) {
         return errorResponse(res, 'Count is required for bulk assignment', 400);
       }
+      const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : NaN;
+      if (Number.isNaN(yearNum)) {
+        return errorResponse(res, 'Academic year is required for bulk assignment', 400);
+      }
 
       // Build filter for unassigned leads
-      const conditions = ['(assigned_to IS NULL)'];
-      const params = [];
+      const conditions = ['(assigned_to IS NULL)', 'academic_year = ?'];
+      const params = [yearNum];
 
       // Add mandal filter if provided
       if (mandal) {
@@ -210,12 +214,21 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, state } = req.query;
+    const { mandal, state, academicYear } = req.query;
     const pool = getPool();
 
     // Build filter for unassigned leads
     const conditions = ['assigned_to IS NULL'];
     const params = [];
+
+    // Academic year filter (optional; when set, stats are for that year only)
+    if (academicYear != null && academicYear !== '') {
+      const year = parseInt(academicYear, 10);
+      if (!Number.isNaN(year)) {
+        conditions.push('academic_year = ?');
+        params.push(year);
+      }
+    }
 
     // Add mandal filter if provided
     if (mandal) {
@@ -231,6 +244,18 @@ export const getAssignmentStats = async (req, res) => {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+    // Base filter for total/assigned in same scope (when academic year is selected)
+    const baseConditions = [];
+    const baseParams = [];
+    if (academicYear != null && academicYear !== '') {
+      const year = parseInt(academicYear, 10);
+      if (!Number.isNaN(year)) {
+        baseConditions.push('academic_year = ?');
+        baseParams.push(year);
+      }
+    }
+    const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
+
     // Get unassigned leads count
     const [unassignedCountResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads ${whereClause}`,
@@ -238,30 +263,33 @@ export const getAssignmentStats = async (req, res) => {
     );
     const unassignedCount = unassignedCountResult[0].total;
 
-    // Get total leads count
-    const [totalLeadsResult] = await pool.execute('SELECT COUNT(*) as total FROM leads');
+    // Get total leads count (optionally scoped by academic year)
+    const [totalLeadsResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${baseWhere}`,
+      baseParams
+    );
     const totalLeads = totalLeadsResult[0].total;
 
-    // Get assigned leads count
+    // Get assigned leads count (in same academic year scope when filter applied)
     const assignedCount = totalLeads - unassignedCount;
 
-    // Get breakdown by mandal (for unassigned leads)
+    // Get breakdown by mandal (for unassigned leads with same filters)
     const [mandalBreakdown] = await pool.execute(
       `SELECT mandal, COUNT(*) as count 
        FROM leads ${whereClause}
        GROUP BY mandal 
        ORDER BY count DESC 
        LIMIT 20`,
-      params
+      [...params]
     );
 
-    // Get breakdown by state (for unassigned leads)
+    // Get breakdown by state (for unassigned leads with same filters)
     const [stateBreakdown] = await pool.execute(
       `SELECT state, COUNT(*) as count 
        FROM leads ${whereClause}
        GROUP BY state 
        ORDER BY count DESC`,
-      params
+      [...params]
     );
 
     return successResponse(
@@ -285,6 +313,166 @@ export const getAssignmentStats = async (req, res) => {
   } catch (error) {
     console.error('Error getting assignment stats:', error);
     return errorResponse(res, error.message || 'Failed to get assignment statistics', 500);
+  }
+};
+
+// @desc    Get count of leads assigned to a specific user (optional mandal/state filter)
+// @route   GET /api/leads/assign/assigned-count
+// @access  Private (Super Admin only)
+export const getAssignedCountForUser = async (req, res) => {
+  try {
+    const { userId, mandal, state, academicYear } = req.query;
+    const pool = getPool();
+
+    if (!userId) {
+      return errorResponse(res, 'User ID is required', 400);
+    }
+
+    const conditions = ['assigned_to = ?'];
+    const params = [userId];
+
+    if (academicYear != null && academicYear !== '') {
+      const year = parseInt(academicYear, 10);
+      if (!Number.isNaN(year)) {
+        conditions.push('academic_year = ?');
+        params.push(year);
+      }
+    }
+    if (mandal) {
+      conditions.push('mandal = ?');
+      params.push(mandal);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+
+    const [result] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads WHERE ${conditions.join(' AND ')}`,
+      params
+    );
+
+    const count = result[0]?.total ?? 0;
+
+    return successResponse(
+      res,
+      { count },
+      'Assigned count retrieved',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting assigned count for user:', error);
+    return errorResponse(res, error.message || 'Failed to get assigned count', 500);
+  }
+};
+
+// @desc    Remove assignments from a user (bulk unassign)
+// @route   POST /api/leads/assign/remove
+// @access  Private (Super Admin only)
+export const removeAssignments = async (req, res) => {
+  try {
+    const { userId, mandal, state, academicYear, count } = req.body;
+    const pool = getPool();
+    const currentUserId = req.user.id || req.user._id;
+
+    if (!userId) {
+      return errorResponse(res, 'User ID is required', 400);
+    }
+
+    if (!count || count <= 0) {
+      return errorResponse(res, 'Count must be greater than zero', 400);
+    }
+
+    // Check user exists
+    const [users] = await pool.execute(
+      'SELECT id, name FROM users WHERE id = ?',
+      [userId]
+    );
+    if (users.length === 0) {
+      return errorResponse(res, 'User not found', 404);
+    }
+    const user = users[0];
+
+    const conditions = ['assigned_to = ?'];
+    const params = [userId];
+    if (academicYear != null && academicYear !== '') {
+      const year = parseInt(academicYear, 10);
+      if (!Number.isNaN(year)) {
+        conditions.push('academic_year = ?');
+        params.push(year);
+      }
+    }
+    if (mandal) {
+      conditions.push('mandal = ?');
+      params.push(mandal);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+
+    const limitNum = Math.min(Math.max(parseInt(count, 10) || 0, 1), 10000);
+
+    const [leadsToUnassign] = await pool.execute(
+      `SELECT id, lead_status FROM leads WHERE ${conditions.join(' AND ')} LIMIT ${limitNum}`,
+      params
+    );
+
+    if (leadsToUnassign.length === 0) {
+      return successResponse(
+        res,
+        { removed: 0, requested: limitNum, userName: user.name },
+        'No assigned leads found matching the criteria',
+        200
+      );
+    }
+
+    const leadIds = leadsToUnassign.map((l) => l.id);
+    const placeholders = leadIds.map(() => '?').join(',');
+
+    await pool.execute(
+      `UPDATE leads SET assigned_to = NULL, assigned_at = NULL, assigned_by = NULL, lead_status = 'New', updated_at = NOW() WHERE id IN (${placeholders})`,
+      leadIds
+    );
+
+    for (const lead of leadsToUnassign) {
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (
+          id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          lead.id,
+          'status_change',
+          lead.lead_status || 'Assigned',
+          'New',
+          `Assignment removed from ${user.name}`,
+          currentUserId,
+          JSON.stringify({
+            unassignment: {
+              removedFrom: userId,
+              removedBy: currentUserId,
+            },
+          }),
+        ]
+      );
+    }
+
+    return successResponse(
+      res,
+      {
+        removed: leadsToUnassign.length,
+        requested: limitNum,
+        userId,
+        userName: user.name,
+      },
+      `Successfully removed assignment for ${leadsToUnassign.length} lead${leadsToUnassign.length !== 1 ? 's' : ''} from ${user.name}`,
+      200
+    );
+  } catch (error) {
+    console.error('Error removing assignments:', error);
+    return errorResponse(res, error.message || 'Failed to remove assignments', 500);
   }
 };
 

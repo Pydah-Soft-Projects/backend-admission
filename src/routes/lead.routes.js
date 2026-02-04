@@ -28,6 +28,8 @@ import {
 import {
   assignLeads,
   getAssignmentStats,
+  getAssignedCountForUser,
+  removeAssignments,
   getUserLeadAnalytics,
   getOverviewAnalytics,
   getUserAnalytics,
@@ -75,7 +77,9 @@ router.get('/delete-jobs/:jobId', isSuperAdmin, getDeleteJobStatus);
 
 // Assignment routes (Super Admin only)
 router.get('/assign/stats', isSuperAdmin, getAssignmentStats);
+router.get('/assign/assigned-count', isSuperAdmin, getAssignedCountForUser);
 router.post('/assign', isSuperAdmin, assignLeads);
+router.post('/assign/remove', isSuperAdmin, removeAssignments);
 
 // Analytics routes
 router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
