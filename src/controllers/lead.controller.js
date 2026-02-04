@@ -192,6 +192,15 @@ export const getLeads = async (req, res) => {
     );
     const total = countResult[0].total;
 
+    // Get count of leads that need manual update (same filters)
+    const needsUpdateConditions = [...conditions, 'needs_manual_update = 1'];
+    const needsUpdateWhereClause = `WHERE ${needsUpdateConditions.join(' AND ')}`;
+    const [needsUpdateResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${needsUpdateWhereClause}`,
+      params
+    );
+    const needsUpdateCount = needsUpdateResult[0]?.total ?? 0;
+
     // Get leads with pagination and user info
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const query = `
@@ -235,6 +244,7 @@ export const getLeads = async (req, res) => {
         total,
         pages: Math.ceil(total / limit),
       },
+      needsUpdateCount,
     }, 'Leads retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting leads:', error);
