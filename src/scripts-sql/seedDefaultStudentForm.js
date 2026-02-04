@@ -258,15 +258,13 @@ const defaultStudentFormFields = [
   },
   {
     fieldName: 'school_or_college_name',
-    fieldType: 'text',
+    fieldType: 'dropdown',
     fieldLabel: 'School or College Name',
-    placeholder: 'Enter school or college name',
+    placeholder: 'Select school or college',
     isRequired: false,
     displayOrder: 21,
-    validationRules: {
-      minLength: 2,
-      maxLength: 255,
-    },
+    options: [],
+    validationRules: {},
   },
 ];
 

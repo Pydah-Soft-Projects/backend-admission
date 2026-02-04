@@ -33,12 +33,13 @@ const STAFF_NAME_FIELD = {
 
 const SCHOOL_OR_COLLEGE_NAME_FIELD = {
   fieldName: 'school_or_college_name',
-  fieldType: 'text',
+  fieldType: 'dropdown',
   fieldLabel: 'School or College Name',
-  placeholder: 'Enter school or college name',
+  placeholder: 'Select school or college',
   isRequired: false,
   displayOrder: null,
-  validationRules: { minLength: 2, maxLength: 255 },
+  options: [],
+  validationRules: {},
   helpText: null,
 };
 
