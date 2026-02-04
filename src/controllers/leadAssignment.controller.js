@@ -128,12 +128,19 @@ export const assignLeads = async (req, res) => {
       const oldStatus = lead.lead_status || 'New';
       const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
       
-      // Update lead
+      // Update lead (set academic_year when provided so User Analytics counts by year are correct)
+      const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : null;
+      const setAcademicYear = yearNum != null && !Number.isNaN(yearNum)
+        ? ', academic_year = ?'
+        : '';
+      const updateParams = yearNum != null && !Number.isNaN(yearNum)
+        ? [userId, currentUserId, newStatus, yearNum, lead.id]
+        : [userId, currentUserId, newStatus, lead.id];
       await pool.execute(
         `UPDATE leads SET 
-          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, updated_at = NOW()
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
          WHERE id = ?`,
-        [userId, currentUserId, newStatus, lead.id]
+        updateParams
       );
       
       // Create activity log
@@ -897,8 +904,10 @@ export const getUserAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate, userId } = req.query;
-    
+    const { startDate, endDate, userId, academicYear } = req.query;
+    const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
+    const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
+
     // Set date range for filtering activities
     let activityDateConditions = [];
     let activityDateParams = [];
@@ -946,11 +955,15 @@ export const getUserAnalytics = async (req, res) => {
     const userAnalytics = await Promise.all(
       users.map(async (user) => {
         const userId = user.id;
+        const leadWhereClause = useAcademicYear
+          ? 'assigned_to = ? AND academic_year = ?'
+          : 'assigned_to = ?';
+        const leadParams = useAcademicYear ? [userId, yearNum] : [userId];
 
-        // Count total assigned leads
+        // Count total assigned leads (optionally for academic year)
         const [totalAssignedResult] = await pool.execute(
-          'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ?',
-          [userId]
+          `SELECT COUNT(*) as total FROM leads WHERE ${leadWhereClause}`,
+          leadParams
         );
         const totalAssigned = totalAssignedResult[0].total;
 
@@ -958,9 +971,9 @@ export const getUserAnalytics = async (req, res) => {
         const [statusBreakdown] = await pool.execute(
           `SELECT lead_status, COUNT(*) as count 
            FROM leads 
-           WHERE assigned_to = ? 
+           WHERE ${leadWhereClause}
            GROUP BY lead_status`,
-          [userId]
+          leadParams
         );
 
         const statusMap = {};
@@ -972,8 +985,8 @@ export const getUserAnalytics = async (req, res) => {
         const [activeLeadsResult] = await pool.execute(
           `SELECT COUNT(*) as total 
            FROM leads 
-           WHERE assigned_to = ? AND lead_status NOT IN ('Admitted', 'Closed', 'Cancelled')`,
-          [userId]
+           WHERE ${leadWhereClause} AND lead_status NOT IN ('Admitted', 'Closed', 'Cancelled')`,
+          leadParams
         );
         const activeLeads = activeLeadsResult[0].total;
 
@@ -982,15 +995,15 @@ export const getUserAnalytics = async (req, res) => {
           `SELECT COUNT(DISTINCT a.lead_id) as total
            FROM admissions a
            INNER JOIN leads l ON a.lead_id = l.id
-           WHERE l.assigned_to = ?`,
-          [userId]
+           WHERE l.assigned_to = ? ${useAcademicYear ? 'AND l.academic_year = ?' : ''}`,
+          leadParams
         ).catch(() => [{ total: 0 }]);
         const convertedLeads = convertedLeadsResult[0].total;
 
         // Get user's leads for activity tracking
         const [userLeads] = await pool.execute(
-          'SELECT id, name, phone, enquiry_number FROM leads WHERE assigned_to = ?',
-          [userId]
+          `SELECT id, name, phone, enquiry_number FROM leads WHERE ${leadWhereClause}`,
+          leadParams
         );
         const leadIds = userLeads.map((lead) => lead.id);
         
@@ -1033,6 +1046,37 @@ export const getUserAnalytics = async (req, res) => {
             remarks: call.remarks || '',
           });
         });
+
+        // Day-wise call activity: for each day, call count and which leads were called
+        const dailyCallActivityMap = {};
+        calls.forEach((call) => {
+          const d = call.sent_at instanceof Date
+            ? call.sent_at.toISOString().slice(0, 10)
+            : String(call.sent_at || '').slice(0, 10);
+          if (!d) return;
+          if (!dailyCallActivityMap[d]) {
+            dailyCallActivityMap[d] = { date: d, callCount: 0, leads: {} };
+          }
+          dailyCallActivityMap[d].callCount += 1;
+          const lid = call.lead_id || 'unknown';
+          if (!dailyCallActivityMap[d].leads[lid]) {
+            dailyCallActivityMap[d].leads[lid] = {
+              leadId: lid,
+              leadName: call.lead_name || 'Unknown',
+              leadPhone: call.lead_phone || call.contact_number,
+              enquiryNumber: call.enquiry_number || '',
+              callCount: 0,
+            };
+          }
+          dailyCallActivityMap[d].leads[lid].callCount += 1;
+        });
+        const dailyCallActivity = Object.keys(dailyCallActivityMap)
+          .sort()
+          .map((date) => ({
+            date: dailyCallActivityMap[date].date,
+            callCount: dailyCallActivityMap[date].callCount,
+            leads: Object.values(dailyCallActivityMap[date].leads),
+          }));
 
         // Get SMS/texts sent by this user in the period - NOTE: Requires communications table
         const smsDateClause = activityDateConditions.length > 0
@@ -1097,7 +1141,7 @@ export const getUserAnalytics = async (req, res) => {
 
         // Get status conversions made by this user in the period
         const statusChangeDateClause = activityDateConditions.length > 0
-          ? `AND created_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          ? `AND a.created_at ${activityDateConditions.map((c) => c).join(' AND a.created_at ')}`
           : '';
         
         const [statusChanges] = await pool.execute(
@@ -1166,11 +1210,11 @@ export const getUserAnalytics = async (req, res) => {
         const [sourceBreakdown] = await pool.execute(
           `SELECT source, COUNT(*) as count 
            FROM leads 
-           WHERE assigned_to = ? 
+           WHERE ${leadWhereClause}
            GROUP BY source 
            ORDER BY count DESC 
            LIMIT 10`,
-          [userId]
+          leadParams
         );
 
         const sourceMap = {};
@@ -1182,11 +1226,11 @@ export const getUserAnalytics = async (req, res) => {
         const [courseBreakdown] = await pool.execute(
           `SELECT course_interested, COUNT(*) as count 
            FROM leads 
-           WHERE assigned_to = ? 
+           WHERE ${leadWhereClause}
            GROUP BY course_interested 
            ORDER BY count DESC 
            LIMIT 10`,
-          [userId]
+          leadParams
         );
 
         const courseMap = {};
@@ -1216,6 +1260,7 @@ export const getUserAnalytics = async (req, res) => {
             totalDuration: totalCallDuration,
             averageDuration: totalCalls > 0 ? Math.round(totalCallDuration / totalCalls) : 0,
             byLead: Object.values(callsByLead),
+            dailyCallActivity,
           },
           sms: {
             total: totalSMS,

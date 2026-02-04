@@ -422,3 +422,127 @@ export const getConversionReports = async (req, res) => {
   }
 };
 
+// @desc    Get leads abstract (district, mandal, school, college breakdown) for an academic year
+// Uses master tables (districts, mandals, schools, colleges) and shows lead count mapped to each
+// Optional: stateId filters districts/mandals by state; districtId filters mandals by district
+// @route   GET /api/reports/leads-abstract
+// @access  Private (Super Admin only)
+export const getLeadsAbstract = async (req, res) => {
+  try {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Access denied', 403);
+    }
+
+    const { academicYear, studentGroup, stateId, districtId } = req.query;
+    const pool = getPool();
+
+    if (!academicYear || academicYear === '') {
+      return errorResponse(res, 'Academic year is required', 400);
+    }
+
+    const yearNum = parseInt(academicYear, 10);
+    if (Number.isNaN(yearNum)) {
+      return errorResponse(res, 'Invalid academic year', 400);
+    }
+
+    // Lead filter: strict academic year (and optional student_group) so stats match selected year
+    const leadFilter = 'l.academic_year = ?' + (studentGroup && studentGroup !== '' ? ' AND l.student_group = ?' : '');
+    const leadParams = studentGroup && studentGroup !== '' ? [yearNum, studentGroup] : [yearNum];
+
+    // District filter: by state when stateId provided
+    const districtWhere = stateId && stateId !== ''
+      ? 'd.is_active = 1 AND d.state_id = ?'
+      : 'd.is_active = 1';
+    const districtParams = stateId && stateId !== '' ? [...leadParams, stateId] : [...leadParams];
+
+    // District-wise: from master districts, count leads mapped by district name (case-insensitive trim) or by district id (if lead stores id)
+    const districtMatchCondition = `(LOWER(TRIM(l.district)) = LOWER(TRIM(d.name)) OR l.district = d.id) AND ${leadFilter}`;
+    const [districtRows] = await pool.execute(
+      `SELECT d.id, d.name, COUNT(l.id) AS count
+       FROM districts d
+       LEFT JOIN leads l ON ${districtMatchCondition}
+       WHERE ${districtWhere}
+       GROUP BY d.id, d.name
+       ORDER BY count DESC, d.name ASC`,
+      districtParams
+    ).catch(() => [[]]);
+    const districtBreakdown = (districtRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
+    const maxDistrict = districtBreakdown.length > 0 ? districtBreakdown[0].name : null;
+
+    // Mandal filter: by district when districtId provided; else by state when stateId provided
+    let mandalWhere = 'm.is_active = 1';
+    const mandalParams = [...leadParams];
+    if (districtId && districtId !== '') {
+      mandalWhere += ' AND m.district_id = ?';
+      mandalParams.push(districtId);
+    } else if (stateId && stateId !== '') {
+      mandalWhere += ' AND m.district_id IN (SELECT id FROM districts WHERE state_id = ? AND is_active = 1)';
+      mandalParams.push(stateId);
+    }
+
+    // Mandal-wise: from master mandals, count leads mapped by mandal name (case-insensitive trim) or by mandal id (if lead stores id)
+    const mandalMatchCondition = `(LOWER(TRIM(l.mandal)) = LOWER(TRIM(m.name)) OR l.mandal = m.id) AND ${leadFilter}`;
+    const [mandalRows] = await pool.execute(
+      `SELECT m.id, m.name, COUNT(l.id) AS count
+       FROM mandals m
+       LEFT JOIN leads l ON ${mandalMatchCondition}
+       WHERE ${mandalWhere}
+       GROUP BY m.id, m.name
+       ORDER BY count DESC, m.name ASC`,
+      mandalParams
+    ).catch(() => [[]]);
+    const mandalBreakdown = (mandalRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
+    const maxMandal = mandalBreakdown.length > 0 ? mandalBreakdown[0].name : null;
+
+    // Lead school/college name from dynamic_fields for JOIN
+    const leadSchoolCollegeExpr = `LOWER(TRIM(COALESCE(
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.school_or_college_name')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.schoolOrCollegeName')), ''),
+        ''
+      )))`;
+
+    // School-wise: from master schools, count leads whose school_or_college_name matches (case-insensitive trim)
+    const [schoolRows] = await pool.execute(
+      `SELECT s.id, s.name, COUNT(l.id) AS count
+       FROM schools s
+       LEFT JOIN leads l ON ${leadSchoolCollegeExpr} = LOWER(TRIM(s.name)) AND ${leadFilter}
+       WHERE s.is_active = 1
+       GROUP BY s.id, s.name
+       ORDER BY count DESC, s.name ASC`,
+      [...leadParams]
+    ).catch(() => [[]]);
+    const schoolBreakdown = (schoolRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
+
+    // College-wise: from master colleges, count leads whose school_or_college_name matches (case-insensitive trim)
+    const [collegeRows] = await pool.execute(
+      `SELECT c.id, c.name, COUNT(l.id) AS count
+       FROM colleges c
+       LEFT JOIN leads l ON ${leadSchoolCollegeExpr} = LOWER(TRIM(c.name)) AND ${leadFilter}
+       WHERE c.is_active = 1
+       GROUP BY c.id, c.name
+       ORDER BY count DESC, c.name ASC`,
+      [...leadParams]
+    ).catch(() => [[]]);
+    const collegeBreakdown = (collegeRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
+
+    return successResponse(
+      res,
+      {
+        academicYear: yearNum,
+        studentGroup: studentGroup || null,
+        districtBreakdown,
+        maxDistrict,
+        mandalBreakdown,
+        maxMandal,
+        schoolBreakdown,
+        collegeBreakdown,
+      },
+      'Leads abstract retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting leads abstract:', error);
+    return errorResponse(res, error.message || 'Failed to get leads abstract', 500);
+  }
+};
+
