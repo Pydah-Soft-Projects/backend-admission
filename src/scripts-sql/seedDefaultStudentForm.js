@@ -31,32 +31,12 @@ const defaultStudentFormFields = [
     },
   },
   {
-    fieldName: 'student_email',
-    fieldType: 'email',
-    fieldLabel: 'Student Email',
-    placeholder: 'Enter email address',
-    isRequired: false,
-    displayOrder: 3,
-    validationRules: {
-      maxLength: 255,
-    },
-  },
-  {
-    fieldName: 'student_date_of_birth',
-    fieldType: 'date',
-    fieldLabel: 'Date of Birth',
-    placeholder: 'Select date of birth',
-    isRequired: true,
-    displayOrder: 4,
-    validationRules: {},
-  },
-  {
     fieldName: 'student_gender',
     fieldType: 'dropdown',
     fieldLabel: 'Gender',
     placeholder: 'Select gender',
     isRequired: true,
-    displayOrder: 5,
+    displayOrder: 3,
     options: [
       { value: 'male', label: 'Male' },
       { value: 'female', label: 'Female' },
@@ -70,7 +50,7 @@ const defaultStudentFormFields = [
     fieldLabel: "Father's Name",
     placeholder: "Enter father's full name",
     isRequired: true,
-    displayOrder: 6,
+    displayOrder: 4,
     validationRules: {
       minLength: 2,
       maxLength: 255,
@@ -82,32 +62,7 @@ const defaultStudentFormFields = [
     fieldLabel: "Father's Phone Number",
     placeholder: 'Enter 10-digit phone number',
     isRequired: true,
-    displayOrder: 7,
-    validationRules: {
-      pattern: '^[0-9]{10}$',
-      minLength: 10,
-      maxLength: 10,
-    },
-  },
-  {
-    fieldName: 'mother_name',
-    fieldType: 'text',
-    fieldLabel: "Mother's Name",
-    placeholder: "Enter mother's full name",
-    isRequired: false,
-    displayOrder: 8,
-    validationRules: {
-      minLength: 2,
-      maxLength: 255,
-    },
-  },
-  {
-    fieldName: 'mother_phone',
-    fieldType: 'tel',
-    fieldLabel: "Mother's Phone Number",
-    placeholder: 'Enter 10-digit phone number',
-    isRequired: false,
-    displayOrder: 9,
+    displayOrder: 5,
     validationRules: {
       pattern: '^[0-9]{10}$',
       minLength: 10,
@@ -120,7 +75,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Door/Street',
     placeholder: 'Enter door number and street',
     isRequired: true,
-    displayOrder: 10,
+    displayOrder: 6,
     validationRules: {
       minLength: 5,
       maxLength: 255,
@@ -132,7 +87,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Village/City',
     placeholder: 'Enter village or city name',
     isRequired: true,
-    displayOrder: 11,
+    displayOrder: 7,
     validationRules: {
       minLength: 2,
       maxLength: 255,
@@ -144,7 +99,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'State',
     placeholder: 'Select state',
     isRequired: true,
-    displayOrder: 12,
+    displayOrder: 8,
     options: [],
     validationRules: {},
     helpText: 'Select state first; then district and mandal will be available.',
@@ -155,7 +110,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'District',
     placeholder: 'Select district',
     isRequired: true,
-    displayOrder: 13,
+    displayOrder: 9,
     validationRules: {
       minLength: 2,
       maxLength: 255,
@@ -168,7 +123,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Mandal',
     placeholder: 'Select mandal',
     isRequired: true,
-    displayOrder: 14,
+    displayOrder: 10,
     validationRules: {
       minLength: 2,
       maxLength: 255,
@@ -176,50 +131,12 @@ const defaultStudentFormFields = [
     helpText: 'Select state and district first to see mandals.',
   },
   {
-    fieldName: 'address_pin_code',
-    fieldType: 'text',
-    fieldLabel: 'PIN Code',
-    placeholder: 'Enter 6-digit PIN code',
-    isRequired: true,
-    displayOrder: 15,
-    validationRules: {
-      pattern: '^[0-9]{6}$',
-      minLength: 6,
-      maxLength: 6,
-    },
-  },
-  {
-    fieldName: 'course_interested',
-    fieldType: 'text',
-    fieldLabel: 'Course Interested',
-    placeholder: 'Enter course name',
-    isRequired: false,
-    displayOrder: 16,
-    validationRules: {
-      maxLength: 255,
-    },
-  },
-  {
-    fieldName: 'quota',
-    fieldType: 'dropdown',
-    fieldLabel: 'Quota',
-    placeholder: 'Select quota',
-    isRequired: false,
-    displayOrder: 17,
-    options: [
-      { value: 'Management', label: 'Management' },
-      { value: 'Convenor', label: 'Convenor' },
-      { value: 'Not Applicable', label: 'Not Applicable' },
-    ],
-    validationRules: {},
-  },
-  {
     fieldName: 'student_group',
     fieldType: 'dropdown',
     fieldLabel: 'Student Group',
     placeholder: 'Select student group',
     isRequired: true,
-    displayOrder: 18,
+    displayOrder: 11,
     options: [
       { value: '10th', label: '10th' },
       { value: 'Inter-MPC', label: 'Inter-MPC' },
@@ -230,12 +147,22 @@ const defaultStudentFormFields = [
     validationRules: {},
   },
   {
+    fieldName: 'school_or_college_name',
+    fieldType: 'dropdown',
+    fieldLabel: 'School or College Name',
+    placeholder: 'Select school or college',
+    isRequired: false,
+    displayOrder: 12,
+    options: [],
+    validationRules: {},
+  },
+  {
     fieldName: 'academic_year',
     fieldType: 'dropdown',
     fieldLabel: 'Academic Year',
     placeholder: 'Select academic year',
     isRequired: true,
-    displayOrder: 19,
+    displayOrder: 13,
     options: [
       { value: '2024', label: '2024' },
       { value: '2025', label: '2025' },
@@ -259,7 +186,7 @@ const defaultStudentFormFields = [
     fieldLabel: 'Data Collection Type',
     placeholder: 'Select data collection type',
     isRequired: true,
-    displayOrder: 20,
+    displayOrder: 14,
     options: [
       { value: 'Direct', label: 'Direct' },
       { value: 'Exam Center', label: 'Exam Center' },
@@ -273,24 +200,41 @@ const defaultStudentFormFields = [
     fieldLabel: 'Staff Name',
     placeholder: 'Enter staff name',
     isRequired: false,
-    displayOrder: 21,
+    displayOrder: 15,
     validationRules: {
       minLength: 2,
       maxLength: 255,
     },
     helpText: 'Required when Data Collection Type is Direct or Exam Center',
   },
-  {
-    fieldName: 'school_or_college_name',
-    fieldType: 'dropdown',
-    fieldLabel: 'School or College Name',
-    placeholder: 'Select school or college',
-    isRequired: false,
-    displayOrder: 22,
-    options: [],
-    validationRules: {},
-  },
 ];
+
+const isSyncMode = process.argv.includes('--sync') || process.argv.includes('--safe');
+
+function insertField(pool, formId, field) {
+  const fieldId = uuidv4();
+  return pool.execute(
+    `INSERT INTO form_builder_fields (
+      id, form_id, field_name, field_type, field_label, placeholder,
+      is_required, validation_rules, display_order, options, help_text, is_active,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      fieldId,
+      formId,
+      field.fieldName,
+      field.fieldType,
+      field.fieldLabel,
+      field.placeholder || null,
+      field.isRequired,
+      JSON.stringify(field.validationRules || {}),
+      field.displayOrder,
+      JSON.stringify(field.options || []),
+      field.helpText || null,
+      true,
+    ]
+  );
+}
 
 const seedDefaultStudentForm = async () => {
   let pool;
@@ -298,67 +242,71 @@ const seedDefaultStudentForm = async () => {
   try {
     pool = getPool();
 
-    console.log('Seeding default Student Details form...');
+    console.log(isSyncMode
+      ? 'Syncing default Student Details form (add only missing form/fields, no overwrite)...'
+      : 'Seeding default Student Details form...');
 
-    // Check if default form already exists
     const [existing] = await pool.execute(
       'SELECT id FROM form_builder_forms WHERE is_default = TRUE AND name = ?',
       ['Student Details']
     );
 
+    let formId;
+
     if (existing.length > 0) {
-      console.log('Default Student Details form already exists. Skipping seed.');
-      await closeDB();
-      process.exit(0);
-    }
-
-    // Create the form
-    const formId = uuidv4();
-    await pool.execute(
-      `INSERT INTO form_builder_forms (
-        id, name, description, is_default, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        formId,
-        'Student Details',
-        'Default form for collecting student information during lead generation',
-        true,
-        true,
-      ]
-    );
-
-    console.log(`✓ Created form: Student Details (${formId})`);
-
-    // Create fields
-    for (const field of defaultStudentFormFields) {
-      const fieldId = uuidv4();
+      formId = existing[0].id;
+      if (!isSyncMode) {
+        console.log('Default Student Details form already exists. Skipping seed.');
+        console.log('To add only missing fields without changing existing data, run: node src/scripts-sql/seedDefaultStudentForm.js --sync');
+        await closeDB();
+        process.exit(0);
+      }
+      console.log(`Using existing form: Student Details (${formId})`);
+    } else {
+      formId = uuidv4();
       await pool.execute(
-        `INSERT INTO form_builder_fields (
-          id, form_id, field_name, field_type, field_label, placeholder,
-          is_required, validation_rules, display_order, options, help_text, is_active,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        `INSERT INTO form_builder_forms (
+          id, name, description, is_default, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
         [
-          fieldId,
           formId,
-          field.fieldName,
-          field.fieldType,
-          field.fieldLabel,
-          field.placeholder || null,
-          field.isRequired,
-          JSON.stringify(field.validationRules || {}),
-          field.displayOrder,
-          JSON.stringify(field.options || []),
-          field.helpText || null,
+          'Student Details',
+          'Default form for collecting student information during lead generation',
+          true,
           true,
         ]
       );
-      console.log(`  ✓ Created field: ${field.fieldLabel} (${field.fieldName})`);
+      console.log(`✓ Created form: Student Details (${formId})`);
     }
 
-    console.log('\n✅ Default Student Details form seeded successfully!');
-    console.log(`   Form ID: ${formId}`);
-    console.log(`   Total fields: ${defaultStudentFormFields.length}`);
+    let existingFieldNames = new Set();
+    if (existing.length > 0) {
+      const [rows] = await pool.execute(
+        'SELECT field_name FROM form_builder_fields WHERE form_id = ?',
+        [formId]
+      );
+      existingFieldNames = new Set(rows.map((r) => r.field_name));
+    }
+
+    let added = 0;
+    for (const field of defaultStudentFormFields) {
+      if (existingFieldNames.has(field.fieldName)) {
+        if (isSyncMode) console.log(`  - Skipped (exists): ${field.fieldLabel} (${field.fieldName})`);
+        continue;
+      }
+      await insertField(pool, formId, field);
+      console.log(`  ✓ Created field: ${field.fieldLabel} (${field.fieldName})`);
+      added += 1;
+    }
+
+    if (isSyncMode) {
+      console.log(`\n✅ Sync complete. Form ID: ${formId}`);
+      console.log(`   Fields added: ${added}. Existing fields left unchanged.`);
+    } else {
+      console.log('\n✅ Default Student Details form seeded successfully!');
+      console.log(`   Form ID: ${formId}`);
+      console.log(`   Total fields: ${defaultStudentFormFields.length}`);
+    }
 
     await closeDB();
     process.exit(0);

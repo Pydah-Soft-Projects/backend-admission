@@ -85,11 +85,12 @@ export const assignLeads = async (req, res) => {
       }
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
+      const limitNum = Math.min(Math.max(parseInt(count, 10) || 0, 1), 10000);
 
-      // Get available unassigned leads matching criteria
+      // Get available unassigned leads matching criteria (LIMIT must be literal, not placeholder)
       const [availableLeads] = await pool.execute(
-        `SELECT id FROM leads ${whereClause} LIMIT ?`,
-        [...params, parseInt(count)]
+        `SELECT id FROM leads ${whereClause} LIMIT ${limitNum}`,
+        params
       );
 
       if (availableLeads.length === 0) {
@@ -504,7 +505,7 @@ export const getOverviewAnalytics = async (req, res) => {
        GROUP BY DATE(updated_at), status
        ORDER BY date ASC`,
       [startDateStr, endDateStr]
-    ).catch(() => []); // Fallback if table doesn't exist yet
+    ).catch(() => [[]]); // Fallback if table doesn't exist yet
 
     // Get admissions by date (NOTE: Requires admissions table)
     const [admissionsAgg] = await pool.execute(
@@ -514,7 +515,7 @@ export const getOverviewAnalytics = async (req, res) => {
        GROUP BY DATE(admission_date)
        ORDER BY date ASC`,
       [startDateStr, endDateStr]
-    ).catch(() => []); // Fallback if table doesn't exist yet
+    ).catch(() => [[]]); // Fallback if table doesn't exist yet
 
     const leadStatusBreakdown = leadStatusAgg.reduce((acc, item) => {
       const key = item.lead_status || 'Unknown';
@@ -817,7 +818,7 @@ export const getUserAnalytics = async (req, res) => {
            WHERE c.sent_by = ? AND c.type = 'call' ${callDateClause}
            ORDER BY c.sent_at DESC`,
           [userId, ...activityDateParams]
-        ).catch(() => []);
+        ).catch(() => [[]]);
 
         const totalCalls = calls.length;
         const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
@@ -859,7 +860,7 @@ export const getUserAnalytics = async (req, res) => {
            WHERE c.sent_by = ? AND c.type = 'sms' ${smsDateClause}
            ORDER BY c.sent_at DESC`,
           [userId, ...activityDateParams]
-        ).catch(() => []);
+        ).catch(() => [[]]);
 
         const totalSMS = smsMessages.length;
         const smsByLead = {};

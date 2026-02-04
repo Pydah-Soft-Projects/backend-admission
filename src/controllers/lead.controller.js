@@ -87,66 +87,67 @@ export const getLeads = async (req, res) => {
     const conditions = [];
     const params = [];
 
+    // Use table alias l. for all columns so WHERE is unambiguous when query joins leads l with users
     if (req.query.mandal) {
-      conditions.push('mandal = ?');
+      conditions.push('l.mandal = ?');
       params.push(req.query.mandal);
     }
     if (req.query.state) {
-      conditions.push('state = ?');
+      conditions.push('l.state = ?');
       params.push(req.query.state);
     }
     if (req.query.district) {
-      conditions.push('district = ?');
+      conditions.push('l.district = ?');
       params.push(req.query.district);
     }
     if (req.query.quota) {
-      conditions.push('quota = ?');
+      conditions.push('l.quota = ?');
       params.push(req.query.quota);
     }
     if (req.query.leadStatus) {
-      conditions.push('lead_status = ?');
+      conditions.push('l.lead_status = ?');
       params.push(req.query.leadStatus);
     }
     if (req.query.applicationStatus) {
-      conditions.push('application_status = ?');
+      conditions.push('l.application_status = ?');
       params.push(req.query.applicationStatus);
     }
     if (req.query.assignedTo) {
-      conditions.push('assigned_to = ?');
+      conditions.push('l.assigned_to = ?');
       params.push(req.query.assignedTo);
     }
     if (req.query.courseInterested) {
-      conditions.push('course_interested = ?');
+      conditions.push('l.course_interested = ?');
       params.push(req.query.courseInterested);
     }
     if (req.query.source) {
-      conditions.push('source = ?');
+      conditions.push('l.source = ?');
       params.push(req.query.source);
     }
 
     // Date filtering
     if (req.query.startDate) {
-      conditions.push('created_at >= ?');
+      conditions.push('l.created_at >= ?');
       const start = new Date(req.query.startDate);
       start.setHours(0, 0, 0, 0);
       params.push(start.toISOString().slice(0, 19).replace('T', ' '));
     }
     if (req.query.endDate) {
-      conditions.push('created_at <= ?');
+      conditions.push('l.created_at <= ?');
       const end = new Date(req.query.endDate);
       end.setHours(23, 59, 59, 999);
       params.push(end.toISOString().slice(0, 19).replace('T', ' '));
     }
     if (req.query.scheduledOn) {
-      conditions.push('DATE(next_scheduled_call) = ?');
+      conditions.push('DATE(l.next_scheduled_call) = ?');
       params.push(req.query.scheduledOn);
     }
     if (req.query.academicYear != null && req.query.academicYear !== '') {
-      conditions.push('academic_year = ?');
+      conditions.push('l.academic_year = ?');
       params.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      conditions.push('student_group = ?');
+      conditions.push('l.student_group = ?');
       params.push(req.query.studentGroup);
     }
 
@@ -154,10 +155,10 @@ export const getLeads = async (req, res) => {
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
       if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        conditions.push('enquiry_number LIKE ?');
+        conditions.push('l.enquiry_number LIKE ?');
         params.push(`${searchTerm}%`);
       } else {
-        conditions.push('enquiry_number LIKE ?');
+        conditions.push('l.enquiry_number LIKE ?');
         params.push(`%${searchTerm}%`);
       }
     }
@@ -166,12 +167,12 @@ export const getLeads = async (req, res) => {
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
       conditions.push(`(
-        MATCH(enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college) 
+        MATCH(l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.mother_name, l.course_interested, l.district, l.mandal, l.state, l.application_status, l.hall_ticket_number, l.inter_college) 
         AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR name LIKE ?
-        OR phone LIKE ?
-        OR email LIKE ?
-        OR district LIKE ?
+        OR l.name LIKE ?
+        OR l.phone LIKE ?
+        OR l.email LIKE ?
+        OR l.district LIKE ?
       )`);
       params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
     }
@@ -179,24 +180,24 @@ export const getLeads = async (req, res) => {
     // Access control - if user is not Super Admin, only show assigned leads
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       const userId = req.user.id || req.user._id;
-      conditions.push('assigned_to = ?');
+      conditions.push('l.assigned_to = ?');
       params.push(userId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get total count for pagination
+    // Get total count for pagination (use alias l so same whereClause works)
     const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${whereClause}`,
+      `SELECT COUNT(*) as total FROM leads l ${whereClause}`,
       params
     );
     const total = countResult[0].total;
 
     // Get count of leads that need manual update (same filters)
-    const needsUpdateConditions = [...conditions, 'needs_manual_update = 1'];
+    const needsUpdateConditions = [...conditions, 'l.needs_manual_update = 1'];
     const needsUpdateWhereClause = `WHERE ${needsUpdateConditions.join(' AND ')}`;
     const [needsUpdateResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${needsUpdateWhereClause}`,
+      `SELECT COUNT(*) as total FROM leads l ${needsUpdateWhereClause}`,
       params
     );
     const needsUpdateCount = needsUpdateResult[0]?.total ?? 0;
