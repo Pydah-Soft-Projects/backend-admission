@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 const UPLOAD_SESSION_TTL_MS = 1000 * 60 * 30; // 30 minutes
 const PREVIEW_ROW_LIMIT = 10;
-const PREVIEW_SIZE_LIMIT = 15 * 1024 * 1024; // 15 MB threshold for generating previews
+const PREVIEW_SIZE_LIMIT = 55 * 1024 * 1024; // 15 MB threshold for generating previews
 const MAX_ERROR_DETAILS = 200;
 const DEFAULT_CHUNK_SIZE = Number(process.env.LEAD_IMPORT_CHUNK_SIZE || 2000);
 
@@ -79,6 +79,8 @@ const aliasPairs = [
   ['phone number1', 'phone'],
   ['mobile', 'phone'],
   ['mobile number', 'phone'],
+  ['mobile no', 'phone'],
+  ['mobile no 1', 'phone'],
   ['phone number', 'phone'],
   ['phone no', 'phone'],
   ['phone no 1', 'phone'],
@@ -122,6 +124,10 @@ const aliasPairs = [
   ['phone no 2', 'fatherPhone'],
   ['mobile2', 'fatherPhone'],
   ['mobile 2', 'fatherPhone'],
+  ['mobile no 2', 'fatherPhone'],
+  ['alternate mobile no', 'fatherPhone'],
+  ['alternate mobile number', 'fatherPhone'],
+  ['alternate phone', 'fatherPhone'],
   ['secondary phone', 'fatherPhone'],
   ['secondary contact', 'fatherPhone'],
   ['father contact', 'fatherPhone'],
@@ -164,6 +170,7 @@ const aliasPairs = [
   ['village town', 'village'],
   ['village name', 'village'],
   ['city', 'village'],
+  ['address', 'village'],
   ['mandal/town', 'mandal'],
   ['mandal town', 'mandal'],
   ['mandal name', 'mandal'],
@@ -770,7 +777,7 @@ const processImportJob = async (jobId) => {
      * Normalize raw student group from Excel to canonical form.
      * 10th: "10th", "10", "x", "ssc", "class 10" -> "10th"
      * Inter-MPC / Inter-BIPC: "inter mpc", "mpc", "inter bipc", "bipc" -> "Inter-MPC" / "Inter-BIPC"
-     * "Inter" or "Intermediate" alone -> "Inter" (ambiguous; will trigger needs_manual_update)
+     * "Inter" or "Intermediate" (without stream) -> "Inter" (ambiguous; triggers needs_manual_update so user can set MPC/BIPC)
      */
     const normalizeStudentGroup = (raw) => {
       if (raw === undefined || raw === null) return null;
@@ -782,7 +789,7 @@ const processImportJob = async (jobId) => {
           lower === 'class 10' || lower === 'class 10th' || lower === 's.s.c' || lower === 's.sc') {
         return '10th';
       }
-      // Inter-MPC variants
+      // Inter-MPC variants (must check before generic "Inter")
       if (lower === 'inter-mpc' || lower === 'inter mpc' || lower === 'intermpc' ||
           lower === 'mpc' || lower === 'intermediate mpc' || lower === 'intermediate mpc stream') {
         return 'Inter-MPC';
@@ -792,8 +799,11 @@ const processImportJob = async (jobId) => {
           lower === 'bipc' || lower === 'intermediate bipc' || lower === 'intermediate bipc stream') {
         return 'Inter-BIPC';
       }
-      // Inter / Intermediate without MPC/BIPC -> keep as "Inter" for needs_manual_update
-      if (lower === 'inter' || lower === 'intermediate' || lower === 'inter mediate') {
+      // Inter / Intermediate without MPC/BIPC -> "Inter" (ambiguous; needs_manual_update so counsellor can set MPC/BIPC)
+      if (lower === 'inter' || lower === 'intermediate' || lower === 'inter mediate' ||
+          lower === 'inter 1' || lower === 'inter 2' || lower === 'inter i' || lower === 'inter ii' ||
+          lower === '1st inter' || lower === '2nd inter' || lower === 'first inter' || lower === 'second inter' ||
+          lower === 'intermediate 1' || lower === 'intermediate 2' || lower === 'inter year 1' || lower === 'inter year 2') {
         return 'Inter';
       }
       // Degree, Diploma as-is (case-normalized)
@@ -803,9 +813,9 @@ const processImportJob = async (jobId) => {
     };
 
     const checkNeedsManualUpdate = (doc, lookup) => {
-      // Ambiguous student group (e.g. "Inter" without MPC/BIPC) needs manual update
+      // Ambiguous student group (e.g. "Inter" without MPC/BIPC) needs manual update so counsellor can set Inter-MPC or Inter-BIPC
       const sg = (doc.studentGroup || '').toString().trim();
-      if (sg === 'Inter') return true;
+      if (sg.toLowerCase() === 'inter') return true;
 
       const stateKey = norm(doc.state || '');
       if (!stateKey) return true;
