@@ -614,8 +614,12 @@ export const getOverviewAnalytics = async (req, res) => {
       leadParams.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      leadFilters.push('student_group = ?');
-      leadParams.push(req.query.studentGroup);
+      if (req.query.studentGroup === 'Inter') {
+        leadFilters.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        leadFilters.push('student_group = ?');
+        leadParams.push(req.query.studentGroup);
+      }
     }
     const leadWhere = leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')}` : '';
     const leadWhereAnd = (suffix) =>

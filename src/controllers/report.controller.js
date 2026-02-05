@@ -446,8 +446,16 @@ export const getLeadsAbstract = async (req, res) => {
     }
 
     // Lead filter: strict academic year (and optional student_group) so stats match selected year
-    const leadFilter = 'l.academic_year = ?' + (studentGroup && studentGroup !== '' ? ' AND l.student_group = ?' : '');
-    const leadParams = studentGroup && studentGroup !== '' ? [yearNum, studentGroup] : [yearNum];
+    let leadFilter = 'l.academic_year = ?';
+    const leadParams = [yearNum];
+    if (studentGroup && studentGroup !== '') {
+      if (studentGroup === 'Inter') {
+        leadFilter += " AND (l.student_group = 'Inter' OR l.student_group LIKE 'Inter-%')";
+      } else {
+        leadFilter += ' AND l.student_group = ?';
+        leadParams.push(studentGroup);
+      }
+    }
 
     // District filter: by state when stateId provided
     const districtWhere = stateId && stateId !== ''

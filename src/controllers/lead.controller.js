@@ -147,8 +147,12 @@ export const getLeads = async (req, res) => {
       params.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      conditions.push('l.student_group = ?');
-      params.push(req.query.studentGroup);
+      if (req.query.studentGroup === 'Inter') {
+        conditions.push("(l.student_group = 'Inter' OR l.student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('l.student_group = ?');
+        params.push(req.query.studentGroup);
+      }
     }
 
     // Enquiry number search
@@ -1541,7 +1545,7 @@ export const getFilterOptions = async (req, res) => {
     }
     academicYears.sort((a, b) => b - a);
 
-    const studentGroupOptions = ['10th', 'Inter-MPC', 'Inter-BIPC', 'Degree', 'Diploma'];
+    const studentGroupOptions = ['10th', 'Inter', 'Inter-MPC', 'Inter-BIPC', 'Degree', 'Diploma'];
     const studentGroupsFromDb = studentGroupsRows.map(r => r.student_group).filter(Boolean);
     const studentGroups = [...new Set([...studentGroupOptions, ...studentGroupsFromDb])].sort();
 
