@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, count, leadIds, assignNow = true } = req.body;
+    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -86,6 +86,16 @@ export const assignLeads = async (req, res) => {
       if (state) {
         conditions.push('state = ?');
         params.push(state);
+      }
+
+      // Add student group filter if provided
+      if (studentGroup) {
+        if (studentGroup === 'Inter') {
+          conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+        } else {
+          conditions.push('student_group = ?');
+          params.push(studentGroup);
+        }
       }
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -221,7 +231,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, state, academicYear } = req.query;
+    const { mandal, state, academicYear, studentGroup } = req.query;
     const pool = getPool();
 
     // Build filter for unassigned leads
@@ -234,6 +244,16 @@ export const getAssignmentStats = async (req, res) => {
       if (!Number.isNaN(year)) {
         conditions.push('academic_year = ?');
         params.push(year);
+      }
+    }
+
+    // Student group filter (optional)
+    if (studentGroup) {
+      if (studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
       }
     }
 
@@ -251,7 +271,7 @@ export const getAssignmentStats = async (req, res) => {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    // Base filter for total/assigned in same scope (when academic year is selected)
+    // Base filter for total/assigned in same scope (when academic year / student group selected)
     const baseConditions = [];
     const baseParams = [];
     if (academicYear != null && academicYear !== '') {
@@ -259,6 +279,14 @@ export const getAssignmentStats = async (req, res) => {
       if (!Number.isNaN(year)) {
         baseConditions.push('academic_year = ?');
         baseParams.push(year);
+      }
+    }
+    if (studentGroup) {
+      if (studentGroup === 'Inter') {
+        baseConditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        baseConditions.push('student_group = ?');
+        baseParams.push(studentGroup);
       }
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
@@ -270,7 +298,7 @@ export const getAssignmentStats = async (req, res) => {
     );
     const unassignedCount = unassignedCountResult[0].total;
 
-    // Get total leads count (optionally scoped by academic year)
+    // Get total leads count (optionally scoped by academic year and student group)
     const [totalLeadsResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads ${baseWhere}`,
       baseParams
@@ -328,7 +356,7 @@ export const getAssignmentStats = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignedCountForUser = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear } = req.query;
+    const { userId, mandal, state, academicYear, studentGroup } = req.query;
     const pool = getPool();
 
     if (!userId) {
@@ -343,6 +371,14 @@ export const getAssignedCountForUser = async (req, res) => {
       if (!Number.isNaN(year)) {
         conditions.push('academic_year = ?');
         params.push(year);
+      }
+    }
+    if (studentGroup) {
+      if (studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
       }
     }
     if (mandal) {
@@ -378,7 +414,7 @@ export const getAssignedCountForUser = async (req, res) => {
 // @access  Private (Super Admin only)
 export const removeAssignments = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, count } = req.body;
+    const { userId, mandal, state, academicYear, studentGroup, count } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -407,6 +443,14 @@ export const removeAssignments = async (req, res) => {
       if (!Number.isNaN(year)) {
         conditions.push('academic_year = ?');
         params.push(year);
+      }
+    }
+    if (studentGroup) {
+      if (studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
       }
     }
     if (mandal) {
