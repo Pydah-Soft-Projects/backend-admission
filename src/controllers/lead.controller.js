@@ -685,9 +685,11 @@ export const updateLead = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    // Regular users can only update status and notes, Super Admin can update everything
+    // Regular users can only update status and notes; Super Admin can update everything.
+    // Assigned counsellor (user assigned to this lead) can also update profile fields: name, phone, father, village, state, district, mandal.
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
-    
+    const isAssignedCounsellor = !isSuperAdmin && currentLead.assigned_to === userId;
+
     // Store original values for comparison
     const originalLead = {
       name: currentLead.name,
@@ -856,6 +858,43 @@ export const updateLead = async (req, res) => {
       }
     }
 
+    // Assigned counsellor can update profile fields (same as edit form on user lead detail page)
+    if (isAssignedCounsellor) {
+      if (name) {
+        updateFields.push('name = ?');
+        updateValues.push(name.trim());
+      }
+      if (phone) {
+        updateFields.push('phone = ?');
+        updateValues.push(phone.trim());
+      }
+      if (fatherName !== undefined) {
+        updateFields.push('father_name = ?');
+        updateValues.push(fatherName ? String(fatherName).trim() : '');
+      }
+      if (fatherPhone !== undefined) {
+        updateFields.push('father_phone = ?');
+        updateValues.push(fatherPhone ? String(fatherPhone).trim() : '');
+      }
+      if (village !== undefined) {
+        updateFields.push('village = ?');
+        updateValues.push(village ? String(village).trim() : '');
+      }
+      if (state !== undefined) {
+        const trimmedState = typeof state === 'string' ? state.trim() : state;
+        updateFields.push('state = ?');
+        updateValues.push(trimmedState ? trimmedState : 'Andhra Pradesh');
+      }
+      if (district !== undefined) {
+        updateFields.push('district = ?');
+        updateValues.push(district ? String(district).trim() : '');
+      }
+      if (mandal !== undefined) {
+        updateFields.push('mandal = ?');
+        updateValues.push(mandal ? String(mandal).trim() : '');
+      }
+    }
+
     // Both Super Admin and regular users can update status and notes
     if (newLeadStatus && newLeadStatus !== currentLead.lead_status) {
       updateFields.push('lead_status = ?');
@@ -881,8 +920,8 @@ export const updateLead = async (req, res) => {
       updateFields.push('student_group = ?');
       updateValues.push(studentGroup ? String(studentGroup).trim() || null : null);
     }
-    // Clear needs_manual_update when lead is updated (user has reviewed/corrected)
-    if (isSuperAdmin && updateFields.length > 0) {
+    // Clear needs_manual_update when lead is updated (Super Admin or assigned counsellor has reviewed/corrected)
+    if ((isSuperAdmin || isAssignedCounsellor) && updateFields.length > 0) {
       updateFields.push('needs_manual_update = ?');
       updateValues.push(0);
     }
@@ -941,47 +980,44 @@ export const updateLead = async (req, res) => {
       );
     }
 
-    // Log field updates (if any fields were changed by Super Admin)
-    if (isSuperAdmin) {
-      const updatedFields = [];
-      if (name && name !== originalLead.name) updatedFields.push('name');
-      if (phone && phone !== originalLead.phone) updatedFields.push('phone');
-      if (email !== undefined && email !== originalLead.email) updatedFields.push('email');
-      if (fatherName && fatherName !== originalLead.fatherName) updatedFields.push('fatherName');
-      if (fatherPhone && fatherPhone !== originalLead.fatherPhone) updatedFields.push('fatherPhone');
-      if (motherName !== undefined && motherName !== originalLead.motherName) updatedFields.push('motherName');
-      if (courseInterested !== undefined && courseInterested !== originalLead.courseInterested) updatedFields.push('courseInterested');
-      if (village && village !== originalLead.village) updatedFields.push('village');
-      if (district && district !== originalLead.district) updatedFields.push('district');
-      if (mandal && mandal !== originalLead.mandal) updatedFields.push('mandal');
-      if (state !== undefined && state !== originalLead.state) updatedFields.push('state');
-      if (quota && quota !== originalLead.quota) updatedFields.push('quota');
-      if (gender !== undefined && gender !== originalLead.gender) updatedFields.push('gender');
-      if (rank !== undefined && rank !== originalLead.rank) updatedFields.push('rank');
-      if (interCollege !== undefined && interCollege !== originalLead.interCollege) updatedFields.push('interCollege');
-      if (hallTicketNumber !== undefined && hallTicketNumber !== originalLead.hallTicketNumber) updatedFields.push('hallTicketNumber');
-      if (applicationStatus !== undefined && applicationStatus !== originalLead.applicationStatus) updatedFields.push('applicationStatus');
-      
-      // Only create activity log if fields were actually changed (excluding assignment which is already logged)
-      if (updatedFields.length > 0 && !assignedTo) {
-        const activityLogId = uuidv4();
-        await pool.execute(
-          `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-          [
-            activityLogId,
-            req.params.id,
-            'comment',
-            `Student details updated: ${updatedFields.join(', ')}`,
-            userId,
-            JSON.stringify({
-              fieldUpdate: {
-                updatedFields,
-              },
-            }),
-          ]
-        );
-      }
+    // Log field updates (Super Admin or assigned counsellor)
+    const updatedFields = [];
+    if (name && name !== originalLead.name) updatedFields.push('name');
+    if (phone && phone !== originalLead.phone) updatedFields.push('phone');
+    if (email !== undefined && email !== originalLead.email) updatedFields.push('email');
+    if (fatherName !== undefined && String(fatherName || '').trim() !== (originalLead.fatherName || '')) updatedFields.push('fatherName');
+    if (fatherPhone !== undefined && String(fatherPhone || '').trim() !== (originalLead.fatherPhone || '')) updatedFields.push('fatherPhone');
+    if (motherName !== undefined && motherName !== originalLead.motherName) updatedFields.push('motherName');
+    if (courseInterested !== undefined && courseInterested !== originalLead.courseInterested) updatedFields.push('courseInterested');
+    if (village !== undefined && (village || '').trim() !== (originalLead.village || '')) updatedFields.push('village');
+    if (district !== undefined && (district || '').trim() !== (originalLead.district || '')) updatedFields.push('district');
+    if (mandal !== undefined && (mandal || '').trim() !== (originalLead.mandal || '')) updatedFields.push('mandal');
+    if (state !== undefined && state !== originalLead.state) updatedFields.push('state');
+    if (quota && quota !== originalLead.quota) updatedFields.push('quota');
+    if (gender !== undefined && gender !== originalLead.gender) updatedFields.push('gender');
+    if (rank !== undefined && rank !== originalLead.rank) updatedFields.push('rank');
+    if (interCollege !== undefined && interCollege !== originalLead.interCollege) updatedFields.push('interCollege');
+    if (hallTicketNumber !== undefined && hallTicketNumber !== originalLead.hallTicketNumber) updatedFields.push('hallTicketNumber');
+    if (applicationStatus !== undefined && applicationStatus !== originalLead.applicationStatus) updatedFields.push('applicationStatus');
+
+    if ((isSuperAdmin || isAssignedCounsellor) && updatedFields.length > 0 && !assignedTo) {
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          req.params.id,
+          'field_update',
+          `Student details updated: ${updatedFields.join(', ')}`,
+          userId,
+          JSON.stringify({
+            fieldUpdate: {
+              updatedFields,
+            },
+          }),
+        ]
+      );
     }
 
     // Fetch updated lead

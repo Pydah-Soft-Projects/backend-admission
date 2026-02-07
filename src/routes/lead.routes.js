@@ -31,6 +31,7 @@ import {
   getAssignedCountForUser,
   removeAssignments,
   getUserLeadAnalytics,
+  getMyCallAnalytics,
   getOverviewAnalytics,
   getUserAnalytics,
 } from '../controllers/leadAssignment.controller.js';
@@ -83,6 +84,8 @@ router.post('/assign/remove', isSuperAdmin, removeAssignments);
 
 // Analytics routes
 router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
+// Current user's call/SMS/status analytics (Call Activity page) - must be before :userId
+router.get('/analytics/me', getMyCallAnalytics);
 // Allow managers to access user analytics (they can only see their team members)
 router.get('/analytics/users', getUserAnalytics);
 router.get('/analytics/:userId', getUserLeadAnalytics);

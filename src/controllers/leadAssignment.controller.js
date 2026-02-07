@@ -647,6 +647,124 @@ export const getUserLeadAnalytics = async (req, res) => {
   }
 };
 
+// @desc    Get current user's call/SMS/status analytics (for Call Activity page)
+// @route   GET /api/leads/analytics/me
+// @query   startDate (optional), endDate (optional)
+// @access  Private (any authenticated user for their own data)
+export const getMyCallAnalytics = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const { startDate: startDateQ, endDate: endDateQ } = req.query;
+    const pool = getPool();
+
+    const activityDateConditions = [];
+    const activityDateParams = [];
+    if (startDateQ) {
+      const start = new Date(startDateQ);
+      start.setHours(0, 0, 0, 0);
+      activityDateConditions.push('>= ?');
+      activityDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (endDateQ) {
+      const end = new Date(endDateQ);
+      end.setHours(23, 59, 59, 999);
+      activityDateConditions.push('<= ?');
+      activityDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    const callDateClause = activityDateConditions.length > 0
+      ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
+      : '';
+    const smsDateClause = activityDateConditions.length > 0
+      ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
+      : '';
+    const statusChangeDateClause = activityDateConditions.length > 0
+      ? `AND a.created_at ${activityDateConditions.map((c) => c).join(' AND a.created_at ')}`
+      : '';
+
+    const leadWhereClause = 'assigned_to = ?';
+    const leadParams = [userId];
+
+    const [totalAssignedResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads WHERE ${leadWhereClause}`,
+      leadParams
+    );
+    const totalAssigned = totalAssignedResult[0].total;
+
+    const [calls] = await pool.execute(
+      `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
+       FROM communications c
+       LEFT JOIN leads l ON c.lead_id = l.id
+       WHERE c.sent_by = ? AND c.type = 'call' ${callDateClause}
+       ORDER BY c.sent_at DESC`,
+      [userId, ...activityDateParams]
+    ).catch(() => [[]]);
+
+    const totalCalls = calls.length;
+    const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
+    const dailyCallActivityMap = {};
+    calls.forEach((call) => {
+      const d = call.sent_at instanceof Date
+        ? call.sent_at.toISOString().slice(0, 10)
+        : String(call.sent_at || '').slice(0, 10);
+      if (!d) return;
+      if (!dailyCallActivityMap[d]) {
+        dailyCallActivityMap[d] = { date: d, callCount: 0, leads: {} };
+      }
+      dailyCallActivityMap[d].callCount += 1;
+      const lid = call.lead_id || 'unknown';
+      if (!dailyCallActivityMap[d].leads[lid]) {
+        dailyCallActivityMap[d].leads[lid] = {
+          leadId: lid,
+          leadName: call.lead_name || 'Unknown',
+          leadPhone: call.lead_phone || call.contact_number,
+          enquiryNumber: call.enquiry_number || '',
+          callCount: 0,
+        };
+      }
+      dailyCallActivityMap[d].leads[lid].callCount += 1;
+    });
+    const dailyCallActivity = Object.keys(dailyCallActivityMap)
+      .sort()
+      .map((date) => ({
+        date: dailyCallActivityMap[date].date,
+        callCount: dailyCallActivityMap[date].callCount,
+        leads: Object.values(dailyCallActivityMap[date].leads),
+      }));
+
+    const [smsMessages] = await pool.execute(
+      `SELECT c.* FROM communications c
+       WHERE c.sent_by = ? AND c.type = 'sms' ${smsDateClause}
+       ORDER BY c.sent_at DESC`,
+      [userId, ...activityDateParams]
+    ).catch(() => [[]]);
+    const totalSMS = smsMessages.length;
+
+    const [statusChanges] = await pool.execute(
+      `SELECT a.* FROM activity_logs a
+       WHERE a.performed_by = ? AND a.type = 'status_change' ${statusChangeDateClause}
+       ORDER BY a.created_at DESC`,
+      [userId, ...activityDateParams]
+    ).catch(() => []);
+    const totalStatusChanges = statusChanges.length;
+
+    const report = {
+      totalAssigned,
+      calls: {
+        total: totalCalls,
+        averageDuration: totalCalls > 0 ? Math.round(totalCallDuration / totalCalls) : 0,
+        dailyCallActivity,
+      },
+      sms: { total: totalSMS },
+      statusConversions: { total: totalStatusChanges },
+    };
+
+    return successResponse(res, report, 'Call analytics retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error getting my call analytics:', error);
+    return errorResponse(res, error.message || 'Failed to get call analytics', 500);
+  }
+};
+
 export const getOverviewAnalytics = async (req, res) => {
   try {
     if (!hasElevatedAdminPrivileges(req.user.roleName)) {
