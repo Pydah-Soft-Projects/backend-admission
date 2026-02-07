@@ -1201,7 +1201,7 @@ export const getUserAnalytics = async (req, res) => {
         
         // Get calls made by this user in the period - NOTE: Requires communications table
         const callDateClause = activityDateConditions.length > 0
-          ? `AND sent_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
           : '';
         
         const [calls] = await pool.execute(
@@ -1272,7 +1272,7 @@ export const getUserAnalytics = async (req, res) => {
 
         // Get SMS/texts sent by this user in the period - NOTE: Requires communications table
         const smsDateClause = activityDateConditions.length > 0
-          ? `AND sent_at ${activityDateConditions.map((c, i) => c).join(' AND ')}`
+          ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
           : '';
         
         const [smsMessages] = await pool.execute(
