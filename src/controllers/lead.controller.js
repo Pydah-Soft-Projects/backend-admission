@@ -1457,17 +1457,31 @@ export const getAllLeadIds = async (req, res) => {
     }
 
     // Access control
+    const userId = req.user.id || req.user._id;
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      const userId = req.user.id || req.user._id;
       conditions.push('assigned_to = ?');
       params.push(userId);
     }
 
+    // Optionally exclude leads that were "touched today" by the current user (call, SMS, or activity log)
+    const excludeTouchedToday = req.query.excludeTouchedToday === 'true' || req.query.excludeTouchedToday === '1';
+    if (excludeTouchedToday) {
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM communications c
+        WHERE c.lead_id = leads.id AND c.sent_by = ? AND DATE(c.sent_at) = CURDATE()
+      )`);
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM activity_logs a
+        WHERE a.lead_id = leads.id AND a.performed_by = ? AND DATE(a.created_at) = CURDATE()
+      )`);
+      params.push(userId, userId);
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get only IDs
+    // Get IDs ordered by assignment time: latest assigned first (assigned_at DESC), then by id for stability
     const [leadIds] = await pool.execute(
-      `SELECT id FROM leads ${whereClause}`,
+      `SELECT id FROM leads ${whereClause} ORDER BY assigned_at DESC, id ASC`,
       params
     );
 
