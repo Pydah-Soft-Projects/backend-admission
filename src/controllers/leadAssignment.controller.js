@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true } = req.body;
+    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -96,6 +96,15 @@ export const assignLeads = async (req, res) => {
           conditions.push('student_group = ?');
           params.push(studentGroup);
         }
+      }
+
+      // Add school/college (institution) filter if provided – match lead's dynamic_fields school_or_college_name
+      if (institutionName && typeof institutionName === 'string' && institutionName.trim()) {
+        const instParam = institutionName.trim();
+        conditions.push(
+          "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
+        );
+        params.push(instParam);
       }
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -231,7 +240,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, state, academicYear, studentGroup } = req.query;
+    const { mandal, state, academicYear, studentGroup, institutionName, forBreakdown } = req.query;
     const pool = getPool();
 
     // Build filter for unassigned leads
@@ -267,6 +276,15 @@ export const getAssignmentStats = async (req, res) => {
     if (state) {
       conditions.push('state = ?');
       params.push(state);
+    }
+
+    // Add school/college (institution) filter if provided
+    if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
+      const instParam = String(institutionName).trim();
+      conditions.push(
+        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
+      );
+      params.push(instParam);
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -327,21 +345,52 @@ export const getAssignmentStats = async (req, res) => {
       [...params]
     );
 
+    const payload = {
+      totalLeads,
+      assignedCount,
+      unassignedCount,
+      mandalBreakdown: mandalBreakdown.map((item) => ({
+        mandal: item.mandal || 'Unknown',
+        count: item.count,
+      })),
+      stateBreakdown: stateBreakdown.map((item) => ({
+        state: item.state || 'Unknown',
+        count: item.count,
+      })),
+    };
+
+    // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
+    if (forBreakdown === 'school' || forBreakdown === 'college') {
+      const table = forBreakdown === 'school' ? 'schools' : 'colleges';
+      const [institutions] = await pool.execute(
+        `SELECT id, name FROM ${table} WHERE is_active = 1 ORDER BY name ASC`
+      );
+      const institutionBreakdown = [];
+      for (const inst of institutions || []) {
+        const instName = (inst.name || '').trim();
+        if (!instName) continue;
+        const instConditions = [...conditions];
+        const instParams = [...params];
+        instConditions.push(
+          "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
+        );
+        instParams.push(instName);
+        const instWhere = `WHERE ${instConditions.join(' AND ')}`;
+        const [countResult] = await pool.execute(
+          `SELECT COUNT(*) as total FROM leads ${instWhere}`,
+          instParams
+        );
+        const total = countResult[0].total;
+        if (total > 0) {
+          institutionBreakdown.push({ id: inst.id, name: instName, count: total });
+        }
+      }
+      payload.institutionBreakdown = institutionBreakdown;
+    }
+
     return successResponse(
       res,
-      {
-        totalLeads,
-        assignedCount,
-        unassignedCount,
-        mandalBreakdown: mandalBreakdown.map((item) => ({
-          mandal: item.mandal || 'Unknown',
-          count: item.count,
-        })),
-        stateBreakdown: stateBreakdown.map((item) => ({
-          state: item.state || 'Unknown',
-          count: item.count,
-        })),
-      },
+      payload,
       'Assignment statistics retrieved successfully',
       200
     );
