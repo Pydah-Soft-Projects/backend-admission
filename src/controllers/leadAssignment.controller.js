@@ -529,10 +529,12 @@ export const removeAssignments = async (req, res) => {
 
 // @desc    Get user lead analytics
 // @route   GET /api/leads/analytics/:userId
+// @query   academicYear (optional), studentGroup (optional), mandal (optional)
 // @access  Private
 export const getUserLeadAnalytics = async (req, res) => {
   try {
     const { userId } = req.params;
+    const { academicYear, studentGroup, mandal } = req.query;
     const requestingUserId = req.user.id || req.user._id;
     const pool = getPool();
 
@@ -541,10 +543,34 @@ export const getUserLeadAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    // Get total leads assigned to user
+    // Build optional filters (assigned_to is always applied)
+    const conditions = ['assigned_to = ?'];
+    const params = [userId];
+    if (academicYear != null && academicYear !== '') {
+      const yearNum = parseInt(academicYear, 10);
+      if (!Number.isNaN(yearNum)) {
+        conditions.push('academic_year = ?');
+        params.push(yearNum);
+      }
+    }
+    if (studentGroup) {
+      if (studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
+      }
+    }
+    if (mandal) {
+      conditions.push('mandal = ?');
+      params.push(mandal);
+    }
+    const whereClause = conditions.join(' AND ');
+
+    // Get total leads assigned to user (with optional filters)
     const [totalLeadsResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ?',
-      [userId]
+      `SELECT COUNT(*) as total FROM leads WHERE ${whereClause}`,
+      params
     );
     const totalLeads = totalLeadsResult[0].total;
 
@@ -552,31 +578,31 @@ export const getUserLeadAnalytics = async (req, res) => {
     const [statusBreakdown] = await pool.execute(
       `SELECT lead_status, COUNT(*) as count 
        FROM leads 
-       WHERE assigned_to = ? 
+       WHERE ${whereClause}
        GROUP BY lead_status 
        ORDER BY count DESC`,
-      [userId]
+      params
     );
 
     // Get leads by mandal
     const [mandalBreakdown] = await pool.execute(
       `SELECT mandal, COUNT(*) as count 
        FROM leads 
-       WHERE assigned_to = ? 
+       WHERE ${whereClause}
        GROUP BY mandal 
        ORDER BY count DESC 
        LIMIT 10`,
-      [userId]
+      params
     );
 
     // Get leads by state
     const [stateBreakdown] = await pool.execute(
       `SELECT state, COUNT(*) as count 
        FROM leads 
-       WHERE assigned_to = ? 
+       WHERE ${whereClause}
        GROUP BY state 
        ORDER BY count DESC`,
-      [userId]
+      params
     );
 
     // Convert status breakdown to object
@@ -588,10 +614,10 @@ export const getUserLeadAnalytics = async (req, res) => {
     // Get recent activity (last 7 days)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
+    const recentParams = [...params, sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ')];
     const [recentLeadsResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM leads WHERE assigned_to = ? AND updated_at >= ?',
-      [userId, sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ')]
+      `SELECT COUNT(*) as total FROM leads WHERE ${whereClause} AND updated_at >= ?`,
+      recentParams
     );
     const recentLeads = recentLeadsResult[0].total;
 
