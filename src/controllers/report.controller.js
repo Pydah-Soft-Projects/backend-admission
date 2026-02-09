@@ -1,5 +1,6 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { findBestMatch } from '../utils/fuzzyMatch.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 // @desc    Get daily call reports per user
@@ -484,9 +485,18 @@ export const getLeadsAbstract = async (req, res) => {
       districtQueryParams
     ).catch(() => [[]]);
 
+    const masterDistrictNamesNorm = (districtRows || []).map((d) => norm(d.name));
+    const districtTotals = new Map();
+    (districtRows || []).forEach((d) => districtTotals.set(norm(d.name), 0));
+    for (const [leadKey, cnt] of districtCountMap) {
+      const best = findBestMatch(leadKey, masterDistrictNamesNorm, 0.85);
+      if (best && districtTotals.has(best)) {
+        districtTotals.set(best, districtTotals.get(best) + cnt);
+      }
+    }
     const districtBreakdown = (districtRows || []).map((d) => {
       const name = d.name || '';
-      const count = districtCountMap.get(norm(name)) || 0;
+      const count = districtTotals.get(norm(name)) || 0;
       return { id: d.id, name, count: Number(count) };
     }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
 
@@ -525,9 +535,18 @@ export const getLeadsAbstract = async (req, res) => {
           [districtId]
         ).catch(() => [[]]);
 
+        const masterMandalNamesNorm = (mandalRows || []).map((m) => norm(m.name));
+        const mandalTotals = new Map();
+        (mandalRows || []).forEach((m) => mandalTotals.set(norm(m.name), 0));
+        for (const [leadKey, cnt] of mandalCountMap) {
+          const best = findBestMatch(leadKey, masterMandalNamesNorm, 0.85);
+          if (best && mandalTotals.has(best)) {
+            mandalTotals.set(best, mandalTotals.get(best) + cnt);
+          }
+        }
         mandalBreakdown = (mandalRows || []).map((m) => {
           const name = m.name || '';
-          const count = mandalCountMap.get(norm(name)) || 0;
+          const count = mandalTotals.get(norm(name)) || 0;
           return { id: m.id, name, count: Number(count) };
         }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
 

@@ -6,6 +6,7 @@ import Papa from 'papaparse';
 import PQueue from 'p-queue';
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { findBestMatch } from '../utils/fuzzyMatch.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const UPLOAD_SESSION_TTL_MS = 1000 * 60 * 30; // 30 minutes
@@ -753,7 +754,11 @@ const processImportJob = async (jobId) => {
         if (!districtsByStateId.has(stateKey)) {
           districtsByStateId.set(stateKey, new Map());
         }
-        districtsByStateId.get(stateKey).set(norm(r.name), String(r.id));
+        const dMap = districtsByStateId.get(stateKey);
+        const keyNorm = norm(r.name);
+        const keyStripped = stripDistrictSuffix(keyNorm) || keyNorm;
+        dMap.set(keyNorm, String(r.id));
+        if (keyStripped !== keyNorm) dMap.set(keyStripped, String(r.id));
       });
 
       const [mandalsRows] = await pool.execute('SELECT id, district_id, name FROM mandals WHERE is_active = 1');
@@ -763,7 +768,11 @@ const processImportJob = async (jobId) => {
         if (!mandalsByDistrictId.has(distKey)) {
           mandalsByDistrictId.set(distKey, new Set());
         }
-        mandalsByDistrictId.get(distKey).add(norm(r.name));
+        const mSet = mandalsByDistrictId.get(distKey);
+        const keyNorm = norm(r.name);
+        const keyStripped = stripMandalSuffix(keyNorm) || keyNorm;
+        mSet.add(keyNorm);
+        if (keyStripped !== keyNorm) mSet.add(keyStripped);
       });
 
       const [schoolsRows] = await pool.execute('SELECT name FROM schools WHERE is_active = 1');
@@ -819,10 +828,7 @@ const processImportJob = async (jobId) => {
     };
 
     const checkNeedsManualUpdate = (doc, lookup) => {
-      // Ambiguous student group (e.g. "Inter" without MPC/BIPC) needs manual update so counsellor can set Inter-MPC or Inter-BIPC
-      const sg = (doc.studentGroup || '').toString().trim();
-      if (sg.toLowerCase() === 'inter') return true;
-
+      // Only district/mandal mismatch triggers needs_manual_update (Inter ambiguity excluded per request)
       const stateKey = norm(doc.state || '');
       if (!stateKey) return true;
       // Allow "Andhra Pradesh (AP)" or "AP" to match "Andhra Pradesh"
@@ -835,28 +841,27 @@ const processImportJob = async (jobId) => {
       if (!districtKeyRaw) return true;
       const districtKey = stripDistrictSuffix(districtKeyRaw) || districtKeyRaw;
       const districtMap = lookup.districtsByStateId.get(String(stateId));
-      const districtId = districtMap?.get(districtKey) ?? districtMap?.get(districtKeyRaw);
-      if (!districtMap || !districtId) return true;
+      if (!districtMap) return true;
+      let districtId = districtMap.get(districtKey) ?? districtMap.get(districtKeyRaw);
+      if (!districtId) {
+        const candidates = Array.from(districtMap.keys());
+        const bestDistrict = findBestMatch(districtKey, candidates, 0.80);
+        districtId = bestDistrict ? districtMap.get(bestDistrict) : null;
+      }
+      if (!districtId) return true;
 
       const mandalKeyRaw = norm(doc.mandal || '');
       if (!mandalKeyRaw) return true;
       const mandalKey = stripMandalSuffix(mandalKeyRaw) || mandalKeyRaw;
       const mandalSet = lookup.mandalsByDistrictId.get(String(districtId));
-      const mandalMatches = mandalSet && (mandalSet.has(mandalKey) || mandalSet.has(mandalKeyRaw));
+      let mandalMatches = mandalSet && (mandalSet.has(mandalKey) || mandalSet.has(mandalKeyRaw));
+      if (!mandalMatches && mandalSet && mandalSet.size > 0) {
+        const bestMandal = findBestMatch(mandalKey, Array.from(mandalSet), 0.80);
+        mandalMatches = !!bestMandal;
+      }
       if (!mandalMatches) return true;
 
-      const dyn = doc.dynamicFields || {};
-      const schoolOrCollege = dyn.school_or_college_name || dyn.schoolOrCollegeName;
-      const scTrimmed = typeof schoolOrCollege === 'string' ? schoolOrCollege.trim() : '';
-      if (scTrimmed) {
-        const scKey = norm(schoolOrCollege);
-        const studentGroup = (doc.studentGroup || '').toString().toLowerCase().trim();
-        if (studentGroup === '10th') {
-          if (lookup.schoolNames.size > 0 && !lookup.schoolNames.has(scKey)) return true;
-        } else {
-          if (lookup.collegeNames.size > 0 && !lookup.collegeNames.has(scKey)) return true;
-        }
-      }
+      // School/college name mismatch is excluded from needs_manual_update; only district and mandal trigger the tag
       return false;
     };
 
@@ -921,14 +926,17 @@ const processImportJob = async (jobId) => {
             }
           }
 
-      // academic_year: parse as number (e.g. 2024, 2025)
+      // academic_year: parse as number (e.g. 2024, 2025); default 2026 if not provided
+      const DEFAULT_ACADEMIC_YEAR = 2026;
       if (normalizedLead.academicYear !== undefined && normalizedLead.academicYear !== null && normalizedLead.academicYear !== '') {
         const yearNum = Number(normalizedLead.academicYear);
         if (!Number.isNaN(yearNum) && yearNum >= 2000 && yearNum <= 2100) {
           normalizedLead.academicYear = yearNum;
         } else {
-          delete normalizedLead.academicYear;
+          normalizedLead.academicYear = DEFAULT_ACADEMIC_YEAR;
         }
+      } else {
+        normalizedLead.academicYear = DEFAULT_ACADEMIC_YEAR;
       }
 
       // student_group: normalize variants (10, X -> 10th; Inter MPC -> Inter-MPC; Inter only -> Inter for manual update)
