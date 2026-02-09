@@ -422,9 +422,12 @@ export const getConversionReports = async (req, res) => {
   }
 };
 
-// @desc    Get leads abstract (district, mandal, school, college breakdown) for an academic year
-// Uses master tables (districts, mandals, schools, colleges) and shows lead count mapped to each
-// Optional: stateId filters districts/mandals by state; districtId filters mandals by district
+// Helper: normalize string for case-insensitive matching (leads store names with possible variations)
+const norm = (s) => (s == null || s === '' ? '' : String(s).toLowerCase().trim());
+
+// @desc    Get leads abstract (district, mandal breakdown) for an academic year
+// Optimized: pre-aggregate leads with GROUP BY (index-friendly), map to master in app
+// Mandal query runs ONLY when districtId is provided to avoid heavy full-state mandal scan
 // @route   GET /api/reports/leads-abstract
 // @access  Private (Super Admin only)
 export const getLeadsAbstract = async (req, res) => {
@@ -445,93 +448,92 @@ export const getLeadsAbstract = async (req, res) => {
       return errorResponse(res, 'Invalid academic year', 400);
     }
 
-    // Lead filter: strict academic year (and optional student_group) so stats match selected year
-    let leadFilter = 'l.academic_year = ?';
+    let leadWhere = 'academic_year = ?';
     const leadParams = [yearNum];
     if (studentGroup && studentGroup !== '') {
       if (studentGroup === 'Inter') {
-        leadFilter += " AND (l.student_group = 'Inter' OR l.student_group LIKE 'Inter-%')";
+        leadWhere += " AND (student_group = 'Inter' OR student_group LIKE 'Inter-%')";
       } else {
-        leadFilter += ' AND l.student_group = ?';
+        leadWhere += ' AND student_group = ?';
         leadParams.push(studentGroup);
       }
     }
 
-    // District filter: by state when stateId provided
-    const districtWhere = stateId && stateId !== ''
-      ? 'd.is_active = 1 AND d.state_id = ?'
-      : 'd.is_active = 1';
-    const districtParams = stateId && stateId !== '' ? [...leadParams, stateId] : [...leadParams];
-
-    // District-wise: from master districts, count leads mapped by district name (case-insensitive trim) or by district id (if lead stores id)
-    const districtMatchCondition = `(LOWER(TRIM(l.district)) = LOWER(TRIM(d.name)) OR l.district = d.id) AND ${leadFilter}`;
-    const [districtRows] = await pool.execute(
-      `SELECT d.id, d.name, COUNT(l.id) AS count
-       FROM districts d
-       LEFT JOIN leads l ON ${districtMatchCondition}
-       WHERE ${districtWhere}
-       GROUP BY d.id, d.name
-       ORDER BY count DESC, d.name ASC`,
-      districtParams
+    // 1) Pre-aggregate leads by district - single scan, uses idx_leads_academic_year
+    const [leadDistrictAgg] = await pool.execute(
+      `SELECT TRIM(district) AS district, COUNT(*) AS cnt
+       FROM leads
+       WHERE ${leadWhere} AND district IS NOT NULL AND district != ''
+       GROUP BY TRIM(district)`,
+      leadParams
     ).catch(() => [[]]);
-    const districtBreakdown = (districtRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
+
+    const districtCountMap = new Map();
+    (leadDistrictAgg || []).forEach((r) => {
+      const key = norm(r.district);
+      if (key) districtCountMap.set(key, (districtCountMap.get(key) || 0) + Number(r.cnt || 0));
+    });
+
+    // 2) Fetch districts for state (or all if no state)
+    const districtWhere = stateId && stateId !== ''
+      ? 'state_id = ? AND is_active = 1'
+      : 'is_active = 1';
+    const districtQueryParams = stateId && stateId !== '' ? [stateId] : [];
+    const [districtRows] = await pool.execute(
+      `SELECT id, name FROM districts WHERE ${districtWhere} ORDER BY name ASC`,
+      districtQueryParams
+    ).catch(() => [[]]);
+
+    const districtBreakdown = (districtRows || []).map((d) => {
+      const name = d.name || '';
+      const count = districtCountMap.get(norm(name)) || 0;
+      return { id: d.id, name, count: Number(count) };
+    }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+
     const maxDistrict = districtBreakdown.length > 0 ? districtBreakdown[0].name : null;
 
-    // Mandal filter: by district when districtId provided; else by state when stateId provided
-    let mandalWhere = 'm.is_active = 1';
-    const mandalParams = [...leadParams];
+    let mandalBreakdown = [];
+    let maxMandal = null;
+
+    // 3) Mandal stats ONLY when district is selected - avoids 600+ mandals × leads scan
     if (districtId && districtId !== '') {
-      mandalWhere += ' AND m.district_id = ?';
-      mandalParams.push(districtId);
-    } else if (stateId && stateId !== '') {
-      mandalWhere += ' AND m.district_id IN (SELECT id FROM districts WHERE state_id = ? AND is_active = 1)';
-      mandalParams.push(stateId);
+      const [districtNameRow] = await pool.execute(
+        'SELECT name FROM districts WHERE id = ? AND is_active = 1',
+        [districtId]
+      ).catch(() => [[]]);
+
+      const districtName = districtNameRow?.[0]?.name || '';
+      if (districtName) {
+        const mandalLeadParams = [...leadParams, districtName];
+        const mandalLeadWhere = `${leadWhere} AND district = ? AND mandal IS NOT NULL AND mandal != ''`;
+        const [leadMandalAgg] = await pool.execute(
+          `SELECT TRIM(mandal) AS mandal, COUNT(*) AS cnt
+           FROM leads
+           WHERE ${mandalLeadWhere}
+           GROUP BY TRIM(mandal)`,
+          mandalLeadParams
+        ).catch(() => [[]]);
+
+        const mandalCountMap = new Map();
+        (leadMandalAgg || []).forEach((r) => {
+          const key = norm(r.mandal);
+          if (key) mandalCountMap.set(key, (mandalCountMap.get(key) || 0) + Number(r.cnt || 0));
+        });
+
+        const [mandalRows] = await pool.execute(
+          'SELECT id, name FROM mandals WHERE district_id = ? AND is_active = 1 ORDER BY name ASC',
+          [districtId]
+        ).catch(() => [[]]);
+
+        mandalBreakdown = (mandalRows || []).map((m) => {
+          const name = m.name || '';
+          const count = mandalCountMap.get(norm(name)) || 0;
+          return { id: m.id, name, count: Number(count) };
+        }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+
+        maxMandal = mandalBreakdown.length > 0 ? mandalBreakdown[0].name : null;
+      }
     }
-
-    // Mandal-wise: from master mandals, count leads mapped by mandal name (case-insensitive trim) or by mandal id (if lead stores id)
-    const mandalMatchCondition = `(LOWER(TRIM(l.mandal)) = LOWER(TRIM(m.name)) OR l.mandal = m.id) AND ${leadFilter}`;
-    const [mandalRows] = await pool.execute(
-      `SELECT m.id, m.name, COUNT(l.id) AS count
-       FROM mandals m
-       LEFT JOIN leads l ON ${mandalMatchCondition}
-       WHERE ${mandalWhere}
-       GROUP BY m.id, m.name
-       ORDER BY count DESC, m.name ASC`,
-      mandalParams
-    ).catch(() => [[]]);
-    const mandalBreakdown = (mandalRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
-    const maxMandal = mandalBreakdown.length > 0 ? mandalBreakdown[0].name : null;
-
-    // Lead school/college name from dynamic_fields for JOIN
-    const leadSchoolCollegeExpr = `LOWER(TRIM(COALESCE(
-        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.school_or_college_name')), ''),
-        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.schoolOrCollegeName')), ''),
-        ''
-      )))`;
-
-    // School-wise: from master schools, count leads whose school_or_college_name matches (case-insensitive trim)
-    const [schoolRows] = await pool.execute(
-      `SELECT s.id, s.name, COUNT(l.id) AS count
-       FROM schools s
-       LEFT JOIN leads l ON ${leadSchoolCollegeExpr} = LOWER(TRIM(s.name)) AND ${leadFilter}
-       WHERE s.is_active = 1
-       GROUP BY s.id, s.name
-       ORDER BY count DESC, s.name ASC`,
-      [...leadParams]
-    ).catch(() => [[]]);
-    const schoolBreakdown = (schoolRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
-
-    // College-wise: from master colleges, count leads whose school_or_college_name matches (case-insensitive trim)
-    const [collegeRows] = await pool.execute(
-      `SELECT c.id, c.name, COUNT(l.id) AS count
-       FROM colleges c
-       LEFT JOIN leads l ON ${leadSchoolCollegeExpr} = LOWER(TRIM(c.name)) AND ${leadFilter}
-       WHERE c.is_active = 1
-       GROUP BY c.id, c.name
-       ORDER BY count DESC, c.name ASC`,
-      [...leadParams]
-    ).catch(() => [[]]);
-    const collegeBreakdown = (collegeRows || []).map((r) => ({ id: r.id, name: r.name || '', count: Number(r.count || 0) }));
 
     return successResponse(
       res,
@@ -542,8 +544,6 @@ export const getLeadsAbstract = async (req, res) => {
         maxDistrict,
         mandalBreakdown,
         maxMandal,
-        schoolBreakdown,
-        collegeBreakdown,
       },
       'Leads abstract retrieved successfully',
       200
