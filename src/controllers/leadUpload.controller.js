@@ -174,6 +174,7 @@ const aliasPairs = [
   ['mandal/town', 'mandal'],
   ['mandal town', 'mandal'],
   ['mandal name', 'mandal'],
+  ['stu mandal', 'mandal'],
   ['taluk', 'mandal'],
   ['mandal taluk', 'mandal'],
   ['district name', 'district'],
@@ -206,6 +207,7 @@ const aliasPairs = [
   ['student group', 'studentGroup'],
   ['studentgroup', 'studentGroup'],
   ['student_group', 'studentGroup'],
+  ['academic stream', 'studentGroup'],
   ['group', 'studentGroup'],
   // school or college name
   ['school or college name', 'schoolOrCollegeName'],
@@ -788,6 +790,10 @@ const processImportJob = async (jobId) => {
       if (lower === '10th' || lower === '10' || lower === 'x' || lower === 'ssc' ||
           lower === 'class 10' || lower === 'class 10th' || lower === 's.s.c' || lower === 's.sc') {
         return '10th';
+      }
+      // Science -> Inter (from Academic Stream column)
+      if (lower === 'science') {
+        return 'Inter';
       }
       // Inter-MPC variants (must check before generic "Inter")
       if (lower === 'inter-mpc' || lower === 'inter mpc' || lower === 'intermpc' ||
