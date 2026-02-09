@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     designation VARCHAR(100),
     permissions JSON DEFAULT (JSON_OBJECT()),
     is_active BOOLEAN DEFAULT TRUE NOT NULL,
+    time_tracking_enabled BOOLEAN DEFAULT TRUE NOT NULL COMMENT 'When FALSE, user can only access Settings until they enable tracking',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (managed_by) REFERENCES users(id) ON DELETE SET NULL,
@@ -26,6 +27,22 @@ CREATE TABLE IF NOT EXISTS users (
     INDEX idx_users_is_active (is_active),
     INDEX idx_users_managed_by (managed_by),
     INDEX idx_users_is_manager (is_manager)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- 2a. USER LOGIN LOGS TABLE (time tracking)
+-- ============================================
+CREATE TABLE IF NOT EXISTS user_login_logs (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    event_type VARCHAR(20) NOT NULL CHECK (event_type IN ('login', 'logout', 'tracking_enabled', 'tracking_disabled')),
+    ip_address VARCHAR(45) NULL,
+    user_agent VARCHAR(500) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_user_login_logs_user_id (user_id),
+    INDEX idx_user_login_logs_created_at (created_at DESC),
+    INDEX idx_user_login_logs_user_created (user_id, created_at DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

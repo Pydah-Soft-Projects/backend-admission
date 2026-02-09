@@ -25,6 +25,9 @@ const sanitizePermissions = (permissions = {}) => {
 // Helper function to format user data from SQL to camelCase
 const formatUser = (userData) => {
   if (!userData) return null;
+  const timeTrackingEnabled = userData.time_tracking_enabled === undefined
+    ? true
+    : (userData.time_tracking_enabled === 1 || userData.time_tracking_enabled === true);
   return {
     id: userData.id,
     _id: userData.id, // Keep _id for backward compatibility
@@ -34,10 +37,11 @@ const formatUser = (userData) => {
     managedBy: userData.managed_by,
     isManager: userData.is_manager === 1 || userData.is_manager === true,
     designation: userData.designation,
-    permissions: typeof userData.permissions === 'string' 
-      ? JSON.parse(userData.permissions) 
+    permissions: typeof userData.permissions === 'string'
+      ? JSON.parse(userData.permissions)
       : userData.permissions || {},
     isActive: userData.is_active === 1 || userData.is_active === true,
+    timeTrackingEnabled,
     createdAt: userData.created_at,
     updatedAt: userData.updated_at,
   };
@@ -51,7 +55,7 @@ export const getUsers = async (req, res) => {
     const pool = getPool();
     
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users ORDER BY created_at DESC'
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
     );
 
     const formattedUsers = users.map(formatUser);
@@ -79,7 +83,7 @@ export const getUser = async (req, res) => {
     const pool = getPool();
     
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
     );
 

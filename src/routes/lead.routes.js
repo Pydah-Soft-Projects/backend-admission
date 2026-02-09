@@ -35,7 +35,7 @@ import {
   getOverviewAnalytics,
   getUserAnalytics,
 } from '../controllers/leadAssignment.controller.js';
-import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
+import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
@@ -59,6 +59,7 @@ router.get('/filters/options/public', getPublicFilterOptions);
 
 // All other routes require authentication
 router.use(protect);
+router.use(requireTimeTrackingEnabled);
 
 // Filter options route (available to all authenticated users)
 router.get('/filters/options', getFilterOptions);

@@ -7,12 +7,13 @@ import {
   notifyTeam,
   getTeamAnalyticsForAdmin,
 } from '../controllers/manager.controller.js';
-import { protect } from '../middleware/auth.middleware.js';
+import { protect, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(protect);
+router.use(requireTimeTrackingEnabled);
 
 // Get manager's team members
 router.get('/team', getTeamMembers);

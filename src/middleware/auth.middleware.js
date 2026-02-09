@@ -31,7 +31,7 @@ export const protect = async (req, res, next) => {
 
       // Get user from SQL database
       const [users] = await pool.execute(
-        'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+        'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
         [decoded.id]
       );
 
@@ -40,6 +40,9 @@ export const protect = async (req, res, next) => {
       }
 
       const userData = users[0];
+      const timeTrackingEnabled = userData.time_tracking_enabled === undefined
+        ? true
+        : (userData.time_tracking_enabled === 1 || userData.time_tracking_enabled === true);
 
       // Format user object to match expected structure (camelCase)
       req.user = {
@@ -51,10 +54,11 @@ export const protect = async (req, res, next) => {
         managedBy: userData.managed_by,
         isManager: userData.is_manager === 1 || userData.is_manager === true,
         designation: userData.designation,
-        permissions: typeof userData.permissions === 'string' 
-          ? JSON.parse(userData.permissions) 
+        permissions: typeof userData.permissions === 'string'
+          ? JSON.parse(userData.permissions)
           : userData.permissions || {},
         isActive: userData.is_active === 1 || userData.is_active === true,
+        timeTrackingEnabled,
         createdAt: userData.created_at,
         updatedAt: userData.updated_at,
       };
@@ -82,6 +86,25 @@ export const isSuperAdmin = (req, res, next) => {
     return errorResponse(res, 'Access denied. Super Admin only', 403);
   }
 
+  next();
+};
+
+// Check if time tracking is enabled for User/Counsellor/Manager dashboards
+// Super Admin, Sub Super Admin, Data Entry User are not restricted by this setting
+export const requireTimeTrackingEnabled = (req, res, next) => {
+  if (!req.user) {
+    return errorResponse(res, 'Not authenticated', 401);
+  }
+  const { roleName, isManager, timeTrackingEnabled } = req.user;
+  const isAdminOrDataEntry = roleName === 'Super Admin' || roleName === 'Sub Super Admin' || roleName === 'Data Entry User';
+  if (isAdminOrDataEntry) {
+    return next();
+  }
+  const isUserOrCounsellor = roleName === 'User' || roleName === 'Student Counselor';
+  const isManagerRole = isManager === true;
+  if ((isUserOrCounsellor || isManagerRole) && timeTrackingEnabled === false) {
+    return errorResponse(res, 'Login and logout time tracking must be enabled to access this resource. Please enable it in Settings.', 403);
+  }
   next();
 };
 

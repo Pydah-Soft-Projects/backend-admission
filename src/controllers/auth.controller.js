@@ -31,7 +31,7 @@ export const login = async (req, res) => {
     // Check for user in SQL database
     const normalizedEmail = email.toLowerCase().trim();
     const [users] = await pool.execute(
-      'SELECT id, name, email, password, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE email = ?',
+      'SELECT id, name, email, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE email = ?',
       [normalizedEmail]
     );
 
@@ -86,6 +86,10 @@ export const login = async (req, res) => {
       permissions = {};
     }
 
+    const timeTrackingEnabled = userData.time_tracking_enabled === undefined
+      ? true
+      : (userData.time_tracking_enabled === 1 || userData.time_tracking_enabled === true);
+
     const user = {
       id: userData.id,
       _id: userData.id, // Keep _id for backward compatibility
@@ -97,6 +101,7 @@ export const login = async (req, res) => {
       designation: userData.designation,
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
+      timeTrackingEnabled,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };
@@ -138,7 +143,7 @@ export const getMe = async (req, res) => {
 
     // Get user from SQL database
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.user.id || req.user._id]
     );
 
@@ -163,6 +168,10 @@ export const getMe = async (req, res) => {
       permissions = {};
     }
 
+    const timeTrackingEnabled = userData.time_tracking_enabled === undefined
+      ? true
+      : (userData.time_tracking_enabled === 1 || userData.time_tracking_enabled === true);
+
     const user = {
       id: userData.id,
       _id: userData.id, // Keep _id for backward compatibility
@@ -174,6 +183,7 @@ export const getMe = async (req, res) => {
       designation: userData.designation,
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
+      timeTrackingEnabled,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };
@@ -189,8 +199,6 @@ export const getMe = async (req, res) => {
 // @access  Private
 export const logout = async (req, res) => {
   try {
-    // Since we're using JWT, logout is handled on the client side
-    // But we can add token blacklisting here if needed
     return successResponse(res, null, 'Logged out successfully', 200);
   } catch (error) {
     return errorResponse(res, error.message || 'Logout failed', 500);
@@ -255,7 +263,7 @@ export const createSSOSession = async (req, res) => {
 
     // Find user in admissions database
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
       [userId]
     );
 
@@ -281,6 +289,10 @@ export const createSSOSession = async (req, res) => {
       permissions = {};
     }
 
+    const timeTrackingEnabled = userData.time_tracking_enabled === undefined
+      ? true
+      : (userData.time_tracking_enabled === 1 || userData.time_tracking_enabled === true);
+
     const user = {
       id: userData.id,
       _id: userData.id, // Keep _id for backward compatibility
@@ -292,6 +304,7 @@ export const createSSOSession = async (req, res) => {
       designation: userData.designation,
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
+      timeTrackingEnabled,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };
