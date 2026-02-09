@@ -155,6 +155,19 @@ export const getLeads = async (req, res) => {
       }
     }
 
+    // Touched today: leads with at least one comment or status_change activity for today by current user
+    const touchedToday = req.query.touchedToday === 'true' || req.query.touchedToday === '1';
+    if (touchedToday) {
+      const touchedUserId = req.user.id || req.user._id;
+      conditions.push(`EXISTS (
+        SELECT 1 FROM activity_logs a
+        WHERE a.lead_id = l.id AND a.performed_by = ?
+        AND DATE(a.created_at) = CURDATE()
+        AND a.type IN ('status_change', 'comment')
+      )`);
+      params.push(touchedUserId);
+    }
+
     // Enquiry number search
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
