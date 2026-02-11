@@ -42,7 +42,7 @@ export const login = async (req, res) => {
       console.log('Detected mobile number login');
       query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE mobile_number = ?';
       // For mobile, we use the input as is (trim only)
-      queryParams = [email.trim()]; 
+      queryParams = [email.trim()];
     }
 
     const [users] = await pool.execute(query, queryParams);
@@ -53,13 +53,13 @@ export const login = async (req, res) => {
     }
 
     const userData = users[0];
-    
+
     // Validate userData structure
     if (!userData || !userData.id || !userData.email || !userData.password) {
       console.error('Invalid user data structure:', userData);
       return errorResponse(res, 'Database error: Invalid user data', 500);
     }
-    
+
     console.log('User found:', userData.email, 'Active:', userData.is_active);
 
     // Check if user is active (MySQL returns 0/1 for BOOLEAN, handle both)
@@ -73,7 +73,7 @@ export const login = async (req, res) => {
       console.error('User has no password set:', userData.email);
       return errorResponse(res, 'Database error: User password not found', 500);
     }
-    
+
     const isMatch = await bcrypt.compare(password, userData.password);
 
     if (!isMatch) {
@@ -124,7 +124,7 @@ export const login = async (req, res) => {
       console.error('JWT_SECRET is not set in environment variables');
       return errorResponse(res, 'Server configuration error', 500);
     }
-    
+
     const token = generateToken(user.id);
 
     console.log('Login successful for user:', user.email);
@@ -234,7 +234,7 @@ export const createSSOSession = async (req, res) => {
 
     // Optional: Verify the SSO token again with CRM backend for extra security
     const CRM_BACKEND_URL = process.env.CRM_BACKEND_URL || 'http://localhost:3000';
-    
+
     try {
       const verifyResponse = await axios.post(`${CRM_BACKEND_URL}/auth/verify-token`, {
         encryptedToken: ssoToken,
@@ -364,9 +364,9 @@ export const checkUser = async (req, res) => {
       return errorResponse(res, 'No user found with this mobile number', 404);
     }
 
-    return successResponse(res, { 
-      exists: true, 
-      name: users[0].name 
+    return successResponse(res, {
+      exists: true,
+      name: users[0].name
     }, 'User found');
 
   } catch (error) {
@@ -400,9 +400,10 @@ export const resetPasswordDirectly = async (req, res) => {
 
     const user = users[0];
 
-    // Generate Random 8-char Password
-    const newPassword = Math.random().toString(36).slice(-8);
-    
+    // Generate Random 3-digit Password with PYD prefix
+    const randomNum = Math.floor(100 + Math.random() * 900); // 100 to 999
+    const newPassword = `PYD${randomNum}`;
+
     // Hash new password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
@@ -415,18 +416,18 @@ export const resetPasswordDirectly = async (req, res) => {
 
     // Send confirmation SMS with new password
     const loginUrl = process.env.FRONTEND_URL || 'http://admissions.pydah.edu.in';
-    
+
     try {
-        await bulkSmsService.sendPasswordResetSuccess(
-            mobileNumber,
-            user.name,
-            user.email,
-            newPassword,
-            loginUrl
-        );
+      await bulkSmsService.sendPasswordResetSuccess(
+        mobileNumber,
+        user.name,
+        user.email,
+        newPassword,
+        loginUrl
+      );
     } catch (smsError) {
-        console.error("Failed to send password reset SMS:", smsError);
-         // We still return success because the password WAS reset, but warn log is enough.
+      console.error("Failed to send password reset SMS:", smsError);
+      // We still return success because the password WAS reset, but warn log is enough.
     }
 
     return successResponse(res, { message: 'Password reset successfully. Check your SMS.' }, 'Password reset and SMS sent');
