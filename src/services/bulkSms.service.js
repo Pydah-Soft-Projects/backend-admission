@@ -132,7 +132,7 @@ export const sendSmsThroughBulkSmsApps = async ({
   const success = isValidSmsResponse(responseText);
   const messageIds = extractMessageIds(responseText);
 
-  console.log(`[BulkSMS] Sent to ${sanitizedNumbers.join(',')}. Success: ${success}. Response: ${responseText}`);
+  console.log(`[BulkSMS] Sent to ${sanitizedNumbers.join(',')}. Message: "${message}". Success: ${success}. Response: ${responseText}`);
 
   return {
     success,
@@ -153,7 +153,7 @@ export const sendSmsThroughBulkSmsApps = async ({
 export const sendOTP = async (mobileNumber, otp) => {
   const otpTemplateId = process.env.OTP_TEMPLATE_ID || '1007482811215703964'; // Env or Fallback
   const message = `Your OTP for recovering your password is ${otp} - PYDAH`;
-  
+
   return sendSmsThroughBulkSmsApps({
     numbers: [mobileNumber],
     message,
