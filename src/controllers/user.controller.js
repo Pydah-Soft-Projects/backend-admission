@@ -33,6 +33,7 @@ const formatUser = (userData) => {
     _id: userData.id, // Keep _id for backward compatibility
     name: userData.name,
     email: userData.email,
+    mobileNumber: userData.mobile_number,
     roleName: userData.role_name,
     managedBy: userData.managed_by,
     isManager: userData.is_manager === 1 || userData.is_manager === true,
@@ -55,7 +56,7 @@ export const getUsers = async (req, res) => {
     const pool = getPool();
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
     );
 
     const formattedUsers = users.map(formatUser);
@@ -83,7 +84,7 @@ export const getUser = async (req, res) => {
     const pool = getPool();
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
     );
 
@@ -115,7 +116,7 @@ export const getUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const createUser = async (req, res) => {
   try {
-    const { name, email, password, roleName, designation, permissions } = req.body;
+    const { name, email, password, roleName, designation, permissions, mobileNumber } = req.body;
 
     if (!name || !email || !password || !roleName) {
       return errorResponse(res, 'Please provide name, email, password, and roleName', 400);
@@ -125,15 +126,13 @@ export const createUser = async (req, res) => {
       return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, User, Student Counselor, Data Entry User', 400);
     }
 
-
-
     if (roleName === 'Sub Super Admin' && (permissions && typeof permissions !== 'object')) {
       return errorResponse(res, 'Permissions must be provided as an object for sub super admins', 400);
     }
 
     const pool = getPool();
 
-    // Check if user exists
+    // Check if user exists (email or mobile number)
     const [existingUsers] = await pool.execute(
       'SELECT id FROM users WHERE email = ?',
       [email.toLowerCase().trim()]
@@ -141,6 +140,17 @@ export const createUser = async (req, res) => {
 
     if (existingUsers.length > 0) {
       return errorResponse(res, 'User with this email already exists', 400);
+    }
+
+    if (mobileNumber) {
+      const [existingMobile] = await pool.execute(
+        'SELECT id FROM users WHERE mobile_number = ?',
+        [mobileNumber.trim()]
+      );
+
+      if (existingMobile.length > 0) {
+        return errorResponse(res, 'User with this mobile number already exists', 400);
+      }
     }
 
     const sanitizedPermissions =
@@ -155,12 +165,13 @@ export const createUser = async (req, res) => {
 
     // Insert user
     await pool.execute(
-      `INSERT INTO users (id, name, email, password, role_name, designation, permissions, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      `INSERT INTO users (id, name, email, mobile_number, password, role_name, designation, permissions, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         userId,
         name.trim(),
         email.toLowerCase().trim(),
+        mobileNumber ? mobileNumber.trim() : null,
         hashedPassword,
         roleName,
         roleName === 'Student Counselor' || roleName === 'Data Entry User' ? (designation?.trim() || null) : null,
@@ -171,7 +182,7 @@ export const createUser = async (req, res) => {
 
     // Fetch created user
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
       [userId]
     );
 
@@ -189,12 +200,12 @@ export const createUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const updateUser = async (req, res) => {
   try {
-    const { name, email, password, roleName, isActive, designation, permissions } = req.body;
+    const { name, email, password, roleName, isActive, designation, permissions, mobileNumber } = req.body;
     const pool = getPool();
 
     // Get current user
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
       [req.params.id]
     );
 
@@ -225,6 +236,24 @@ export const updateUser = async (req, res) => {
       }
       updateFields.push('email = ?');
       updateValues.push(email.toLowerCase().trim());
+    }
+
+    if (mobileNumber !== undefined) {
+      if (mobileNumber) {
+        // Check if mobile number is already in use by another user
+        const [existingMobile] = await pool.execute(
+          'SELECT id FROM users WHERE mobile_number = ? AND id != ?',
+          [mobileNumber.trim(), req.params.id]
+        );
+        if (existingMobile.length > 0) {
+          return errorResponse(res, 'Mobile number already in use', 400);
+        }
+        updateFields.push('mobile_number = ?');
+        updateValues.push(mobileNumber.trim());
+      } else {
+        // Allow clearing mobile number
+        updateFields.push('mobile_number = NULL');
+      }
     }
 
     if (password) {
@@ -339,7 +368,7 @@ export const updateUser = async (req, res) => {
 
     // Fetch updated user
     const [updatedUsers] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
     );
 

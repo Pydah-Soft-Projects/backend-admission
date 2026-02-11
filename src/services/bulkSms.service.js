@@ -77,6 +77,7 @@ export const sendSmsThroughBulkSmsApps = async ({
   message,
   isUnicode = false,
   senderId = BULK_SMS_SENDER_ID,
+  tempid = null,
 }) => {
   if (!Array.isArray(numbers) || numbers.length === 0) {
     throw new Error('At least one recipient number is required');
@@ -103,6 +104,10 @@ export const sendSmsThroughBulkSmsApps = async ({
     message,
   };
 
+  if (tempid) {
+    paramsObject.tempid = tempid;
+  }
+
   if (isUnicode) {
     paramsObject.coding = '3';
   }
@@ -127,6 +132,8 @@ export const sendSmsThroughBulkSmsApps = async ({
   const success = isValidSmsResponse(responseText);
   const messageIds = extractMessageIds(responseText);
 
+  console.log(`[BulkSMS] Sent to ${sanitizedNumbers.join(',')}. Success: ${success}. Response: ${responseText}`);
+
   return {
     success,
     messageIds,
@@ -138,3 +145,39 @@ export const sendSmsThroughBulkSmsApps = async ({
   };
 };
 
+
+
+/**
+ * Send OTP
+ */
+export const sendOTP = async (mobileNumber, otp) => {
+  const otpTemplateId = process.env.OTP_TEMPLATE_ID || '1007482811215703964'; // Env or Fallback
+  const message = `Your OTP for recovering your password is ${otp} - PYDAH`;
+  
+  return sendSmsThroughBulkSmsApps({
+    numbers: [mobileNumber],
+    message,
+    tempid: otpTemplateId,
+  });
+};
+
+/**
+ * Send Password Reset Success
+ * Template ID: 1707176526611076697
+ */
+export const sendPasswordResetSuccess = async (mobileNumber, name, username, newPassword, loginUrl) => {
+  const templateId = '1707176526611076697';
+  const message = `Hello ${name} your password has been updated. Username: ${username} New Password: ${newPassword} Login: ${loginUrl}- Pydah College`;
+
+  return sendSmsThroughBulkSmsApps({
+    numbers: [mobileNumber],
+    message,
+    tempid: templateId,
+  });
+};
+
+export default {
+  sendSmsThroughBulkSmsApps,
+  sendOTP,
+  sendPasswordResetSuccess
+};

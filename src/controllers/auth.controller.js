@@ -2,7 +2,10 @@ import { getPool } from '../config-sql/database.js';
 import { generateToken } from '../utils/generateToken.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
+import bulkSmsService from '../services/bulkSms.service.js';
 import axios from 'axios';
+
+
 
 // @desc    Login user
 // @route   POST /api/auth/login
@@ -11,7 +14,7 @@ export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    console.log('Login attempt for email:', email);
+    console.log('Login attempt for identifier:', email);
 
     // Validate input
     if (!email || !password) {
@@ -29,14 +32,23 @@ export const login = async (req, res) => {
     }
 
     // Check for user in SQL database
-    const normalizedEmail = email.toLowerCase().trim();
-    const [users] = await pool.execute(
-      'SELECT id, name, email, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE email = ?',
-      [normalizedEmail]
-    );
+    const normalizedIdentity = email.toLowerCase().trim();
+    let query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE email = ?';
+    let queryParams = [normalizedIdentity];
+
+    // Simple check: if it looks like a mobile number (only digits, length 10-15), try mobile login
+    const isMobile = /^\d{10,15}$/.test(normalizedIdentity);
+    if (isMobile) {
+      console.log('Detected mobile number login');
+      query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE mobile_number = ?';
+      // For mobile, we use the input as is (trim only)
+      queryParams = [email.trim()]; 
+    }
+
+    const [users] = await pool.execute(query, queryParams);
 
     if (!users || users.length === 0) {
-      console.log('User not found for email:', normalizedEmail);
+      console.log('User not found for identity:', normalizedIdentity);
       return errorResponse(res, 'Invalid credentials', 401);
     }
 
@@ -95,6 +107,7 @@ export const login = async (req, res) => {
       _id: userData.id, // Keep _id for backward compatibility
       name: userData.name,
       email: userData.email,
+      mobileNumber: userData.mobile_number,
       roleName: userData.role_name,
       managedBy: userData.managed_by,
       isManager: userData.is_manager === 1 || userData.is_manager === true,
@@ -327,6 +340,100 @@ export const createSSOSession = async (req, res) => {
     console.error('SSO session creation error:', error);
     console.error('Error stack:', error.stack);
     return errorResponse(res, error.message || 'Failed to create SSO session', 500);
+  }
+};
+
+// @desc    Check User Exists (For Forgot Password)
+// @route   POST /api/auth/forgot-password/check-user
+// @access  Public
+export const checkUser = async (req, res) => {
+  try {
+    const { mobileNumber } = req.body;
+
+    if (!mobileNumber) {
+      return errorResponse(res, 'Mobile number is required', 400);
+    }
+
+    const pool = getPool();
+    const [users] = await pool.execute(
+      'SELECT id, name FROM users WHERE mobile_number = ?',
+      [mobileNumber]
+    );
+
+    if (users.length === 0) {
+      return errorResponse(res, 'No user found with this mobile number', 404);
+    }
+
+    return successResponse(res, { 
+      exists: true, 
+      name: users[0].name 
+    }, 'User found');
+
+  } catch (error) {
+    console.error('Check User error:', error);
+    return errorResponse(res, 'Failed to check user', 500);
+  }
+};
+
+// @desc    Reset Password Directly (No OTP)
+// @route   POST /api/auth/forgot-password/reset-direct
+// @access  Public
+export const resetPasswordDirectly = async (req, res) => {
+  try {
+    const { mobileNumber } = req.body;
+
+    if (!mobileNumber) {
+      return errorResponse(res, 'Mobile number is required', 400);
+    }
+
+    const pool = getPool();
+
+    // Check if user exists
+    const [users] = await pool.execute(
+      'SELECT id, name, email, mobile_number FROM users WHERE mobile_number = ?',
+      [mobileNumber]
+    );
+
+    if (users.length === 0) {
+      return errorResponse(res, 'No user found with this mobile number', 404);
+    }
+
+    const user = users[0];
+
+    // Generate Random 8-char Password
+    const newPassword = Math.random().toString(36).slice(-8);
+    
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update User Password
+    await pool.execute(
+      'UPDATE users SET password = ? WHERE mobile_number = ?',
+      [hashedPassword, mobileNumber]
+    );
+
+    // Send confirmation SMS with new password
+    const loginUrl = process.env.FRONTEND_URL || 'http://admissions.pydah.edu.in';
+    
+    try {
+        await bulkSmsService.sendPasswordResetSuccess(
+            mobileNumber,
+            user.name,
+            user.email,
+            newPassword,
+            loginUrl
+        );
+    } catch (smsError) {
+        console.error("Failed to send password reset SMS:", smsError);
+         // We still return success because the password WAS reset, but warn log is enough.
+    }
+
+    return successResponse(res, { message: 'Password reset successfully. Check your SMS.' }, 'Password reset and SMS sent');
+
+  } catch (error) {
+    console.error('Reset Password Direct error:', error);
+    return errorResponse(res, 'Failed to reset password', 500);
   }
 };
 
