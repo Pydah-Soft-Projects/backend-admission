@@ -7,6 +7,7 @@ import {
   deleteUser,
 } from '../controllers/user.controller.js';
 import { getMySettings, updateMySettings } from '../controllers/userSettings.controller.js';
+import { updateMyProfile } from '../controllers/userProfile.controller.js';
 import { getMyLoginLogs, getAllUserLoginLogs } from '../controllers/userLoginLogs.controller.js';
 import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
@@ -18,6 +19,7 @@ router.use(protect);
 // Current user's settings and login logs (no time-tracking restriction - user must access settings to enable)
 router.get('/me/settings', getMySettings);
 router.put('/me/settings', updateMySettings);
+router.put('/me/profile', updateMyProfile);
 router.get('/me/login-logs', getMyLoginLogs);
 
 // Routes that require Super Admin only
