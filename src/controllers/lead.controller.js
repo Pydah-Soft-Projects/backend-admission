@@ -25,6 +25,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     fatherPhone: leadData.father_phone,
     hallTicketNumber: leadData.hall_ticket_number || '',
     village: leadData.village,
+    address: leadData.address || '',
     courseInterested: leadData.course_interested,
     district: leadData.district,
     mandal: leadData.mandal,
@@ -35,8 +36,8 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     interCollege: leadData.inter_college || '',
     quota: leadData.quota || 'Not Applicable',
     applicationStatus: leadData.application_status || 'Not Provided',
-    dynamicFields: typeof leadData.dynamic_fields === 'string' 
-      ? JSON.parse(leadData.dynamic_fields) 
+    dynamicFields: typeof leadData.dynamic_fields === 'string'
+      ? JSON.parse(leadData.dynamic_fields)
       : leadData.dynamic_fields || {},
     leadStatus: leadData.lead_status || 'New',
     admissionNumber: leadData.admission_number,
@@ -244,7 +245,7 @@ export const getLeads = async (req, res) => {
         name: lead.assigned_to_name,
         email: lead.assigned_to_email,
       } : null;
-      
+
       const uploadedByUser = lead.uploaded_by_id ? {
         id: lead.uploaded_by_id,
         _id: lead.uploaded_by_id,
@@ -315,7 +316,7 @@ export const getLead = async (req, res) => {
         [userId]
       );
       const teamMemberIds = teamMembers.map(m => m.id);
-      
+
       // Check if lead is assigned to manager or any team member
       if (leadData.assigned_to && (leadData.assigned_to === userId || teamMemberIds.includes(leadData.assigned_to))) {
         hasAccess = true;
@@ -394,7 +395,7 @@ export const createPublicLead = async (req, res) => {
       if (directValue && String(directValue).trim()) {
         return String(directValue).trim();
       }
-      
+
       if (dynamicFieldsObj && typeof dynamicFieldsObj === 'object') {
         for (const variation of fieldVariations) {
           const key = Object.keys(dynamicFieldsObj).find(
@@ -405,7 +406,7 @@ export const createPublicLead = async (req, res) => {
           }
         }
       }
-      
+
       return null;
     };
 
@@ -415,6 +416,7 @@ export const createPublicLead = async (req, res) => {
     const finalFatherName = getFieldValue(fatherName, ['fathername', 'father_name', 'fathersname', 'fathers_name'], dynamicFields) || 'Not Provided';
     const finalFatherPhone = getFieldValue(fatherPhone, ['fatherphone', 'father_phone', 'fathersphone', 'fathers_phone', 'fatherphonenumber', 'father_phone_number'], dynamicFields) || 'Not Provided';
     const finalVillage = getFieldValue(village, ['village', 'city', 'town', 'address_village_city', 'address_village'], dynamicFields) || 'Not Provided';
+    const finalAddress = getFieldValue(address, ['address', 'full_address', 'residence_address'], dynamicFields) || '';
     const finalDistrict = getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
     const finalMandal = getFieldValue(mandal, ['mandal', 'tehsil'], dynamicFields) || 'Not Provided';
 
@@ -423,10 +425,10 @@ export const createPublicLead = async (req, res) => {
       const missingFields = [];
       if (!finalName) missingFields.push('name');
       if (!finalPhone) missingFields.push('phone');
-      
+
       return errorResponse(
-        res, 
-        `Please provide required fields: ${missingFields.join(', ')}. Make sure your form includes a student name field and a primary phone number field.`, 
+        res,
+        `Please provide required fields: ${missingFields.join(', ')}. Make sure your form includes a student name field and a primary phone number field.`,
         400
       );
     }
@@ -444,11 +446,11 @@ export const createPublicLead = async (req, res) => {
     await pool.execute(
       `INSERT INTO leads (
         id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
-        hall_ticket_number, village, course_interested, district, mandal, state,
+        hall_ticket_number, village, address, course_interested, district, mandal, state,
         is_nri, gender, \`rank\`, inter_college, quota, application_status,
         dynamic_fields, lead_status, source, utm_source, utm_medium, utm_campaign,
         utm_term, utm_content, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         leadId,
         enquiryNumber,
@@ -460,6 +462,7 @@ export const createPublicLead = async (req, res) => {
         finalFatherPhone,
         hallTicketNumber ? String(hallTicketNumber).trim() : (getFieldValue(hallTicketNumber, ['hallticketnumber', 'hall_ticket_number', 'ticketnumber', 'ticket_number'], dynamicFields) || ''),
         finalVillage,
+        finalAddress,
         courseInterested || getFieldValue(courseInterested, ['courseinterested', 'course_interested', 'course', 'coursename', 'course_name'], dynamicFields) || null,
         finalDistrict,
         finalMandal,
@@ -533,6 +536,8 @@ export const createLead = async (req, res) => {
       interCollege,
       dynamicFields,
       source,
+      address, // Added address to destructuring
+      studentGroup,
     } = req.body;
 
     // Helper function to extract a value from direct fields or dynamicFields
@@ -601,6 +606,7 @@ export const createLead = async (req, res) => {
       ) || 'Not Provided';
     const finalVillage =
       getFieldValue(village, ['village', 'city', 'town', 'address_village_city', 'address_village'], dynamicFields) || 'Not Provided';
+    const finalAddress = getFieldValue(address, ['address', 'full_address', 'residence_address'], dynamicFields) || '';
     const finalDistrict =
       getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
     const finalMandal =
@@ -622,10 +628,10 @@ export const createLead = async (req, res) => {
     await pool.execute(
       `INSERT INTO leads (
         id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
-        hall_ticket_number, village, course_interested, district, mandal, state,
+        hall_ticket_number, village, address, course_interested, district, mandal, state,
         gender, \`rank\`, inter_college, quota, application_status,
-        dynamic_fields, lead_status, source, uploaded_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        dynamic_fields, lead_status, source, student_group, uploaded_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         leadId,
         enquiryNumber,
@@ -637,6 +643,7 @@ export const createLead = async (req, res) => {
         finalFatherPhone,
         hallTicketNumber ? String(hallTicketNumber).trim() : '',
         finalVillage,
+        finalAddress,
         courseInterested || null,
         finalDistrict,
         finalMandal,
@@ -649,6 +656,7 @@ export const createLead = async (req, res) => {
         JSON.stringify(dynamicFields || {}),
         'New',
         source || 'Manual Entry',
+        studentGroup ? String(studentGroup).trim() : null,
         userId,
       ]
     );
@@ -713,6 +721,7 @@ export const updateLead = async (req, res) => {
       motherName: currentLead.mother_name,
       courseInterested: currentLead.course_interested,
       village: currentLead.village,
+      address: currentLead.address,
       district: currentLead.district,
       mandal: currentLead.mandal,
       state: currentLead.state,
@@ -723,7 +732,7 @@ export const updateLead = async (req, res) => {
       hallTicketNumber: currentLead.hall_ticket_number,
       applicationStatus: currentLead.application_status,
     };
-    
+
     // Update fields
     const {
       hallTicketNumber,
@@ -753,6 +762,7 @@ export const updateLead = async (req, res) => {
       nextScheduledCall,
       academicYear,
       studentGroup,
+      address,
     } = req.body;
 
     const newLeadStatus = leadStatus ?? legacyStatus;
@@ -800,6 +810,10 @@ export const updateLead = async (req, res) => {
         updateFields.push('village = ?');
         updateValues.push(village.trim());
       }
+      if (address !== undefined) {
+        updateFields.push('address = ?');
+        updateValues.push(address ? String(address).trim() : '');
+      }
       if (district) {
         updateFields.push('district = ?');
         updateValues.push(district.trim());
@@ -834,8 +848,8 @@ export const updateLead = async (req, res) => {
         updateValues.push(applicationStatus);
       }
       if (dynamicFields) {
-        const currentDynamicFields = typeof currentLead.dynamic_fields === 'string' 
-          ? JSON.parse(currentLead.dynamic_fields) 
+        const currentDynamicFields = typeof currentLead.dynamic_fields === 'string'
+          ? JSON.parse(currentLead.dynamic_fields)
           : currentLead.dynamic_fields || {};
         const mergedFields = { ...currentDynamicFields, ...dynamicFields };
         updateFields.push('dynamic_fields = ?');
@@ -843,7 +857,7 @@ export const updateLead = async (req, res) => {
       }
       if (assignedTo) {
         const newAssignedTo = assignedTo.toString();
-        
+
         // Only update if assignment is actually changing
         if (oldAssignedTo !== newAssignedTo) {
           assignmentChanged = true;
@@ -852,7 +866,7 @@ export const updateLead = async (req, res) => {
           updateFields.push('assigned_at = NOW()');
           updateFields.push('assigned_by = ?');
           updateValues.push(userId);
-          
+
           // If status is "New", automatically change to "Assigned"
           if (oldStatus === 'New' || !oldStatus) {
             oldStatus = oldStatus || 'New';
@@ -892,6 +906,10 @@ export const updateLead = async (req, res) => {
       if (village !== undefined) {
         updateFields.push('village = ?');
         updateValues.push(village ? String(village).trim() : '');
+      }
+      if (address !== undefined) {
+        updateFields.push('address = ?');
+        updateValues.push(address ? String(address).trim() : '');
       }
       if (state !== undefined) {
         const trimmedState = typeof state === 'string' ? state.trim() : state;
@@ -951,7 +969,7 @@ export const updateLead = async (req, res) => {
 
     // Create activity logs
     const finalStatus = newLeadStatus || currentLead.lead_status;
-    
+
     // Log assignment change
     if (assignmentChanged && assignedTo) {
       const activityLogId = uuidv4();
@@ -1003,6 +1021,7 @@ export const updateLead = async (req, res) => {
     if (motherName !== undefined && motherName !== originalLead.motherName) updatedFields.push('motherName');
     if (courseInterested !== undefined && courseInterested !== originalLead.courseInterested) updatedFields.push('courseInterested');
     if (village !== undefined && (village || '').trim() !== (originalLead.village || '')) updatedFields.push('village');
+    if (address !== undefined && (address || '').trim() !== (originalLead.address || '')) updatedFields.push('address');
     if (district !== undefined && (district || '').trim() !== (originalLead.district || '')) updatedFields.push('district');
     if (mandal !== undefined && (mandal || '').trim() !== (originalLead.mandal || '')) updatedFields.push('mandal');
     if (state !== undefined && state !== originalLead.state) updatedFields.push('state');
@@ -1132,7 +1151,7 @@ const processDeleteJob = async (jobId) => {
   }
 
   const startTime = Date.now();
-  
+
   // Update job status to processing
   await pool.execute(
     'UPDATE delete_jobs SET status = ?, started_at = NOW(), updated_at = NOW() WHERE job_id = ?',
@@ -1561,8 +1580,8 @@ export const getFilterOptions = async (req, res) => {
     const appStatusCondition = [...conditions, 'application_status IS NOT NULL AND application_status != ""'];
 
     const whereClause = (conditions) => conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const params = !hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin' 
-      ? [req.user.id || req.user._id] 
+    const params = !hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin'
+      ? [req.user.id || req.user._id]
       : [];
 
     // Get distinct values for each field

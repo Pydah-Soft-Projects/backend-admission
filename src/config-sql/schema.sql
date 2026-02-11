@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS leads (
     father_phone VARCHAR(20) NOT NULL,
     hall_ticket_number VARCHAR(100) DEFAULT '',
     village VARCHAR(255) NOT NULL,
+    address VARCHAR(255) DEFAULT '',
     course_interested VARCHAR(255),
     district VARCHAR(255) NOT NULL,
     mandal VARCHAR(255) NOT NULL,

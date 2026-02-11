@@ -53,7 +53,7 @@ const formatUser = (userData) => {
 export const getUsers = async (req, res) => {
   try {
     const pool = getPool();
-    
+
     const [users] = await pool.execute(
       'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
     );
@@ -81,7 +81,7 @@ export const getUser = async (req, res) => {
     }
 
     const pool = getPool();
-    
+
     const [users] = await pool.execute(
       'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
@@ -97,7 +97,7 @@ export const getUser = async (req, res) => {
     if (isManager && !isAdmin) {
       const managedById = user.managedBy;
       const managerId = req.user.id || req.user._id;
-      
+
       if (managedById !== managerId) {
         return errorResponse(res, 'Access denied. You can only view your team members.', 403);
       }
@@ -134,13 +134,13 @@ export const createUser = async (req, res) => {
     }
 
     const pool = getPool();
-    
+
     // Check if user exists
     const [existingUsers] = await pool.execute(
       'SELECT id FROM users WHERE email = ?',
       [email.toLowerCase().trim()]
     );
-    
+
     if (existingUsers.length > 0) {
       return errorResponse(res, 'User with this email already exists', 400);
     }
@@ -191,7 +191,7 @@ export const createUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const updateUser = async (req, res) => {
   try {
-    const { name, email, roleName, isActive, designation, permissions } = req.body;
+    const { name, email, password, roleName, isActive, designation, permissions } = req.body;
     const pool = getPool();
 
     // Get current user
@@ -227,6 +227,16 @@ export const updateUser = async (req, res) => {
       }
       updateFields.push('email = ?');
       updateValues.push(email.toLowerCase().trim());
+    }
+
+    if (password) {
+      if (password.length < 6) {
+        return errorResponse(res, 'Password must be at least 6 characters long', 400);
+      }
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      updateFields.push('password = ?');
+      updateValues.push(hashedPassword);
     }
 
     // Handle isManager boolean
@@ -288,7 +298,7 @@ export const updateUser = async (req, res) => {
     if (finalRoleName === 'User') {
       const isRoleChangeToUser = roleName === 'User' && currentUser.role_name !== 'User';
       const isDesignationUpdate = designation !== undefined;
-      
+
       if (isDesignationUpdate) {
         if (designation && designation.trim()) {
           updateFields.push('designation = ?');
