@@ -1012,28 +1012,45 @@ export const updateLead = async (req, res) => {
     }
 
     // Log field updates (Super Admin or assigned counsellor)
-    const updatedFields = [];
-    if (name && name !== originalLead.name) updatedFields.push('name');
-    if (phone && phone !== originalLead.phone) updatedFields.push('phone');
-    if (email !== undefined && email !== originalLead.email) updatedFields.push('email');
-    if (fatherName !== undefined && String(fatherName || '').trim() !== (originalLead.fatherName || '')) updatedFields.push('fatherName');
-    if (fatherPhone !== undefined && String(fatherPhone || '').trim() !== (originalLead.fatherPhone || '')) updatedFields.push('fatherPhone');
-    if (motherName !== undefined && motherName !== originalLead.motherName) updatedFields.push('motherName');
-    if (courseInterested !== undefined && courseInterested !== originalLead.courseInterested) updatedFields.push('courseInterested');
-    if (village !== undefined && (village || '').trim() !== (originalLead.village || '')) updatedFields.push('village');
-    if (address !== undefined && (address || '').trim() !== (originalLead.address || '')) updatedFields.push('address');
-    if (district !== undefined && (district || '').trim() !== (originalLead.district || '')) updatedFields.push('district');
-    if (mandal !== undefined && (mandal || '').trim() !== (originalLead.mandal || '')) updatedFields.push('mandal');
-    if (state !== undefined && state !== originalLead.state) updatedFields.push('state');
-    if (quota && quota !== originalLead.quota) updatedFields.push('quota');
-    if (gender !== undefined && gender !== originalLead.gender) updatedFields.push('gender');
-    if (rank !== undefined && rank !== originalLead.rank) updatedFields.push('rank');
-    if (interCollege !== undefined && interCollege !== originalLead.interCollege) updatedFields.push('interCollege');
-    if (hallTicketNumber !== undefined && hallTicketNumber !== originalLead.hallTicketNumber) updatedFields.push('hallTicketNumber');
-    if (applicationStatus !== undefined && applicationStatus !== originalLead.applicationStatus) updatedFields.push('applicationStatus');
+    const fieldChanges = [];
 
-    if ((isSuperAdmin || isAssignedCounsellor) && updatedFields.length > 0 && !assignedTo) {
+    const normalize = (val) => {
+      if (val === null || val === undefined) return '';
+      return String(val).trim();
+    };
+
+    const compareAndLog = (fieldLabel, oldVal, newVal, rawVal) => {
+      if (rawVal === undefined) return; // Key not in payload
+      const n = normalize(newVal);
+      const o = normalize(oldVal);
+      if (n !== o) {
+        fieldChanges.push({ field: fieldLabel, old: o, new: n });
+      }
+    };
+
+    compareAndLog('Name', originalLead.name, name, name);
+    compareAndLog('Phone', originalLead.phone, phone, phone);
+    compareAndLog('Email', originalLead.email, email, email);
+    compareAndLog('Father Name', originalLead.fatherName, fatherName, fatherName);
+    compareAndLog('Father Phone', originalLead.fatherPhone, fatherPhone, fatherPhone);
+    compareAndLog('Mother Name', originalLead.motherName, motherName, motherName);
+    compareAndLog('Course Interested', originalLead.courseInterested, courseInterested, courseInterested);
+    compareAndLog('Village', originalLead.village, village, village);
+    compareAndLog('Address', originalLead.address, address, address);
+    compareAndLog('District', originalLead.district, district, district);
+    compareAndLog('Mandal', originalLead.mandal, mandal, mandal);
+    compareAndLog('State', originalLead.state, state, state);
+    compareAndLog('Quota', originalLead.quota, quota, quota);
+    compareAndLog('Gender', originalLead.gender, gender, gender);
+    compareAndLog('Rank', originalLead.rank, rank, rank);
+    compareAndLog('Inter College', originalLead.interCollege, interCollege, interCollege);
+    compareAndLog('Hall Ticket Number', originalLead.hallTicketNumber, hallTicketNumber, hallTicketNumber);
+    compareAndLog('Application Status', originalLead.applicationStatus, applicationStatus, applicationStatus);
+
+    if ((isSuperAdmin || isAssignedCounsellor) && fieldChanges.length > 0 && !assignedTo) {
       const activityLogId = uuidv4();
+      const changeSummary = fieldChanges.map(c => `${c.field} (${c.old || 'empty'} -> ${c.new || 'empty'})`).join(', ');
+      
       await pool.execute(
         `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -1041,11 +1058,12 @@ export const updateLead = async (req, res) => {
           activityLogId,
           req.params.id,
           'field_update',
-          `Student details updated: ${updatedFields.join(', ')}`,
+          `Student details updated: ${changeSummary}`,
           userId,
           JSON.stringify({
             fieldUpdate: {
-              updatedFields,
+              changes: fieldChanges,
+              count: fieldChanges.length,
             },
           }),
         ]

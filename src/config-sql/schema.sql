@@ -696,7 +696,7 @@ CREATE TABLE IF NOT EXISTS message_templates (
 CREATE TABLE IF NOT EXISTS activity_logs (
     id CHAR(36) PRIMARY KEY,
     lead_id CHAR(36) NOT NULL,
-    type VARCHAR(50) NOT NULL CHECK (type IN ('status_change', 'comment', 'follow_up', 'quota_change', 'joining_update')),
+    type VARCHAR(50) NOT NULL CHECK (type IN ('status_change', 'comment', 'follow_up', 'quota_change', 'joining_update', 'field_update')),
     old_status VARCHAR(50),
     new_status VARCHAR(50),
     comment TEXT,
