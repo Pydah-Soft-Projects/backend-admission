@@ -3,7 +3,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
-const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'User', 'Student Counselor', 'Data Entry User'];
+const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'Student Counselor', 'Data Entry User'];
 
 const sanitizePermissions = (permissions = {}) => {
   if (!permissions || typeof permissions !== 'object') {
@@ -125,9 +125,7 @@ export const createUser = async (req, res) => {
       return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, User, Student Counselor, Data Entry User', 400);
     }
 
-    if (roleName === 'User' && (!designation || !designation.trim())) {
-      return errorResponse(res, 'Designation is required for users', 400);
-    }
+
 
     if (roleName === 'Sub Super Admin' && (permissions && typeof permissions !== 'object')) {
       return errorResponse(res, 'Permissions must be provided as an object for sub super admins', 400);
@@ -165,7 +163,7 @@ export const createUser = async (req, res) => {
         email.toLowerCase().trim(),
         hashedPassword,
         roleName,
-        roleName === 'User' ? designation?.trim() : (roleName === 'Student Counselor' || roleName === 'Data Entry User' ? (designation?.trim() || null) : null),
+        roleName === 'Student Counselor' || roleName === 'Data Entry User' ? (designation?.trim() || null) : null,
         JSON.stringify(sanitizedPermissions),
         true
       ]
@@ -251,7 +249,7 @@ export const updateUser = async (req, res) => {
     let finalRoleName = currentUser.role_name;
     if (roleName) {
       if (!VALID_ROLES.includes(roleName)) {
-        return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, User, Student Counselor, Data Entry User', 400);
+        return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, Student Counselor, Data Entry User', 400);
       }
       if (roleName === 'Manager') {
         return errorResponse(res, 'Use isManager boolean field instead of setting roleName to Manager', 400);
@@ -260,7 +258,7 @@ export const updateUser = async (req, res) => {
       updateFields.push('role_name = ?');
       updateValues.push(roleName);
       // If changing role away from Manager-like role, clear isManager
-      if (roleName !== 'User' && roleName !== 'Sub Super Admin') {
+      if (roleName !== 'Sub Super Admin') {
         newIsManager = false;
         updateFields.push('is_manager = ?');
         updateValues.push(false);
@@ -295,23 +293,7 @@ export const updateUser = async (req, res) => {
     }
 
     // Handle designation and permissions based on role
-    if (finalRoleName === 'User') {
-      const isRoleChangeToUser = roleName === 'User' && currentUser.role_name !== 'User';
-      const isDesignationUpdate = designation !== undefined;
-
-      if (isDesignationUpdate) {
-        if (designation && designation.trim()) {
-          updateFields.push('designation = ?');
-          updateValues.push(designation.trim());
-        } else if (!currentUser.designation) {
-          return errorResponse(res, 'Designation is required for users', 400);
-        }
-      } else if (isRoleChangeToUser && !currentUser.designation) {
-        return errorResponse(res, 'Designation is required for users', 400);
-      }
-      updateFields.push('permissions = ?');
-      updateValues.push(JSON.stringify({}));
-    } else if (finalRoleName === 'Student Counselor' || finalRoleName === 'Data Entry User') {
+    if (finalRoleName === 'Student Counselor' || finalRoleName === 'Data Entry User') {
       if (designation !== undefined) {
         updateFields.push('designation = ?');
         updateValues.push(designation && designation.trim() ? designation.trim() : null);

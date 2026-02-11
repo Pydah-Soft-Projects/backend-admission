@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
-    role_name VARCHAR(50) NOT NULL CHECK (role_name IN ('Super Admin', 'Sub Super Admin', 'User', 'Student Counselor', 'Data Entry User')),
+    role_name VARCHAR(50) NOT NULL CHECK (role_name IN ('Super Admin', 'Sub Super Admin', 'Student Counselor', 'Data Entry User')),
     managed_by CHAR(36) NULL,
     is_manager BOOLEAN DEFAULT FALSE NOT NULL,
     designation VARCHAR(100),
