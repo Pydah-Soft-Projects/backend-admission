@@ -191,13 +191,15 @@ export const assignLeads = async (req, res) => {
     // Send notifications (async, don't wait for it)
     const isBulk = !leadIds || leadIds.length === 0;
     
-    // Get full lead details for notification (limit to 50 for email display)
-    const [leadsForNotification] = await pool.execute(
-      `SELECT id, name, phone, enquiry_number FROM leads WHERE id IN (${placeholders}) LIMIT 50`,
+    // Get full lead details for notification AND response (limit to 50 for email display, but we want all for export?)
+    // Verify: If we assign 1000 leads, returning 1000 objects is fine.
+    const [leadsDetails] = await pool.execute(
+      `SELECT id, name, phone, enquiry_number, notes FROM leads WHERE id IN (${placeholders})`,
       leadIdsToAssign
     );
     
-    const formattedLeads = leadsForNotification.map(l => ({
+    // Format for notification (limit to 50)
+    const formattedLeadsNotification = leadsDetails.slice(0, 50).map(l => ({
       _id: l.id,
       id: l.id,
       name: l.name,
@@ -208,12 +210,19 @@ export const assignLeads = async (req, res) => {
     notifyLeadAssignment({
       userId,
       leadCount: modifiedCount,
-      leads: formattedLeads,
+      leads: formattedLeadsNotification,
       isBulk,
       allLeadIds: leadIdsToAssign,
     }).catch((error) => {
       console.error('[LeadAssignment] Error sending notifications:', error);
     });
+
+    // Format for response (Include all assigned leads for Excel export)
+    const assignedLeadsForExport = leadsDetails.map(l => ({
+      name: l.name,
+      phone: l.phone,
+      remarks: l.notes || '', // Map notes to remarks
+    }));
 
     return successResponse(
       res,
@@ -225,6 +234,7 @@ export const assignLeads = async (req, res) => {
         mandal: mandal || 'All',
         state: state || 'All',
         mode: leadIds ? 'single' : 'bulk',
+        assignedLeads: assignedLeadsForExport, // Return full list for export
       },
       `Successfully assigned ${modifiedCount} lead${modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
       200

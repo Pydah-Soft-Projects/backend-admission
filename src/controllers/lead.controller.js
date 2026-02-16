@@ -887,42 +887,9 @@ export const updateLead = async (req, res) => {
 
     // Assigned counsellor can update profile fields (same as edit form on user lead detail page)
     if (isAssignedCounsellor) {
-      if (name) {
-        updateFields.push('name = ?');
-        updateValues.push(name.trim());
-      }
-      if (phone) {
-        updateFields.push('phone = ?');
-        updateValues.push(phone.trim());
-      }
-      if (fatherName !== undefined) {
-        updateFields.push('father_name = ?');
-        updateValues.push(fatherName ? String(fatherName).trim() : '');
-      }
-      if (fatherPhone !== undefined) {
-        updateFields.push('father_phone = ?');
-        updateValues.push(fatherPhone ? String(fatherPhone).trim() : '');
-      }
-      if (village !== undefined) {
-        updateFields.push('village = ?');
-        updateValues.push(village ? String(village).trim() : '');
-      }
-      if (address !== undefined) {
-        updateFields.push('address = ?');
-        updateValues.push(address ? String(address).trim() : '');
-      }
-      if (state !== undefined) {
-        const trimmedState = typeof state === 'string' ? state.trim() : state;
-        updateFields.push('state = ?');
-        updateValues.push(trimmedState ? trimmedState : 'Andhra Pradesh');
-      }
-      if (district !== undefined) {
-        updateFields.push('district = ?');
-        updateValues.push(district ? String(district).trim() : '');
-      }
-      if (mandal !== undefined) {
-        updateFields.push('mandal = ?');
-        updateValues.push(mandal ? String(mandal).trim() : '');
+      if (interCollege !== undefined) {
+        updateFields.push('inter_college = ?');
+        updateValues.push(interCollege ? String(interCollege).trim() : '');
       }
     }
 
