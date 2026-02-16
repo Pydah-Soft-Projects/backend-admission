@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     permissions JSON DEFAULT (JSON_OBJECT()),
     is_active BOOLEAN DEFAULT TRUE NOT NULL,
     time_tracking_enabled BOOLEAN DEFAULT TRUE NOT NULL COMMENT 'When FALSE, user can only access Settings until they enable tracking',
+    auto_calling_enabled BOOLEAN DEFAULT FALSE NOT NULL COMMENT 'Auto-dial next lead after call log',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (managed_by) REFERENCES users(id) ON DELETE SET NULL,

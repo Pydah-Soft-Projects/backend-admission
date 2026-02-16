@@ -33,14 +33,14 @@ export const login = async (req, res) => {
 
     // Check for user in SQL database
     const normalizedIdentity = email.toLowerCase().trim();
-    let query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE email = ?';
+    let query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE email = ?';
     let queryParams = [normalizedIdentity];
 
     // Simple check: if it looks like a mobile number (only digits, length 10-15), try mobile login
     const isMobile = /^\d{10,15}$/.test(normalizedIdentity);
     if (isMobile) {
       console.log('Detected mobile number login');
-      query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE mobile_number = ?';
+      query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE mobile_number = ?';
       // For mobile, we use the input as is (trim only)
       queryParams = [email.trim()];
     }
@@ -115,6 +115,7 @@ export const login = async (req, res) => {
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
       timeTrackingEnabled,
+      autoCallingEnabled: userData.auto_calling_enabled === 1 || userData.auto_calling_enabled === true,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };
@@ -156,7 +157,7 @@ export const getMe = async (req, res) => {
 
     // Get user from SQL database
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.user.id || req.user._id]
     );
 
@@ -197,6 +198,7 @@ export const getMe = async (req, res) => {
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
       timeTrackingEnabled,
+      autoCallingEnabled: userData.auto_calling_enabled === 1 || userData.auto_calling_enabled === true,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };

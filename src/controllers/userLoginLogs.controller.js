@@ -17,8 +17,8 @@ export const getMyLoginLogs = async (req, res) => {
        FROM user_login_logs
        WHERE user_id = ?
        ORDER BY created_at DESC
-       LIMIT ? OFFSET ?`,
-      [userId, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      [userId]
     );
 
     const [countRows] = await pool.execute(
