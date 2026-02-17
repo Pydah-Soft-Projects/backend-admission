@@ -664,6 +664,16 @@ export const getUserLeadAnalytics = async (req, res) => {
       params
     );
 
+    // Get leads by student group
+    const [studentGroupBreakdown] = await pool.execute(
+      `SELECT student_group, COUNT(*) as count 
+       FROM leads 
+       WHERE ${whereClause}
+       GROUP BY student_group 
+       ORDER BY count DESC`,
+      params
+    );
+
     // Convert status breakdown to object
     const statusCounts = {};
     statusBreakdown.forEach((item) => {
@@ -691,6 +701,10 @@ export const getUserLeadAnalytics = async (req, res) => {
         })),
         stateBreakdown: stateBreakdown.map((item) => ({
           state: item.state,
+          count: item.count,
+        })),
+        studentGroupBreakdown: studentGroupBreakdown.map((item) => ({
+          group: item.student_group || 'Unknown',
           count: item.count,
         })),
         recentActivity: {
