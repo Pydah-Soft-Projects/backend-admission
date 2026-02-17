@@ -79,7 +79,7 @@ export const login = async (req, res) => {
     if (!isMatch) {
       console.log('Password mismatch for user:', email);
       return res.status(401).json({
-        message: 'Normalised like mail or password is wrong like that', // As requested by user
+        message: 'Invalid Credentials', // As requested by user
         error: 'Invalid credentials'
       });
     }
