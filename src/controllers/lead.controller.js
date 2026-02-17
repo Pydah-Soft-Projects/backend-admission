@@ -231,7 +231,9 @@ export const getLeads = async (req, res) => {
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
       ${whereClause}
-      ORDER BY l.created_at DESC
+      LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      ${whereClause}
+      ORDER BY l.assigned_at DESC, l.id ASC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
@@ -1449,6 +1451,44 @@ export const getAllLeadIds = async (req, res) => {
     if (req.query.assignedTo) {
       conditions.push('assigned_to = ?');
       params.push(req.query.assignedTo);
+    }
+    if (req.query.courseInterested) {
+      conditions.push('course_interested = ?');
+      params.push(req.query.courseInterested);
+    }
+    if (req.query.source) {
+      conditions.push('source = ?');
+      params.push(req.query.source);
+    }
+
+    // Date filtering
+    if (req.query.startDate) {
+      conditions.push('created_at >= ?');
+      const start = new Date(req.query.startDate);
+      start.setHours(0, 0, 0, 0);
+      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.endDate) {
+      conditions.push('created_at <= ?');
+      const end = new Date(req.query.endDate);
+      end.setHours(23, 59, 59, 999);
+      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.scheduledOn) {
+      conditions.push('DATE(next_scheduled_call) = ?');
+      params.push(req.query.scheduledOn);
+    }
+    if (req.query.academicYear != null && req.query.academicYear !== '') {
+      conditions.push('academic_year = ?');
+      params.push(Number(req.query.academicYear));
+    }
+    if (req.query.studentGroup) {
+      if (req.query.studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(req.query.studentGroup);
+      }
     }
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
