@@ -45,6 +45,7 @@ const normalizeKey = (value) => {
       'gender',
       'rank',
       'interCollege',
+      'isNRI',
       'quota',
       'applicationStatus',
       'leadStatus',
@@ -165,7 +166,14 @@ const aliasPairs = [
       ['inter college', 'interCollege'],
   ['college studied', 'interCollege'],
   ['college name', 'interCollege'],
+  ['college_name', 'interCollege'],
+  ['collegename', 'interCollege'],
   ['school name', 'interCollege'],
+  ['school_name', 'interCollege'],
+  ['schoolname', 'interCollege'],
+  ['school or college name', 'interCollege'],
+  ['school or college', 'interCollege'],
+  ['school_or_college_name', 'interCollege'],
   ['preference', 'courseInterested'],
   ['village/town', 'village'],
   ['village town', 'village'],
@@ -211,14 +219,6 @@ const aliasPairs = [
   ['student_group', 'studentGroup'],
   ['academic stream', 'studentGroup'],
   ['group', 'studentGroup'],
-  // school or college name
-  ['school or college name', 'schoolOrCollegeName'],
-  ['school or college', 'schoolOrCollegeName'],
-  ['school name', 'schoolOrCollegeName'],
-  ['schoolname', 'schoolOrCollegeName'],
-  ['college name', 'schoolOrCollegeName'],
-  ['collegename', 'schoolOrCollegeName'],
-  ['school_or_college_name', 'schoolOrCollegeName'],
 ];
 
 const aliasMap = new Map();
@@ -949,12 +949,6 @@ const processImportJob = async (jobId) => {
         normalizedLead.studentGroup = 'Not Specified';
       }
 
-      // schoolOrCollegeName -> store in dynamicFields for matching
-      const schoolOrCollegeVal = toTrimmedString(normalizedLead.schoolOrCollegeName);
-      if (schoolOrCollegeVal) {
-        dynamicFieldsFromPayload.school_or_college_name = schoolOrCollegeVal;
-      }
-      delete normalizedLead.schoolOrCollegeName;
 
       const cleanedDynamicFields = {};
       Object.entries(dynamicFieldsFromPayload).forEach(([key, value]) => {
@@ -1011,6 +1005,7 @@ const processImportJob = async (jobId) => {
         uploadBatchId: job.upload_batch_id,
         leadStatus: toTrimmedString(normalizedLead.leadStatus) || 'New',
         academicYear: normalizedLead.academicYear !== undefined ? normalizedLead.academicYear : null,
+        isNRI: normalizedLead.isNRI === true || String(normalizedLead.isNRI).toLowerCase() === 'true',
         studentGroup: normalizedLead.studentGroup || 'Not Specified',
         createdAt: now,
         updatedAt: now,
@@ -1042,16 +1037,6 @@ const processImportJob = async (jobId) => {
         const insertPromises = documents.map(async (doc) => {
           const leadId = uuidv4();
           try {
-            const phoneTrimmed = doc.phone ? String(doc.phone).trim() : '';
-            if (phoneTrimmed) {
-              const [existing] = await pool.execute(
-                'SELECT id FROM leads WHERE phone = ? LIMIT 1',
-                [phoneTrimmed]
-              );
-              if (existing && existing.length > 0) {
-                return { success: false, error: new Error('Duplicate phone number') };
-              }
-            }
             // Bulk insert: 31 columns, 31 placeholders, 31 params (no NOW() to avoid driver/server count mismatch)
             const LEAD_INSERT_COLUMN_COUNT = 31;
             const nil = (v, d) => (v === undefined || v === null ? d : v);
