@@ -16,37 +16,46 @@ export const getDailyCallReports = async (req, res) => {
 
     // Validate and parse dates
     let start, end;
+    const hasDates = startDate && endDate;
+    
     try {
-      end = endDate ? new Date(endDate) : new Date();
-      start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return errorResponse(res, 'Invalid date format', 400);
-      }
+      if (hasDates) {
+        end = new Date(endDate);
+        start = new Date(startDate);
+        
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+          return errorResponse(res, 'Invalid date format', 400);
+        }
 
-      if (start > end) {
-        return errorResponse(res, 'Start date must be before end date', 400);
-      }
+        if (start > end) {
+          return errorResponse(res, 'Start date must be before end date', 400);
+        }
 
-      // Limit date range to max 1 year
-      const maxRange = 365 * 24 * 60 * 60 * 1000;
-      if (end.getTime() - start.getTime() > maxRange) {
-        return errorResponse(res, 'Date range cannot exceed 365 days', 400);
-      }
+        // Limit date range to max 1 year
+        const maxRange = 365 * 24 * 60 * 60 * 1000;
+        if (end.getTime() - start.getTime() > maxRange) {
+          return errorResponse(res, 'Date range cannot exceed 365 days', 400);
+        }
 
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+      }
     } catch (error) {
       return errorResponse(res, 'Invalid date format', 400);
     }
 
     const pool = getPool();
-    const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
-    const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
-
+    
     // Build WHERE conditions
-    const conditions = ['type = ?', 'sent_at >= ?', 'sent_at <= ?'];
-    const params = ['call', startStr, endStr];
+    const conditions = ['type = ?'];
+    const params = ['call'];
+
+    if (hasDates) {
+      const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
+      const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
+      conditions.push('sent_at >= ?', 'sent_at <= ?');
+      params.push(startStr, endStr);
+    }
 
     if (userId) {
       if (!userId || typeof userId !== 'string' || userId.length !== 36) {
@@ -139,8 +148,9 @@ export const getDailyCallReports = async (req, res) => {
         reports: formattedReports || [],
         summary: userSummaryArray || [],
         dateRange: {
-          start: start.toISOString(),
-          end: end.toISOString(),
+          start: hasDates ? start.toISOString() : null,
+          end: hasDates ? end.toISOString() : null,
+          isOverall: !hasDates,
         },
       },
       'Daily call reports retrieved successfully',
@@ -163,9 +173,10 @@ export const getConversionReports = async (req, res) => {
 
     const { startDate, endDate, userId, period = 'custom' } = req.query;
 
-    let start, end;
-
     // Calculate date range based on period
+    let start, end;
+    const hasDates = (startDate && endDate) || (period && period !== 'custom');
+
     try {
       const now = new Date();
       switch (period) {
@@ -179,39 +190,47 @@ export const getConversionReports = async (req, res) => {
           end = new Date(now);
           break;
         case 'custom':
-        default:
-          end = endDate ? new Date(endDate) : new Date();
-          start = startDate ? new Date(startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          if (startDate && endDate) {
+            end = new Date(endDate);
+            start = new Date(startDate);
+          }
           break;
       }
 
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        return errorResponse(res, 'Invalid date format', 400);
-      }
+      if (hasDates) {
+        if (!start || !end || isNaN(start.getTime()) || isNaN(end.getTime())) {
+          return errorResponse(res, 'Invalid date format', 400);
+        }
 
-      if (start > end) {
-        return errorResponse(res, 'Start date must be before end date', 400);
-      }
+        if (start > end) {
+          return errorResponse(res, 'Start date must be before end date', 400);
+        }
 
-      // Limit date range to max 1 year
-      const maxRange = 365 * 24 * 60 * 60 * 1000;
-      if (end.getTime() - start.getTime() > maxRange) {
-        return errorResponse(res, 'Date range cannot exceed 365 days', 400);
-      }
+        // Limit date range to max 1 year
+        const maxRange = 365 * 24 * 60 * 60 * 1000;
+        if (end.getTime() - start.getTime() > maxRange) {
+          return errorResponse(res, 'Date range cannot exceed 365 days', 400);
+        }
 
-      start.setHours(0, 0, 0, 0);
-      end.setHours(23, 59, 59, 999);
+        start.setHours(0, 0, 0, 0);
+        end.setHours(23, 59, 59, 999);
+      }
     } catch (error) {
       return errorResponse(res, 'Invalid date format', 400);
     }
 
     const pool = getPool();
-    const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
-    const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
-
+    
     // Build filter for leads
-    let leadConditions = ['assigned_to IS NOT NULL', 'created_at >= ?', 'created_at <= ?'];
-    let leadParams = [startStr, endStr];
+    let leadConditions = ['assigned_to IS NOT NULL'];
+    let leadParams = [];
+
+    if (hasDates) {
+      const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
+      const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
+      leadConditions.push('created_at >= ?', 'created_at <= ?');
+      leadParams.push(startStr, endStr);
+    }
 
     if (userId) {
       if (!userId || typeof userId !== 'string' || userId.length !== 36) {
@@ -409,9 +428,10 @@ export const getConversionReports = async (req, res) => {
           totalCounsellors: conversionReports.length || 0,
         },
         dateRange: {
-          start: start.toISOString(),
-          end: end.toISOString(),
+          start: hasDates ? start.toISOString() : null,
+          end: hasDates ? end.toISOString() : null,
           period: period || 'custom',
+          isOverall: !hasDates,
         },
       },
       'Conversion reports retrieved successfully',

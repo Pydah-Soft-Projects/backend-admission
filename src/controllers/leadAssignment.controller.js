@@ -1286,8 +1286,10 @@ export const getUserAnalytics = async (req, res) => {
           [userId, ...activityDateParams]
         ).catch(() => [[]]);
 
-        const totalCalls = calls.length;
+        const actualCallCount = calls.length;
         const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
+        const uniqueLeadsCalled = new Set(calls.map(c => c.lead_id).filter(id => id && id !== 'unknown')).size;
+        
         const callsByLead = {};
         calls.forEach((call) => {
           const leadId = call.lead_id || 'unknown';
@@ -1521,9 +1523,9 @@ export const getUserAnalytics = async (req, res) => {
           recentActivityCount,
           // Detailed communication and activity data
           calls: {
-            total: totalCalls,
+            total: uniqueLeadsCalled,
             totalDuration: totalCallDuration,
-            averageDuration: totalCalls > 0 ? Math.round(totalCallDuration / totalCalls) : 0,
+            averageDuration: actualCallCount > 0 ? Math.round(totalCallDuration / actualCallCount) : 0,
             byLead: Object.values(callsByLead),
             dailyCallActivity,
           },
