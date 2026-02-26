@@ -11,7 +11,7 @@ const deleteQueue = new PQueue({
 });
 
 // Helper function to format lead data from SQL to camelCase
-const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
+const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null) => {
   if (!leadData) return null;
   return {
     id: leadData.id,
@@ -44,6 +44,9 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null) => {
     assignedTo: assignedToUser || leadData.assigned_to,
     assignedAt: leadData.assigned_at,
     assignedBy: leadData.assigned_by,
+    assignedToPro: assignedToProUser || leadData.assigned_to_pro,
+    proAssignedAt: leadData.pro_assigned_at,
+    proAssignedBy: leadData.pro_assigned_by,
     source: leadData.source,
     utmSource: leadData.utm_source,
     utmMedium: leadData.utm_medium,
@@ -198,7 +201,11 @@ export const getLeads = async (req, res) => {
     // Access control - if user is not Super Admin, only show assigned leads
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       const userId = req.user.id || req.user._id;
-      conditions.push('l.assigned_to = ?');
+      if (req.user.roleName === 'PRO') {
+        conditions.push('l.assigned_to_pro = ?');
+      } else {
+        conditions.push('l.assigned_to = ?');
+      }
       params.push(userId);
     }
 
@@ -226,10 +233,12 @@ export const getLeads = async (req, res) => {
       SELECT 
         l.*,
         u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
+        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
       FROM leads l
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
       ${whereClause}
 
       ORDER BY l.assigned_at DESC, l.id ASC
@@ -253,7 +262,14 @@ export const getLeads = async (req, res) => {
         name: lead.uploaded_by_name,
       } : null;
 
-      return formatLead(lead, assignedToUser, uploadedByUser);
+      const assignedToProUser = lead.assigned_to_pro_id ? {
+        id: lead.assigned_to_pro_id,
+        _id: lead.assigned_to_pro_id,
+        name: lead.assigned_to_pro_name,
+        email: lead.assigned_to_pro_email,
+      } : null;
+
+      return formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser);
     });
 
     return successResponse(res, {
@@ -285,10 +301,12 @@ export const getLead = async (req, res) => {
       `SELECT 
         l.*,
         u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
+        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
       FROM leads l
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
       WHERE l.id = ?`,
       [req.params.id]
     );
@@ -307,7 +325,7 @@ export const getLead = async (req, res) => {
       hasAccess = true;
     }
     // If lead is assigned to the user, they have access
-    else if (leadData.assigned_to === userId) {
+    else if (leadData.assigned_to === userId || leadData.assigned_to_pro === userId) {
       hasAccess = true;
     }
     // If user is a Manager, check if lead is assigned to one of their team members
@@ -341,7 +359,14 @@ export const getLead = async (req, res) => {
       name: leadData.uploaded_by_name,
     } : null;
 
-    const lead = formatLead(leadData, assignedToUser, uploadedByUser);
+    const assignedToProUser = leadData.assigned_to_pro_id ? {
+      id: leadData.assigned_to_pro_id,
+      _id: leadData.assigned_to_pro_id,
+      name: leadData.assigned_to_pro_name,
+      email: leadData.assigned_to_pro_email,
+    } : null;
+
+    const lead = formatLead(leadData, assignedToUser, uploadedByUser, assignedToProUser);
 
     return successResponse(res, lead, 'Lead retrieved successfully', 200);
   } catch (error) {
@@ -703,14 +728,16 @@ export const updateLead = async (req, res) => {
     const currentLead = leads[0];
 
     // Check if user has access
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && currentLead.assigned_to !== userId) {
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && 
+        currentLead.assigned_to !== userId && 
+        currentLead.assigned_to_pro !== userId) {
       return errorResponse(res, 'Access denied', 403);
     }
 
     // Regular users can only update status and notes; Super Admin can update everything.
-    // Assigned counsellor (user assigned to this lead) can also update profile fields: name, phone, father, village, state, district, mandal.
+    // Assigned counsellor or PRO can also update profile fields: name, phone, father, village, state, district, mandal.
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
-    const isAssignedCounsellor = !isSuperAdmin && currentLead.assigned_to === userId;
+    const isAssignedCounsellor = !isSuperAdmin && (currentLead.assigned_to === userId || currentLead.assigned_to_pro === userId);
 
     // Store original values for comparison
     const originalLead = {

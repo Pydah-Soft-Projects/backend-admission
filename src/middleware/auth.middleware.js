@@ -100,7 +100,7 @@ export const requireTimeTrackingEnabled = (req, res, next) => {
   if (isAdminOrDataEntry) {
     return next();
   }
-  const isUserOrCounsellor = roleName === 'User' || roleName === 'Student Counselor';
+  const isUserOrCounsellor = roleName === 'User' || roleName === 'Student Counselor' || roleName === 'PRO';
   const isManagerRole = isManager === true;
   if ((isUserOrCounsellor || isManagerRole) && timeTrackingEnabled === false) {
     return errorResponse(res, 'Login and logout time tracking must be enabled to access this resource. Please enable it in Settings.', 403);

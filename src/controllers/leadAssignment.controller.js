@@ -72,8 +72,10 @@ export const assignLeads = async (req, res) => {
         return errorResponse(res, 'Academic year is required for bulk assignment', 400);
       }
 
-      // Build filter for unassigned leads
-      const conditions = ['(assigned_to IS NULL)', 'academic_year = ?'];
+      // Build filter for leads available to this user
+      const isProRole = user.role_name === 'PRO';
+      const assignmentCondition = isProRole ? '(assigned_to_pro IS NULL)' : '(assigned_to IS NULL)';
+      const conditions = [assignmentCondition, 'academic_year = ?'];
       const params = [yearNum];
 
       // Add mandal filter if provided
@@ -147,20 +149,31 @@ export const assignLeads = async (req, res) => {
       const oldStatus = lead.lead_status || 'New';
       const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
       
-      // Update lead (set academic_year when provided so User Analytics counts by year are correct)
+      // Update lead
       const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : null;
       const setAcademicYear = yearNum != null && !Number.isNaN(yearNum)
         ? ', academic_year = ?'
         : '';
-      const updateParams = yearNum != null && !Number.isNaN(yearNum)
+      
+      const isProRole = user.role_name === 'PRO';
+      let updateQuery;
+      let updateParams;
+
+      if (isProRole) {
+        updateQuery = `UPDATE leads SET 
+          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
+         WHERE id = ?`;
+      } else {
+        updateQuery = `UPDATE leads SET 
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
+         WHERE id = ?`;
+      }
+
+      updateParams = yearNum != null && !Number.isNaN(yearNum)
         ? [userId, currentUserId, newStatus, yearNum, lead.id]
         : [userId, currentUserId, newStatus, lead.id];
-      await pool.execute(
-        `UPDATE leads SET 
-          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
-         WHERE id = ?`,
-        updateParams
-      );
+
+      await pool.execute(updateQuery, updateParams);
       
       // Create activity log
       const activityLogId = uuidv4();
@@ -253,8 +266,13 @@ export const getAssignmentStats = async (req, res) => {
     const { mandal, state, academicYear, studentGroup, institutionName, forBreakdown } = req.query;
     const pool = getPool();
 
-    // Build filter for unassigned leads
-    const conditions = ['assigned_to IS NULL'];
+    // Build filter for available leads
+    // Use targetRole query parameter if provided (e.g. from UI when selecting a user)
+    const targetRole = req.query.targetRole || 'Student Counselor';
+    const isProTarget = targetRole === 'PRO';
+    const assignmentCondition = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
+    
+    const conditions = [assignmentCondition];
     const params = [];
 
     // Academic year filter (optional; when set, stats are for that year only)
@@ -902,14 +920,26 @@ export const getOverviewAnalytics = async (req, res) => {
     );
     const admittedLeads = admittedLeadsResult[0].total;
 
-    const [assignedLeadsResult] = await pool.execute(
+    const [assignedLeadsTotalResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('(assigned_to IS NOT NULL OR assigned_to_pro IS NOT NULL)')}`,
+      leadParams
+    );
+    const assignedLeadsTotal = assignedLeadsTotalResult[0].total;
+
+    const [assignedLeadsToCounselorResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to IS NOT NULL')}`,
       leadParams
     );
-    const assignedLeads = assignedLeadsResult[0].total;
+    const assignedLeadsToCounselor = assignedLeadsToCounselorResult[0].total;
+
+    const [assignedLeadsToProResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to_pro IS NOT NULL')}`,
+      leadParams
+    );
+    const assignedLeadsToPro = assignedLeadsToProResult[0].total;
 
     const [unassignedLeadsResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to IS NULL')}`,
+      `SELECT COUNT(*) as total FROM leads ${leadWhereAnd('assigned_to IS NULL AND assigned_to_pro IS NULL')}`,
       leadParams
     );
     const unassignedLeads = unassignedLeadsResult[0].total;
@@ -1123,7 +1153,9 @@ export const getOverviewAnalytics = async (req, res) => {
         leads: totalLeads,
         confirmedLeads,
         admittedLeads,
-        assignedLeads,
+        assignedLeads: assignedLeadsTotal,
+        assignedLeadsToCounselor,
+        assignedLeadsToPro,
         unassignedLeads,
         joinings: {
           draft: joiningStatusBreakdown.draft || 0,
@@ -1219,10 +1251,11 @@ export const getUserAnalytics = async (req, res) => {
     // Get analytics for each user with comprehensive data including activity logs
     const userAnalytics = await Promise.all(
       users.map(async (user) => {
-        const userId = user.id;
+        const isPro = user.role_name === 'PRO';
+        const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
         const leadWhereClause = useAcademicYear
-          ? 'assigned_to = ? AND academic_year = ?'
-          : 'assigned_to = ?';
+          ? `${assignmentCol} = ? AND academic_year = ?`
+          : `${assignmentCol} = ?`;
         const leadParams = useAcademicYear ? [userId, yearNum] : [userId];
 
         // Count total assigned leads (optionally for academic year)
@@ -1260,7 +1293,7 @@ export const getUserAnalytics = async (req, res) => {
           `SELECT COUNT(DISTINCT a.lead_id) as total
            FROM admissions a
            INNER JOIN leads l ON a.lead_id = l.id
-           WHERE l.assigned_to = ? ${useAcademicYear ? 'AND l.academic_year = ?' : ''}`,
+           WHERE l.${assignmentCol} = ? ${useAcademicYear ? 'AND l.academic_year = ?' : ''}`,
           leadParams
         ).catch(() => [{ total: 0 }]);
         const convertedLeads = convertedLeadsResult[0].total;

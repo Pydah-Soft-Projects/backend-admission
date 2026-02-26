@@ -35,7 +35,7 @@ const run = async () => {
     console.log('Adding new constraint with Student Counselor and Data Entry User.');
     await pool.execute(
       `ALTER TABLE users ADD CONSTRAINT users_role_name_check
-       CHECK (role_name IN ('Super Admin', 'Sub Super Admin', 'User', 'Student Counselor', 'Data Entry User'))`
+       CHECK (role_name IN ('Super Admin', 'Sub Super Admin', 'User', 'Student Counselor', 'Data Entry User', 'PRO'))`
     );
 
     console.log('Done. New roles Student Counselor and Data Entry User are now allowed.');

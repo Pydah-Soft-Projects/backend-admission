@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Role name is required'],
       trim: true,
-      enum: ['Super Admin', 'Sub Super Admin', 'User'],
+      enum: ['Super Admin', 'Sub Super Admin', 'User', 'PRO'],
     },
     managedBy: {
       type: mongoose.Schema.Types.ObjectId,
