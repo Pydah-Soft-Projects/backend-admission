@@ -1256,7 +1256,7 @@ export const getUserAnalytics = async (req, res) => {
         const leadWhereClause = useAcademicYear
           ? `${assignmentCol} = ? AND academic_year = ?`
           : `${assignmentCol} = ?`;
-        const leadParams = useAcademicYear ? [userId, yearNum] : [userId];
+        const leadParams = useAcademicYear ? [user.id, yearNum] : [user.id];
 
         // Count total assigned leads (optionally for academic year)
         const [totalAssignedResult] = await pool.execute(
@@ -1316,7 +1316,7 @@ export const getUserAnalytics = async (req, res) => {
            LEFT JOIN leads l ON c.lead_id = l.id
            WHERE c.sent_by = ? AND c.type = 'call' ${callDateClause}
            ORDER BY c.sent_at DESC`,
-          [userId, ...activityDateParams]
+          [user.id, ...activityDateParams]
         ).catch(() => [[]]);
 
         const actualCallCount = calls.length;
@@ -1391,7 +1391,7 @@ export const getUserAnalytics = async (req, res) => {
            LEFT JOIN message_templates t ON c.template_id = t.id
            WHERE c.sent_by = ? AND c.type = 'sms' ${smsDateClause}
            ORDER BY c.sent_at DESC`,
-          [userId, ...activityDateParams]
+          [user.id, ...activityDateParams]
         ).catch(() => [[]]);
 
         const totalSMS = smsMessages.length;
@@ -1450,7 +1450,7 @@ export const getUserAnalytics = async (req, res) => {
            LEFT JOIN leads l ON a.lead_id = l.id
            WHERE a.performed_by = ? AND a.type = 'status_change' ${statusChangeDateClause}
            ORDER BY a.created_at DESC`,
-          [userId, ...activityDateParams]
+          [user.id, ...activityDateParams]
         );
 
         const totalStatusChanges = statusChanges.length;
@@ -1539,7 +1539,7 @@ export const getUserAnalytics = async (req, res) => {
         });
 
         return {
-          userId: userId,
+          userId: user.id,
           userName: user.name,
           name: user.name,
           email: user.email,
