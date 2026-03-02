@@ -1586,6 +1586,7 @@ export const getUserAnalytics = async (req, res) => {
           totalAssigned,
           activeLeads,
           convertedLeads,
+          interested: statusMap['Interested'] || 0,
           conversionRate: totalAssigned > 0 ? parseFloat(((convertedLeads / totalAssigned) * 100).toFixed(2)) : 0,
           statusBreakdown: statusMap,
           sourceBreakdown: sourceMap,
