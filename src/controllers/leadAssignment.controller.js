@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName } = req.body;
+    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -161,17 +161,17 @@ export const assignLeads = async (req, res) => {
 
       if (isProRole) {
         updateQuery = `UPDATE leads SET 
-          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
+          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, updated_at = NOW()
          WHERE id = ?`;
       } else {
         updateQuery = `UPDATE leads SET 
-          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?${setAcademicYear}, updated_at = NOW()
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, updated_at = NOW()
          WHERE id = ?`;
       }
 
       updateParams = yearNum != null && !Number.isNaN(yearNum)
-        ? [userId, currentUserId, newStatus, yearNum, lead.id]
-        : [userId, currentUserId, newStatus, lead.id];
+        ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id]
+        : [userId, currentUserId, newStatus, targetDate || null, lead.id];
 
       await pool.execute(updateQuery, updateParams);
 
@@ -263,7 +263,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, state, academicYear, studentGroup, institutionName, forBreakdown } = req.query;
+    const { mandal, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
     const pool = getPool();
 
     // Build filter for available leads
@@ -281,6 +281,15 @@ export const getAssignmentStats = async (req, res) => {
       if (!Number.isNaN(year)) {
         conditions.push('academic_year = ?');
         params.push(year);
+      }
+    }
+
+    // Cycle number filter
+    if (cycleNumber != null && cycleNumber !== '') {
+      const cycle = parseInt(cycleNumber, 10);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('cycle_number = ?');
+        params.push(cycle);
       }
     }
 
@@ -433,7 +442,7 @@ export const getAssignmentStats = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignedCountForUser = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup } = req.query;
+    const { userId, mandal, state, academicYear, studentGroup, cycleNumber } = req.query;
     const pool = getPool();
 
     if (!userId) {
@@ -446,6 +455,14 @@ export const getAssignedCountForUser = async (req, res) => {
 
     const conditions = [`${assignmentCol} = ?`];
     const params = [userId];
+
+    if (cycleNumber != null && cycleNumber !== '') {
+      const cycle = parseInt(cycleNumber, 10);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('cycle_number = ?');
+        params.push(cycle);
+      }
+    }
 
     if (academicYear != null && academicYear !== '') {
       const year = parseInt(academicYear, 10);
@@ -568,7 +585,14 @@ export const removeAssignments = async (req, res) => {
     const placeholders = leadIds.map(() => '?').join(',');
 
     await pool.execute(
-      `UPDATE leads SET ${assignmentCol} = NULL, ${assignmentAtCol} = NULL, ${assignmentByCol} = NULL, lead_status = 'New', updated_at = NOW() WHERE id IN (${placeholders})`,
+      `UPDATE leads SET 
+        ${assignmentCol} = NULL, 
+        ${assignmentAtCol} = NULL, 
+        ${assignmentByCol} = NULL, 
+        lead_status = 'New', 
+        target_date = NULL,
+        updated_at = NOW() 
+      WHERE id IN (${placeholders})`,
       leadIds
     );
 

@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 // import connectDB from './config/database.js'; // COMMENTED OUT: Migration to SQL complete
 import connectSQLDB from './config-sql/database.js';
 import connectSecondaryDB from './config-sql/database-secondary.js';
+import { initLeadReclaimer } from './services/leadReclaimer.service.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import leadRoutes from './routes/lead.routes.js';
@@ -53,6 +54,9 @@ if (process.env.DB_SECONDARY_HOST && process.env.DB_SECONDARY_NAME) {
 }
 
 const app = express();
+// Initialize Lead Reclamation Service (runs every 24 hours)
+initLeadReclaimer();
+
 const PORT = process.env.PORT || 5000;
 
 // Middleware
