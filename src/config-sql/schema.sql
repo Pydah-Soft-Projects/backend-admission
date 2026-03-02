@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS leads (
     enquiry_number VARCHAR(50) UNIQUE,
     name VARCHAR(255) NOT NULL,
     phone VARCHAR(20) NOT NULL,
+    alternate_mobile VARCHAR(20) DEFAULT '',
     email VARCHAR(255),
     father_name VARCHAR(255) NOT NULL,
     mother_name VARCHAR(255) DEFAULT '',
