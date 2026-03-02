@@ -17,12 +17,12 @@ export const getDailyCallReports = async (req, res) => {
     // Validate and parse dates
     let start, end;
     const hasDates = startDate && endDate;
-    
+
     try {
       if (hasDates) {
         end = new Date(endDate);
         start = new Date(startDate);
-        
+
         if (isNaN(start.getTime()) || isNaN(end.getTime())) {
           return errorResponse(res, 'Invalid date format', 400);
         }
@@ -45,7 +45,7 @@ export const getDailyCallReports = async (req, res) => {
     }
 
     const pool = getPool();
-    
+
     // Build WHERE conditions
     const conditions = ['type = ?'];
     const params = ['call'];
@@ -90,7 +90,7 @@ export const getDailyCallReports = async (req, res) => {
         `SELECT id, name, email, role_name FROM users WHERE id IN (${userPlaceholders})`,
         userIds
       );
-      
+
       users.forEach((user) => {
         if (user && user.id) {
           userMap[user.id] = user;
@@ -101,8 +101,8 @@ export const getDailyCallReports = async (req, res) => {
     // Format response
     const formattedReports = (callReports || []).map((report) => {
       const userId = report.user_id || 'unknown';
-      const dateStr = report.date instanceof Date 
-        ? report.date.toISOString().slice(0, 10) 
+      const dateStr = report.date instanceof Date
+        ? report.date.toISOString().slice(0, 10)
         : report.date;
       return {
         date: dateStr || '',
@@ -220,15 +220,15 @@ export const getConversionReports = async (req, res) => {
     }
 
     const pool = getPool();
-    
-    // Build filter for leads
-    let leadConditions = ['assigned_to IS NOT NULL'];
+
+    // Build filter for leads - include both standard and PRO assignments
+    let leadConditions = ['(l.assigned_to IS NOT NULL OR l.assigned_to_pro IS NOT NULL)'];
     let leadParams = [];
 
     if (hasDates) {
       const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
       const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
-      leadConditions.push('created_at >= ?', 'created_at <= ?');
+      leadConditions.push('l.created_at >= ?', 'l.created_at <= ?');
       leadParams.push(startStr, endStr);
     }
 
@@ -236,18 +236,18 @@ export const getConversionReports = async (req, res) => {
       if (!userId || typeof userId !== 'string' || userId.length !== 36) {
         return errorResponse(res, 'Invalid user ID', 400);
       }
-      leadConditions.push('assigned_to = ?');
-      leadParams.push(userId);
+      leadConditions.push('(l.assigned_to = ? OR l.assigned_to_pro = ?)');
+      leadParams.push(userId, userId);
     }
 
     const leadWhereClause = `WHERE ${leadConditions.join(' AND ')}`;
 
     // Get all assigned leads in the period
     const [assignedLeads] = await pool.execute(
-      `SELECT l.id, l.assigned_to, l.enquiry_number, l.name, l.created_at,
+      `SELECT l.id, l.assigned_to, l.assigned_to_pro, l.enquiry_number, l.name, l.created_at,
        u.id as assigned_to_id, u.name as assigned_to_name, u.email as assigned_to_email, u.role_name as assigned_to_role_name
        FROM leads l
-       LEFT JOIN users u ON l.assigned_to = u.id
+       LEFT JOIN users u ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
        ${leadWhereClause}`,
       leadParams
     ).catch((error) => {
@@ -255,10 +255,10 @@ export const getConversionReports = async (req, res) => {
       return [[], []];
     });
 
-    // Get all admissions - NOTE: Requires admissions table (will be updated when admission controller is migrated)
+    // Get all admissions
     const [admissions] = await pool.execute(
       `SELECT a.id, a.lead_id, a.admission_date,
-       l.assigned_to, l.enquiry_number, l.name as lead_name
+       l.assigned_to, l.assigned_to_pro, l.enquiry_number, l.name as lead_name
        FROM admissions a
        LEFT JOIN leads l ON a.lead_id = l.id
        WHERE a.admission_date >= ? AND a.admission_date <= ?`,
@@ -271,8 +271,8 @@ export const getConversionReports = async (req, res) => {
     // Create a map of leadId to admission
     const leadToAdmissionMap = {};
     (admissions || []).forEach((admission) => {
-      if (admission && admission.lead_id && admission.assigned_to) {
-        const assignedToId = admission.assigned_to;
+      if (admission && admission.lead_id) {
+        const assignedToId = admission.assigned_to || admission.assigned_to_pro;
         if (assignedToId) {
           if (!leadToAdmissionMap[assignedToId]) {
             leadToAdmissionMap[assignedToId] = [];
@@ -292,33 +292,31 @@ export const getConversionReports = async (req, res) => {
     // Group leads by assigned user
     const userLeadMap = {};
     (assignedLeads || []).forEach((lead) => {
-      if (lead && lead.assigned_to) {
-        const userId = lead.assigned_to;
-        if (userId) {
-          if (!userLeadMap[userId]) {
-            userLeadMap[userId] = {
-              userId,
-              userName: lead.assigned_to_name || 'Unknown',
-              userEmail: lead.assigned_to_email || '',
-              roleName: lead.assigned_to_role_name || 'User',
-              leads: [],
-            };
-          }
-          userLeadMap[userId].leads.push({
-            id: lead.id,
-            _id: lead.id,
-            enquiryNumber: lead.enquiry_number,
-            name: lead.name,
-            createdAt: lead.created_at,
-          });
+      const userId = lead.assigned_to || lead.assigned_to_pro;
+      if (userId) {
+        if (!userLeadMap[userId]) {
+          userLeadMap[userId] = {
+            userId,
+            userName: lead.assigned_to_name || 'Unknown',
+            userEmail: lead.assigned_to_email || '',
+            roleName: lead.assigned_to_role_name || 'User',
+            leads: [],
+          };
         }
+        userLeadMap[userId].leads.push({
+          id: lead.id,
+          _id: lead.id,
+          enquiryNumber: lead.enquiry_number,
+          name: lead.name,
+          createdAt: lead.created_at,
+        });
       }
     });
 
     // Get status conversions from activity logs for the period
     const [statusChanges] = await pool.execute(
       `SELECT a.lead_id, a.old_status, a.new_status, a.performed_by, a.created_at,
-       l.assigned_to, l.name as lead_name, l.enquiry_number,
+       l.assigned_to, l.assigned_to_pro, l.name as lead_name, l.enquiry_number,
        u.name as performed_by_name, u.email as performed_by_email
        FROM activity_logs a
        LEFT JOIN leads l ON a.lead_id = l.id
@@ -330,8 +328,8 @@ export const getConversionReports = async (req, res) => {
     // Group status changes by user
     const userStatusChanges = {};
     statusChanges.forEach((change) => {
-      if (change.lead_id && change.assigned_to) {
-        const userId = change.assigned_to;
+      const userId = change.assigned_to || change.assigned_to_pro;
+      if (change.lead_id && userId) {
         if (!userStatusChanges[userId]) {
           userStatusChanges[userId] = [];
         }
@@ -350,15 +348,16 @@ export const getConversionReports = async (req, res) => {
     // Pre-calculate confirmed leads count for all users
     const userIds = Object.keys(userLeadMap);
     const confirmedLeadsMap = {};
-    
+
     if (userIds.length > 0) {
       const userPlaceholders = userIds.map(() => '?').join(',');
       const [confirmedLeadsAggregation] = await pool.execute(
-        `SELECT assigned_to, COUNT(*) as count 
+        `SELECT COALESCE(assigned_to, assigned_to_pro) as assigned_to, COUNT(*) as count 
          FROM leads 
-         WHERE assigned_to IN (${userPlaceholders}) AND lead_status = 'Confirmed' AND created_at >= ? AND created_at <= ?
-         GROUP BY assigned_to`,
-        [...userIds, startStr, endStr]
+         WHERE (assigned_to IN (${userPlaceholders}) OR assigned_to_pro IN (${userPlaceholders})) 
+         AND lead_status = 'Confirmed' AND created_at >= ? AND created_at <= ?
+         GROUP BY COALESCE(assigned_to, assigned_to_pro)`,
+        [...userIds, ...userIds, startStr, endStr]
       );
 
       confirmedLeadsAggregation.forEach((item) => {
@@ -378,7 +377,7 @@ export const getConversionReports = async (req, res) => {
 
       // Get status changes for this user's leads
       const userStatusChangesList = userStatusChanges[userData.userId] || [];
-      
+
       // Count status conversions (e.g., New → Interested, Interested → Confirmed)
       const statusConversionCounts = {};
       userStatusChangesList.forEach((change) => {

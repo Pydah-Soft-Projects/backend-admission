@@ -202,11 +202,12 @@ export const getLeads = async (req, res) => {
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
       const userId = req.user.id || req.user._id;
       if (req.user.roleName === 'PRO') {
-        conditions.push('l.assigned_to_pro = ?');
+        conditions.push('(l.assigned_to_pro = ? OR l.assigned_to = ?)');
+        params.push(userId, userId);
       } else {
         conditions.push('l.assigned_to = ?');
+        params.push(userId);
       }
-      params.push(userId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -320,8 +321,11 @@ export const getLead = async (req, res) => {
     // Check if user has access
     let hasAccess = false;
 
-    // Super Admin always has access
-    if (hasElevatedAdminPrivileges(req.user.roleName)) {
+    // Admin, PRO, Super Admin always have access
+    const isAdmin = req.user.roleName === 'Admin';
+    const isPro = req.user.roleName === 'PRO';
+
+    if (hasElevatedAdminPrivileges(req.user.roleName) || isAdmin || isPro) {
       hasAccess = true;
     }
     // If lead is assigned to the user, they have access
@@ -728,16 +732,18 @@ export const updateLead = async (req, res) => {
     const currentLead = leads[0];
 
     // Check if user has access
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && 
-        currentLead.assigned_to !== userId && 
-        currentLead.assigned_to_pro !== userId) {
+    const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
+    const isAdmin = req.user.roleName === 'Admin';
+    const isPro = req.user.roleName === 'PRO';
+    const isAssigned = currentLead.assigned_to === userId || currentLead.assigned_to_pro === userId;
+
+    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
       return errorResponse(res, 'Access denied', 403);
     }
 
     // Regular users can only update status and notes; Super Admin can update everything.
     // Assigned counsellor or PRO can also update profile fields: name, phone, father, village, state, district, mandal.
-    const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
-    const isAssignedCounsellor = !isSuperAdmin && (currentLead.assigned_to === userId || currentLead.assigned_to_pro === userId);
+    const isAssignedCounsellor = !isSuperAdmin && isAssigned;
 
     // Store original values for comparison
     const originalLead = {
@@ -1045,7 +1051,7 @@ export const updateLead = async (req, res) => {
     if ((isSuperAdmin || isAssignedCounsellor) && fieldChanges.length > 0 && !assignedTo) {
       const activityLogId = uuidv4();
       const changeSummary = fieldChanges.map(c => `${c.field} (${c.old || 'empty'} -> ${c.new || 'empty'})`).join(', ');
-      
+
       await pool.execute(
         `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -1542,8 +1548,13 @@ export const getAllLeadIds = async (req, res) => {
     // Access control
     const userId = req.user.id || req.user._id;
     if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      conditions.push('assigned_to = ?');
-      params.push(userId);
+      if (req.user.roleName === 'PRO') {
+        conditions.push('(assigned_to_pro = ? OR assigned_to = ?)');
+        params.push(userId, userId);
+      } else {
+        conditions.push('assigned_to = ?');
+        params.push(userId);
+      }
     }
 
     // Optionally exclude leads that were "touched today" by the current user (call, SMS, or activity log)

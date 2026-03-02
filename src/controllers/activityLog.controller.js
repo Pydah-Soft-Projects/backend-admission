@@ -15,8 +15,8 @@ const formatActivityLog = (logData, performedByUser = null) => {
     newStatus: logData.new_status,
     comment: logData.comment,
     performedBy: performedByUser || logData.performed_by,
-    metadata: typeof logData.metadata === 'string' 
-      ? JSON.parse(logData.metadata) 
+    metadata: typeof logData.metadata === 'string'
+      ? JSON.parse(logData.metadata)
       : logData.metadata || {},
     createdAt: logData.created_at,
     updatedAt: logData.updated_at,
@@ -46,7 +46,12 @@ export const addActivity = async (req, res) => {
     const lead = leads[0];
 
     // Check if user has access
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assigned_to !== userId) {
+    const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
+    const isAdmin = req.user.roleName === 'Admin';
+    const isPro = req.user.roleName === 'PRO';
+    const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
+
+    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -176,7 +181,12 @@ export const getActivityLogs = async (req, res) => {
     const lead = leads[0];
 
     // Check if user has access
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && lead.assigned_to !== userId) {
+    const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
+    const isAdmin = req.user.roleName === 'Admin';
+    const isPro = req.user.roleName === 'PRO';
+    const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
+
+    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
       return errorResponse(res, 'Access denied', 403);
     }
 

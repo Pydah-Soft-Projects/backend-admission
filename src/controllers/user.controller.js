@@ -200,7 +200,7 @@ export const createUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const updateUser = async (req, res) => {
   try {
-    const { name, email, password, roleName, isActive, designation, permissions, mobileNumber } = req.body;
+    const { name, email, password, roleName, isActive, designation, permissions, mobileNumber, unassignLeads } = req.body;
     const pool = getPool();
 
     // Get current user
@@ -364,6 +364,58 @@ export const updateUser = async (req, res) => {
         'UPDATE users SET managed_by = NULL WHERE managed_by = ?',
         [req.params.id]
       );
+    }
+
+    // Unassign leads if requested during deactivation
+    if (isActive === false && unassignLeads) {
+      const isProRole = currentUser.role_name === 'PRO';
+      const assignmentCol = isProRole ? 'assigned_to_pro' : 'assigned_to';
+      const assignmentAtCol = isProRole ? 'pro_assigned_at' : 'assigned_at';
+      const assignmentByCol = isProRole ? 'pro_assigned_by' : 'assigned_by';
+      const currentUserId = req.user.id || req.user._id;
+
+      // Get all leads assigned to this user
+      const [leadsToUnassign] = await pool.execute(
+        `SELECT id, lead_status FROM leads WHERE ${assignmentCol} = ?`,
+        [req.params.id]
+      );
+
+      if (leadsToUnassign.length > 0) {
+        const leadIds = leadsToUnassign.map((l) => l.id);
+        const placeholders = leadIds.map(() => '?').join(',');
+
+        // Unassign leads
+        await pool.execute(
+          `UPDATE leads SET ${assignmentCol} = NULL, ${assignmentAtCol} = NULL, ${assignmentByCol} = NULL, lead_status = 'New', updated_at = NOW() WHERE id IN (${placeholders})`,
+          leadIds
+        );
+
+        // Add activity logs
+        for (const lead of leadsToUnassign) {
+          const activityLogId = uuidv4();
+          await pool.execute(
+            `INSERT INTO activity_logs (
+              id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+              activityLogId,
+              lead.id,
+              'status_change',
+              lead.lead_status || 'Assigned',
+              'New',
+              `Assignment removed due to user deactivation`,
+              currentUserId,
+              JSON.stringify({
+                unassignment: {
+                  removedFrom: req.params.id,
+                  removedBy: currentUserId,
+                  reason: 'User Deactivation'
+                },
+              }),
+            ]
+          );
+        }
+      }
     }
 
     // Fetch updated user

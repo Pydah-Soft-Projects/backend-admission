@@ -140,21 +140,21 @@ export const assignLeads = async (req, res) => {
       `SELECT id, lead_status FROM leads WHERE id IN (${placeholders})`,
       leadIdsToAssign
     );
-    
+
     // Update leads and create activity logs
     const now = new Date();
     let modifiedCount = 0;
-    
+
     for (const lead of leadsToAssign) {
       const oldStatus = lead.lead_status || 'New';
       const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
-      
+
       // Update lead
       const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : null;
       const setAcademicYear = yearNum != null && !Number.isNaN(yearNum)
         ? ', academic_year = ?'
         : '';
-      
+
       const isProRole = user.role_name === 'PRO';
       let updateQuery;
       let updateParams;
@@ -174,7 +174,7 @@ export const assignLeads = async (req, res) => {
         : [userId, currentUserId, newStatus, lead.id];
 
       await pool.execute(updateQuery, updateParams);
-      
+
       // Create activity log
       const activityLogId = uuidv4();
       await pool.execute(
@@ -197,20 +197,20 @@ export const assignLeads = async (req, res) => {
           }),
         ]
       );
-      
+
       modifiedCount++;
     }
 
     // Send notifications (async, don't wait for it)
     const isBulk = !leadIds || leadIds.length === 0;
-    
+
     // Get full lead details for notification AND response (limit to 50 for email display, but we want all for export?)
     // Verify: If we assign 1000 leads, returning 1000 objects is fine.
     const [leadsDetails] = await pool.execute(
       `SELECT id, name, phone, enquiry_number, notes FROM leads WHERE id IN (${placeholders})`,
       leadIdsToAssign
     );
-    
+
     // Format for notification (limit to 50)
     const formattedLeadsNotification = leadsDetails.slice(0, 50).map(l => ({
       _id: l.id,
@@ -219,7 +219,7 @@ export const assignLeads = async (req, res) => {
       phone: l.phone,
       enquiryNumber: l.enquiry_number,
     }));
-    
+
     notifyLeadAssignment({
       userId,
       leadCount: modifiedCount,
@@ -271,7 +271,7 @@ export const getAssignmentStats = async (req, res) => {
     const targetRole = req.query.targetRole || 'Student Counselor';
     const isProTarget = targetRole === 'PRO';
     const assignmentCondition = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
-    
+
     const conditions = [assignmentCondition];
     const params = [];
 
@@ -440,7 +440,11 @@ export const getAssignedCountForUser = async (req, res) => {
       return errorResponse(res, 'User ID is required', 400);
     }
 
-    const conditions = ['assigned_to = ?'];
+    const targetRole = req.query.targetRole || 'Student Counselor';
+    const isPro = targetRole === 'PRO';
+    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
+
+    const conditions = [`${assignmentCol} = ?`];
     const params = [userId];
 
     if (academicYear != null && academicYear !== '') {
@@ -513,7 +517,12 @@ export const removeAssignments = async (req, res) => {
     }
     const user = users[0];
 
-    const conditions = ['assigned_to = ?'];
+    const isPro = user.role_name === 'PRO';
+    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
+    const assignmentAtCol = isPro ? 'pro_assigned_at' : 'assigned_at';
+    const assignmentByCol = isPro ? 'pro_assigned_by' : 'assigned_by';
+
+    const conditions = [`${assignmentCol} = ?`];
     const params = [userId];
     if (academicYear != null && academicYear !== '') {
       const year = parseInt(academicYear, 10);
@@ -559,7 +568,7 @@ export const removeAssignments = async (req, res) => {
     const placeholders = leadIds.map(() => '?').join(',');
 
     await pool.execute(
-      `UPDATE leads SET assigned_to = NULL, assigned_at = NULL, assigned_by = NULL, lead_status = 'New', updated_at = NOW() WHERE id IN (${placeholders})`,
+      `UPDATE leads SET ${assignmentCol} = NULL, ${assignmentAtCol} = NULL, ${assignmentByCol} = NULL, lead_status = 'New', updated_at = NOW() WHERE id IN (${placeholders})`,
       leadIds
     );
 
@@ -620,9 +629,26 @@ export const getUserLeadAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    // Build optional filters (assigned_to is always applied)
-    const conditions = ['assigned_to = ?'];
-    const params = [userId];
+    // Determine the role of the user being queried
+    const [usersResult] = await pool.execute(
+      'SELECT role_name FROM users WHERE id = ?',
+      [userId]
+    );
+
+    if (usersResult.length === 0) {
+      return errorResponse(res, 'User not found', 404);
+    }
+
+    const queriedUser = usersResult[0];
+    const isPro = queriedUser.role_name === 'PRO';
+    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
+    const assignmentCondition = isPro
+      ? '(assigned_to_pro = ? OR assigned_to = ?)'
+      : 'assigned_to = ?';
+
+    const conditions = [assignmentCondition];
+    const params = isPro ? [userId, userId] : [userId];
+
     if (academicYear != null && academicYear !== '') {
       const yearNum = parseInt(academicYear, 10);
       if (!Number.isNaN(yearNum)) {
@@ -650,6 +676,13 @@ export const getUserLeadAnalytics = async (req, res) => {
       params
     );
     const totalLeads = totalLeadsResult[0].total;
+
+    // Get grand total assigned to user (without filters)
+    const [overallTotalResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads WHERE ${assignmentCondition}`,
+      isPro ? [userId, userId] : [userId]
+    );
+    const overallTotalLeads = overallTotalResult[0].total;
 
     // Get leads by status
     const [statusBreakdown] = await pool.execute(
@@ -712,6 +745,7 @@ export const getUserLeadAnalytics = async (req, res) => {
       res,
       {
         totalLeads,
+        overallTotalLeads,
         statusBreakdown: statusCounts,
         mandalBreakdown: mandalBreakdown.map((item) => ({
           mandal: item.mandal,
@@ -772,8 +806,12 @@ export const getMyCallAnalytics = async (req, res) => {
       ? `AND a.created_at ${activityDateConditions.map((c) => c).join(' AND a.created_at ')}`
       : '';
 
-    const leadWhereClause = 'assigned_to = ?';
-    const leadParams = [userId];
+    const isPro = req.user.roleName === 'PRO';
+    const assignmentCondition = isPro
+      ? '(assigned_to_pro = ? OR assigned_to = ?)'
+      : 'assigned_to = ?';
+    const leadWhereClause = assignmentCondition;
+    const leadParams = isPro ? [userId, userId] : [userId];
 
     const [totalAssignedResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads WHERE ${leadWhereClause}`,
@@ -869,12 +907,12 @@ export const getOverviewAnalytics = async (req, res) => {
     const today = new Date();
     const endDate = new Date(today);
     endDate.setHours(23, 59, 59, 999);
-    
+
     // Calculate start date: go back (rangeInDays - 1) days to include today
     const startDate = new Date(today);
     startDate.setDate(startDate.getDate() - (rangeInDays - 1));
     startDate.setHours(0, 0, 0, 0);
-    
+
     // Helper to format date for key matching
     const formatDateKey = (date) => {
       const year = date.getFullYear();
@@ -1113,7 +1151,7 @@ export const getOverviewAnalytics = async (req, res) => {
 
       const results = [];
       const todayKey = formatDateKey(today);
-      
+
       // Generate all date keys in the range, ensuring today is included
       const allDateKeys = [];
       for (let i = 0; i < rangeInDays; i += 1) {
@@ -1122,15 +1160,15 @@ export const getOverviewAnalytics = async (req, res) => {
         const key = formatDateKey(date);
         allDateKeys.push(key);
       }
-      
+
       // Ensure today is in the list
       if (!allDateKeys.includes(todayKey)) {
         allDateKeys.push(todayKey);
       }
-      
+
       // Sort to maintain chronological order
       allDateKeys.sort();
-      
+
       // Build results
       for (const key of allDateKeys) {
         if (seriesMap instanceof Map) {
@@ -1196,7 +1234,7 @@ export const getUserAnalytics = async (req, res) => {
     const isManager = req.user.isManager === true;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
-    
+
     if (!isAdmin && !isManager) {
       return errorResponse(res, 'Access denied', 403);
     }
@@ -1220,7 +1258,7 @@ export const getUserAnalytics = async (req, res) => {
       activityDateConditions.push('<= ?');
       activityDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
     }
-    const activityDateClause = activityDateConditions.length > 0 
+    const activityDateClause = activityDateConditions.length > 0
       ? `AND ${activityDateConditions.map((c, i) => `sent_at ${c}`).join(' AND ')}`
       : '';
 
@@ -1304,12 +1342,12 @@ export const getUserAnalytics = async (req, res) => {
           leadParams
         );
         const leadIds = userLeads.map((lead) => lead.id);
-        
+
         // Get calls made by this user in the period - NOTE: Requires communications table
         const callDateClause = activityDateConditions.length > 0
           ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
           : '';
-        
+
         const [calls] = await pool.execute(
           `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
            FROM communications c
@@ -1322,7 +1360,7 @@ export const getUserAnalytics = async (req, res) => {
         const actualCallCount = calls.length;
         const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
         const uniqueLeadsCalled = new Set(calls.map(c => c.lead_id).filter(id => id && id !== 'unknown')).size;
-        
+
         const callsByLead = {};
         calls.forEach((call) => {
           const leadId = call.lead_id || 'unknown';
@@ -1382,7 +1420,7 @@ export const getUserAnalytics = async (req, res) => {
         const smsDateClause = activityDateConditions.length > 0
           ? `AND sent_at ${activityDateConditions.map((c) => c).join(' AND sent_at ')}`
           : '';
-        
+
         const [smsMessages] = await pool.execute(
           `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number,
            t.name as template_name
@@ -1443,7 +1481,7 @@ export const getUserAnalytics = async (req, res) => {
         const statusChangeDateClause = activityDateConditions.length > 0
           ? `AND a.created_at ${activityDateConditions.map((c) => c).join(' AND a.created_at ')}`
           : '';
-        
+
         const [statusChanges] = await pool.execute(
           `SELECT a.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
            FROM activity_logs a
