@@ -34,6 +34,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     gender: leadData.gender || 'Not Specified',
     rank: leadData.rank,
     interCollege: leadData.inter_college || '',
+    alternateMobile: leadData.alternate_mobile || '',
     quota: leadData.quota || 'Not Applicable',
     applicationStatus: leadData.application_status || 'Not Provided',
     dynamicFields: typeof leadData.dynamic_fields === 'string'
@@ -763,6 +764,7 @@ export const updateLead = async (req, res) => {
       gender: currentLead.gender,
       rank: currentLead.rank,
       interCollege: currentLead.inter_college,
+      alternateMobile: currentLead.alternate_mobile,
       hallTicketNumber: currentLead.hall_ticket_number,
       applicationStatus: currentLead.application_status,
     };
@@ -797,6 +799,7 @@ export const updateLead = async (req, res) => {
       academicYear,
       studentGroup,
       address,
+      alternateMobile,
     } = req.body;
 
     const newLeadStatus = leadStatus ?? legacyStatus;
@@ -877,6 +880,10 @@ export const updateLead = async (req, res) => {
         updateFields.push('inter_college = ?');
         updateValues.push(interCollege ? String(interCollege).trim() : '');
       }
+      if (alternateMobile !== undefined) {
+        updateFields.push('alternate_mobile = ?');
+        updateValues.push(alternateMobile ? String(alternateMobile).trim() : '');
+      }
       if (applicationStatus !== undefined) {
         updateFields.push('application_status = ?');
         updateValues.push(applicationStatus);
@@ -924,6 +931,10 @@ export const updateLead = async (req, res) => {
       if (interCollege !== undefined) {
         updateFields.push('inter_college = ?');
         updateValues.push(interCollege ? String(interCollege).trim() : '');
+      }
+      if (alternateMobile !== undefined) {
+        updateFields.push('alternate_mobile = ?');
+        updateValues.push(alternateMobile ? String(alternateMobile).trim() : '');
       }
     }
 
@@ -1045,6 +1056,7 @@ export const updateLead = async (req, res) => {
     compareAndLog('Gender', originalLead.gender, gender, gender);
     compareAndLog('Rank', originalLead.rank, rank, rank);
     compareAndLog('Inter College', originalLead.interCollege, interCollege, interCollege);
+    compareAndLog('Alternate Mobile', originalLead.alternateMobile, alternateMobile, alternateMobile);
     compareAndLog('Hall Ticket Number', originalLead.hallTicketNumber, hallTicketNumber, hallTicketNumber);
     compareAndLog('Application Status', originalLead.applicationStatus, applicationStatus, applicationStatus);
 
