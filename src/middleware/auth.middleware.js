@@ -89,6 +89,19 @@ export const isSuperAdmin = (req, res, next) => {
   next();
 };
 
+// Authorize roles
+export const authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return errorResponse(res, 'Not authenticated', 401);
+    }
+    if (!roles.includes(req.user.roleName)) {
+      return errorResponse(res, `User role ${req.user.roleName} is not authorized to access this route`, 403);
+    }
+    next();
+  };
+};
+
 // Check if time tracking is enabled for User/Counsellor/Manager dashboards
 // Super Admin, Sub Super Admin, Data Entry User are not restricted by this setting
 export const requireTimeTrackingEnabled = (req, res, next) => {
