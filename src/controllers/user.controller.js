@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import { connectHRMS } from '../config-mongo/hrms.js';
 
 const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO'];
 
@@ -31,6 +32,8 @@ const formatUser = (userData) => {
   return {
     id: userData.id,
     _id: userData.id, // Keep _id for backward compatibility
+    hrms_id: userData.hrms_id,
+    emp_no: userData.emp_no,
     name: userData.name,
     email: userData.email,
     mobileNumber: userData.mobile_number,
@@ -56,7 +59,7 @@ export const getUsers = async (req, res) => {
     const pool = getPool();
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users ORDER BY created_at DESC'
     );
 
     const formattedUsers = users.map(formatUser);
@@ -84,7 +87,7 @@ export const getUser = async (req, res) => {
     const pool = getPool();
 
     const [users] = await pool.execute(
-      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
     );
 
@@ -116,11 +119,7 @@ export const getUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const createUser = async (req, res) => {
   try {
-    const { name, email, password, roleName, designation, permissions, mobileNumber } = req.body;
-
-    if (!name || !email || !password || !roleName) {
-      return errorResponse(res, 'Please provide name, email, password, and roleName', 400);
-    }
+    const { name, email, password, roleName, designation, permissions, mobileNumber, hrms_id, emp_no } = req.body;
 
     if (!VALID_ROLES.includes(roleName)) {
       return errorResponse(res, 'Invalid role. Must be one of: Super Admin, Sub Super Admin, Student Counselor, Data Entry User, PRO', 400);
@@ -132,14 +131,16 @@ export const createUser = async (req, res) => {
 
     const pool = getPool();
 
-    // Check if user exists (email or mobile number)
-    const [existingUsers] = await pool.execute(
-      'SELECT id FROM users WHERE email = ?',
-      [email.toLowerCase().trim()]
-    );
+    // Check if user exists (email only if provided)
+    if (email && email.trim()) {
+      const [existingUsers] = await pool.execute(
+        'SELECT id FROM users WHERE email = ?',
+        [email.toLowerCase().trim()]
+      );
 
-    if (existingUsers.length > 0) {
-      return errorResponse(res, 'User with this email already exists', 400);
+      if (existingUsers.length > 0) {
+        return errorResponse(res, 'User with this email already exists', 400);
+      }
     }
 
     if (mobileNumber) {
@@ -156,21 +157,29 @@ export const createUser = async (req, res) => {
     const sanitizedPermissions =
       roleName === 'Sub Super Admin' ? sanitizePermissions(permissions) : {};
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    // Hash password (only if not an HRMS user)
+    let hashedPassword = null;
+    if (!emp_no) {
+      if (!password) {
+        return errorResponse(res, 'Password is required for non-HRMS users', 400);
+      }
+      const salt = await bcrypt.genSalt(10);
+      hashedPassword = await bcrypt.hash(password, salt);
+    }
 
     // Generate UUID
     const userId = uuidv4();
 
     // Insert user
     await pool.execute(
-      `INSERT INTO users (id, name, email, mobile_number, password, role_name, designation, permissions, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      `INSERT INTO users (id, hrms_id, emp_no, name, email, mobile_number, password, role_name, designation, permissions, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         userId,
+        hrms_id || null,
+        emp_no || null,
         name.trim(),
-        email.toLowerCase().trim(),
+        email && email.trim() ? email.toLowerCase().trim() : null,
         mobileNumber ? mobileNumber.trim() : null,
         hashedPassword,
         roleName,
@@ -182,7 +191,7 @@ export const createUser = async (req, res) => {
 
     // Fetch created user
     const [users] = await pool.execute(
-      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
       [userId]
     );
 
@@ -200,12 +209,12 @@ export const createUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const updateUser = async (req, res) => {
   try {
-    const { name, email, password, roleName, isActive, designation, permissions, mobileNumber, unassignLeads } = req.body;
+    const { name, email, password, roleName, isActive, designation, permissions, mobileNumber, unassignLeads, hrms_id, emp_no } = req.body;
     const pool = getPool();
 
     // Get current user
     const [users] = await pool.execute(
-      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
       [req.params.id]
     );
 
@@ -225,7 +234,7 @@ export const updateUser = async (req, res) => {
       updateValues.push(name.trim());
     }
 
-    if (email) {
+    if (email && email.trim()) {
       // Check if email is already in use by another user
       const [existingUsers] = await pool.execute(
         'SELECT id FROM users WHERE email = ? AND id != ?',
@@ -236,6 +245,9 @@ export const updateUser = async (req, res) => {
       }
       updateFields.push('email = ?');
       updateValues.push(email.toLowerCase().trim());
+    } else if (email === null || email === '') {
+      // Explicitly clearing email
+      updateFields.push('email = NULL');
     }
 
     if (mobileNumber !== undefined) {
@@ -264,6 +276,16 @@ export const updateUser = async (req, res) => {
       const hashedPassword = await bcrypt.hash(password, salt);
       updateFields.push('password = ?');
       updateValues.push(hashedPassword);
+    }
+
+    if (hrms_id !== undefined) {
+      updateFields.push('hrms_id = ?');
+      updateValues.push(hrms_id || null);
+    }
+
+    if (emp_no !== undefined) {
+      updateFields.push('emp_no = ?');
+      updateValues.push(emp_no || null);
     }
 
     // Handle isManager boolean
@@ -430,6 +452,44 @@ export const updateUser = async (req, res) => {
   } catch (error) {
     console.error('Update user error:', error);
     return errorResponse(res, error.message || 'Failed to update user', 500);
+  }
+};
+
+// @desc    Search employees from HRMS MongoDB
+// @route   GET /api/users/hrms/search
+// @access  Private (Super Admin)
+export const searchHrmsEmployees = async (req, res) => {
+  try {
+    const { name } = req.query;
+
+    if (!name || name.length < 2) {
+      return successResponse(res, [], 'Please provide at least 2 characters for search');
+    }
+
+    const hrmsConn = await connectHRMS();
+    
+    // Define model only if it doesn't exist
+    const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+
+    // Search by employee_name (case-insensitive partial match)
+    const employees = await Employee.find({
+      employee_name: { $regex: name, $options: 'i' }
+    }).limit(20).select('_id emp_no employee_name email phone_number');
+
+    // Map fields for frontend consistency (employee_name -> name)
+    const formattedEmployees = employees.map(emp => ({
+      _id: emp._id,
+      id: emp._id,
+      emp_no: emp.emp_no,
+      name: emp.employee_name,
+      email: emp.email,
+      mobileNumber: emp.phone_number
+    }));
+
+    return successResponse(res, formattedEmployees, 'Employees retrieved successfully');
+  } catch (error) {
+    console.error('Search HRMS employees error:', error);
+    return errorResponse(res, 'Failed to search HRMS employees', 500);
   }
 };
 

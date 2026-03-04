@@ -5,6 +5,7 @@ import {
   createUser,
   updateUser,
   deleteUser,
+  searchHrmsEmployees,
 } from '../controllers/user.controller.js';
 import { getMySettings, updateMySettings } from '../controllers/userSettings.controller.js';
 import { updateMyProfile } from '../controllers/userProfile.controller.js';
@@ -25,6 +26,7 @@ router.get('/me/login-logs', getMyLoginLogs);
 // Routes that require Super Admin only
 router.route('/').get(isSuperAdmin, getUsers).post(isSuperAdmin, createUser);
 router.get('/all/login-logs', isSuperAdmin, getAllUserLoginLogs);
+router.get('/hrms/search', isSuperAdmin, searchHrmsEmployees);
 
 // Require time tracking for User/Counsellor/Manager dashboard routes below
 router.use(requireTimeTrackingEnabled);

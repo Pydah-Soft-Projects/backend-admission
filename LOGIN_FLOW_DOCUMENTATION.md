@@ -21,10 +21,10 @@
 This application implements a JWT (JSON Web Token) based authentication system with role-based access control. The authentication flow involves:
 
 - **Frontend**: Next.js application with React components
-- **Backend**: Express.js REST API with MySQL database
-- **Authentication**: JWT tokens stored in HTTP-only cookies (client-side)
-- **Password Security**: bcrypt hashing for password storage
-- **Session Management**: Client-side cookie storage with 7-day expiration
+- **Primary Database**: MySQL (Amazon RDS) stores user roles, permissions, and linkages.
+- **Secondary Database**: MongoDB (Internal HRMS) stores primary credentials for linked employees.
+- **Authentication**: Hybrid JWT system (Multi-identifier support: Email/Mobile/Emp No).
+- **Password Security**: bcrypt hashing used on both SQL and MongoDB.
 
 ---
 
@@ -43,7 +43,8 @@ This application implements a JWT (JSON Web Token) based authentication system w
    - Auth routes: `src/routes/auth.routes.js`
    - Auth middleware: `src/middleware/auth.middleware.js`
    - Token generator: `src/utils/generateToken.js`
-   - Database: MySQL (Amazon RDS)
+   - Primary Database: MySQL (Amazon RDS)
+   - Secondary Database: MongoDB (Internal HRMS accessed via `src/config-mongo/hrms.js`)
 
 ---
 
@@ -199,20 +200,28 @@ if (!email || !password) {
 pool = getPool(); // Get MySQL connection pool
 ```
 
-#### Step 3: User Lookup
+#### Step 3: User Lookup (MySQL)
 ```javascript
-const normalizedEmail = email.toLowerCase().trim();
+const normalizedIdentity = email.trim();
+// Search by mobile OR (email/emp_no)
 const [users] = await pool.execute(
-  'SELECT id, name, email, password, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE email = ?',
-  [normalizedEmail]
+  'SELECT * FROM users WHERE email = ? OR emp_no = ? OR mobile_number = ?',
+  [normalizedEmail, normalizedIdentity, normalizedIdentity]
 );
 ```
 
-**Key Points**:
-- Email is normalized (lowercase, trimmed) for case-insensitive matching
-- Query retrieves all necessary user fields including hashed password
+#### Step 4: Authentication Decision
+```javascript
+if (userData.emp_no) {
+  // 1. Connect to HRMS MongoDB
+  // 2. Verify emp_no exists
+  // 3. Compare password with HRMS stored hash
+} else {
+  // Authenticate against SQL stored hash
+}
+```
 
-#### Step 4: User Existence Check
+#### Step 5: User Existence & Status Check
 ```javascript
 if (!users || users.length === 0) {
   return errorResponse(res, 'Invalid credentials', 401);
@@ -689,18 +698,18 @@ catch (err: any) {
 - Unauthorized access attempts redirect to appropriate dashboard
 - API endpoints use middleware for role-based access
 
-### Permission System
+## Data Storage & Responsibilities
 
-**Structure**:
-- Permissions stored as JSON in database
-- Parsed and attached to user object
-- Available for future fine-grained access control
-
-**Current Implementation**:
-- Super Admin has elevated privileges
-- Permission-based checks are prepared for future use
-
----
+| Field | MySQL (SQL) | MongoDB (HRMS) | Responsibility |
+|-------|:-----------:|:--------------:|----------------|
+| **User ID (UUID)** | ✅ | ❌ | Primary Auth ID |
+| **Full Name** | ✅ | ✅ (Reference) | Auth Display |
+| **Email** | ✅ (Optional)| ✅ | Notification/Identity |
+| **Mobile Number**| ✅ (Optional)| ✅ | Identity/OTP |
+| **Employee No** | ✅ (Link Key) | ✅ (Primary) | Database Linkage |
+| **Password** | ✅ (Legacy) | ✅ (Primary) | Security/Credentials |
+| **Role/Permissions**| ✅ | ❌ | Authorization (RBAC) |
+| **Status (Active)**| ✅ | ❌ | Account Management |
 
 ## Complete Flow Diagram
 

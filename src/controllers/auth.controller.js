@@ -4,6 +4,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
 import bulkSmsService from '../services/bulkSms.service.js';
 import axios from 'axios';
+import { connectHRMS } from '../config-mongo/hrms.js';
 
 
 
@@ -32,17 +33,21 @@ export const login = async (req, res) => {
     }
 
     // Check for user in SQL database
-    const normalizedIdentity = email.toLowerCase().trim();
-    let query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE email = ?';
-    let queryParams = [normalizedIdentity];
-
-    // Simple check: if it looks like a mobile number (only digits, length 10-15), try mobile login
+    const normalizedIdentity = email.trim();
+    const normalizedEmail = normalizedIdentity.toLowerCase();
+    
+    // Check if it's a mobile number
     const isMobile = /^\d{10,15}$/.test(normalizedIdentity);
+    
+    let query, queryParams;
     if (isMobile) {
       console.log('Detected mobile number login');
-      query = 'SELECT id, name, email, mobile_number, password, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE mobile_number = ?';
-      // For mobile, we use the input as is (trim only)
-      queryParams = [email.trim()];
+      query = 'SELECT * FROM users WHERE mobile_number = ?';
+      queryParams = [normalizedIdentity];
+    } else {
+      // Search by email OR emp_no
+      query = 'SELECT * FROM users WHERE email = ? OR emp_no = ?';
+      queryParams = [normalizedEmail, normalizedIdentity];
     }
 
     const [users] = await pool.execute(query, queryParams);
@@ -54,9 +59,9 @@ export const login = async (req, res) => {
 
     const userData = users[0];
 
-    // Validate userData structure
-    if (!userData || !userData.id || !userData.email || !userData.password) {
-      console.error('Invalid user data structure:', userData);
+    // Validate userData structure (id and role_name are mandatory, email/password can be null)
+    if (!userData || !userData.id || !userData.role_name) {
+      console.error('Invalid user data structure (missing mandatory fields):', userData);
       return errorResponse(res, 'Database error: Invalid user data', 500);
     }
 
@@ -69,17 +74,47 @@ export const login = async (req, res) => {
     }
 
     // Check if password matches
-    if (!userData.password) {
-      console.error('User has no password set:', userData.email);
-      return errorResponse(res, 'Database error: User password not found', 500);
-    }
+    let isMatch = false;
 
-    const isMatch = await bcrypt.compare(password, userData.password);
+    if (userData.emp_no) {
+      console.log('Authenticating via HRMS for emp_no:', userData.emp_no);
+      try {
+        const hrmsConn = await connectHRMS();
+        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+        
+        // Find employee by emp_no
+        const employee = await Employee.findOne({ emp_no: userData.emp_no });
+        
+        if (!employee) {
+          console.log('Employee not found in HRMS:', userData.emp_no);
+          return errorResponse(res, 'Invalid credentials (HRMS)', 401);
+        }
+
+        // Check password - assuming it's also hashed with bcrypt in HRMS
+        // If not, we might need to adjust this.
+        if (employee.password) {
+          isMatch = await bcrypt.compare(password, employee.password);
+        } else {
+          console.error('No password found for employee in HRMS:', userData.emp_no);
+          return errorResponse(res, 'HRMS Authentication Error', 500);
+        }
+      } catch (hrmsError) {
+        console.error('HRMS Login Error:', hrmsError);
+        return errorResponse(res, 'HRMS Connection failed', 500);
+      }
+    } else {
+      // Legacy SQL Authentication
+      if (!userData.password) {
+        console.error('User has no password set:', userData.email);
+        return errorResponse(res, 'Database error: User password not found', 500);
+      }
+      isMatch = await bcrypt.compare(password, userData.password);
+    }
 
     if (!isMatch) {
       console.log('Password mismatch for user:', email);
       return res.status(401).json({
-        message: 'Invalid Credentials', // As requested by user
+        message: 'Invalid Credentials',
         error: 'Invalid credentials'
       });
     }
@@ -160,7 +195,7 @@ export const getMe = async (req, res) => {
 
     // Get user from SQL database
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, auto_calling_enabled, created_at, updated_at FROM users WHERE id = ?',
       [req.user.id || req.user._id]
     );
 
@@ -192,8 +227,11 @@ export const getMe = async (req, res) => {
     const user = {
       id: userData.id,
       _id: userData.id, // Keep _id for backward compatibility
+      emp_no: userData.emp_no,
+      hrms_id: userData.hrms_id,
       name: userData.name,
       email: userData.email,
+      mobileNumber: userData.mobile_number,
       roleName: userData.role_name,
       managedBy: userData.managed_by,
       isManager: userData.is_manager === 1 || userData.is_manager === true,
@@ -281,7 +319,7 @@ export const createSSOSession = async (req, res) => {
 
     // Find user in admissions database
     const [users] = await pool.execute(
-      'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
+      'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
       [userId]
     );
 
