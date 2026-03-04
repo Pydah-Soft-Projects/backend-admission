@@ -357,6 +357,18 @@ export const getAssignmentStats = async (req, res) => {
         baseParams.push(studentGroup);
       }
     }
+    if (mandal) {
+      baseConditions.push('mandal = ?');
+      baseParams.push(mandal);
+    }
+    if (district) {
+      baseConditions.push('district = ?');
+      baseParams.push(district);
+    }
+    if (state) {
+      baseConditions.push('state = ?');
+      baseParams.push(state);
+    }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
     // Get unassigned leads count
