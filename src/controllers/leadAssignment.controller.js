@@ -9,7 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate } = req.body;
+    const { userId, mandal, district, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -82,6 +82,12 @@ export const assignLeads = async (req, res) => {
       if (mandal) {
         conditions.push('mandal = ?');
         params.push(mandal);
+      }
+
+      // Add district filter if provided
+      if (district) {
+        conditions.push('district = ?');
+        params.push(district);
       }
 
       // Add state filter if provided
@@ -245,6 +251,7 @@ export const assignLeads = async (req, res) => {
         userId,
         userName: user.name,
         mandal: mandal || 'All',
+        district: district || 'All',
         state: state || 'All',
         mode: leadIds ? 'single' : 'bulk',
         assignedLeads: assignedLeadsForExport, // Return full list for export
@@ -263,7 +270,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
+    const { mandal, district, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
     const pool = getPool();
 
     // Build filter for available leads
@@ -307,6 +314,12 @@ export const getAssignmentStats = async (req, res) => {
     if (mandal) {
       conditions.push('mandal = ?');
       params.push(mandal);
+    }
+
+    // Add district filter if provided
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
     }
 
     // Add state filter if provided
@@ -442,7 +455,7 @@ export const getAssignmentStats = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignedCountForUser = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup, cycleNumber } = req.query;
+    const { userId, mandal, district, state, academicYear, studentGroup, cycleNumber } = req.query;
     const pool = getPool();
 
     if (!userId) {
@@ -483,6 +496,10 @@ export const getAssignedCountForUser = async (req, res) => {
       conditions.push('mandal = ?');
       params.push(mandal);
     }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
+    }
     if (state) {
       conditions.push('state = ?');
       params.push(state);
@@ -512,7 +529,7 @@ export const getAssignedCountForUser = async (req, res) => {
 // @access  Private (Super Admin only)
 export const removeAssignments = async (req, res) => {
   try {
-    const { userId, mandal, state, academicYear, studentGroup, count } = req.body;
+    const { userId, mandal, district, state, academicYear, studentGroup, count } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -559,6 +576,10 @@ export const removeAssignments = async (req, res) => {
     if (mandal) {
       conditions.push('mandal = ?');
       params.push(mandal);
+    }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
     }
     if (state) {
       conditions.push('state = ?');
