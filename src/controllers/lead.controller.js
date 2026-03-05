@@ -144,8 +144,8 @@ export const getLeads = async (req, res) => {
       params.push(end.toISOString().slice(0, 19).replace('T', ' '));
     }
     if (req.query.scheduledOn) {
-      conditions.push('DATE(l.next_scheduled_call) = ?');
-      params.push(req.query.scheduledOn);
+      conditions.push('l.next_scheduled_call >= ? AND l.next_scheduled_call <= ?');
+      params.push(`${req.query.scheduledOn} 00:00:00`, `${req.query.scheduledOn} 23:59:59`);
     }
     if (req.query.academicYear != null && req.query.academicYear !== '') {
       conditions.push('l.academic_year = ?');
