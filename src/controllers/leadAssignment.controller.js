@@ -1400,7 +1400,7 @@ export const getUserAnalytics = async (req, res) => {
         COUNT(*) as total_logs,
         SUM(CASE WHEN type = 'status_change' THEN 1 ELSE 0 END) as status_changes
       FROM activity_logs 
-      WHERE 1=1 ${activityDateClause.replace('sent_at', 'created_at')}
+      WHERE 1=1 ${activityDateClause.split('sent_at').join('created_at')}
       GROUP BY performed_by`,
       activityDateParams
     );
