@@ -63,7 +63,7 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 // CORS configuration - allow multiple known frontends (including local dev on 3000/3001)
 const allowedOrigins = [
-  process.env.CORS_ORIGIN,
+  ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) : []),
   'https://frontend-admission.vercel.app',
   'https://pydah-admissions.vercel.app',
   'http://localhost:3000',
