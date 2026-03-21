@@ -243,7 +243,7 @@ export const getLeads = async (req, res) => {
       LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
       ${whereClause}
 
-      ORDER BY l.assigned_at DESC, l.id ASC
+      ORDER BY l.created_at DESC, l.id ASC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
