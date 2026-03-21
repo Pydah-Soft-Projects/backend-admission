@@ -405,6 +405,7 @@ export const createPublicLead = async (req, res) => {
       interCollege,
       dynamicFields,
       source,
+      address,
       isNRI,
       // UTM Parameters (can come from body or query params)
       utm_source,
