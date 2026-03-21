@@ -1960,24 +1960,33 @@ export const getMismatchedLeadsReport = async (req, res) => {
                 <tr>
                   <th>Enquiry #</th>
                   <th>Student Name</th>
-                  <th>Phone</th>
-                  <th>Mismatch Field</th>
-                  <th>Current Value</th>
-                  <th>Analysis / Suggestion</th>
+                  <th>Location</th>
+                  <th>Issue / Suggestion</th>
                 </tr>
               </thead>
               <tbody>
-                ${mismatches.map(m => `
+                ${paginatedMismatches.map(m => `
                   <tr>
-                    <td>${m.name}</td>
-                    <td>${m.phone}</td>
-                    <td><span class="field-tag">${m.field}</span></td>
-                    <td><code>${m[m.field] || 'N/A'}</code></td>
-                    <td class="reason">${m.reason}</td>
+                    <td class="id-cell">${m.enquiry_number || m.id.slice(0,8)}</td>
+                    <td>
+                      <strong>${m.name}</strong><br/>
+                      <small style="color:#718096;">${m.phone || 'No Phone'}</small>
+                    </td>
+                    <td>${m.district || 'N/A'} / ${m.mandal || 'N/A'}</td>
+                    <td>
+                      <span class="field-tag">${m.field}</span>
+                      <span class="reason">${m.reason}</span>
+                    </td>
                   </tr>
                 `).join('')}
               </tbody>
             </table>
+
+            <div class="pagination" style="margin-top: 30px;">
+              <a href="?group=${groupParam}&year=${year}&all=${showAll}&page=${page - 1}" class="page-btn ${page === 1 ? 'disabled' : ''}">← Previous 100</a>
+              <span style="font-weight: bold; color: #718096;">Page ${page} of ${totalPages || 1}</span>
+              <a href="?group=${groupParam}&year=${year}&all=${showAll}&page=${page + 1}" class="page-btn ${page >= totalPages ? 'disabled' : ''}">Next 100 →</a>
+            </div>
           ` : '<div class="empty">No mismatches found for the current filters.</div>'}
         </div>
       </body>
