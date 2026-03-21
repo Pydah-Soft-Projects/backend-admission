@@ -66,6 +66,7 @@ const allowedOrigins = [
   ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) : []),
   'https://frontend-admission.vercel.app',
   'https://pydah-admissions.vercel.app',
+  'https://admissions.pydah.edu.in',
   'http://localhost:3000',
   'http://localhost:3001',
 ].filter(Boolean);
