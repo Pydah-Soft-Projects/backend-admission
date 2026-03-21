@@ -409,6 +409,7 @@ export const createPublicLead = async (req, res) => {
       isNRI,
       // UTM Parameters (can come from body or query params)
       utm_source,
+      utmSource,
       utm_medium,
       utm_campaign,
       utm_term,
@@ -416,11 +417,11 @@ export const createPublicLead = async (req, res) => {
     } = req.body;
 
     // Also check query parameters for UTM (in case they're passed via URL)
-    const utmSource = utm_source || req.query.utm_source;
-    const utmMedium = utm_medium || req.query.utm_medium;
-    const utmCampaign = utm_campaign || req.query.utm_campaign;
-    const utmTerm = utm_term || req.query.utm_term;
-    const utmContent = utm_content || req.query.utm_content;
+    const finalUtmSource = utmSource || utm_source || req.query.utm_source;
+    const utmMedium = req.body.utmMedium || utm_medium || req.query.utm_medium;
+    const utmCampaign = req.body.utmCampaign || utm_campaign || req.query.utm_campaign;
+    const utmTerm = req.body.utmTerm || utm_term || req.query.utm_term;
+    const utmContent = req.body.utmContent || utm_content || req.query.utm_content;
 
     // Helper function to extract value from dynamicFields if direct field is missing
     const getFieldValue = (directValue, fieldVariations, dynamicFieldsObj) => {
@@ -467,9 +468,9 @@ export const createPublicLead = async (req, res) => {
 
     // Generate enquiry number
     const enquiryNumber = await generateEnquiryNumber();
-
+ 
     // If UTM source exists, use it as the lead source
-    const leadSource = utmSource ? String(utmSource).trim() : (source || 'Public Form');
+    const leadSource = finalUtmSource ? String(finalUtmSource).trim() : (source || 'Public Form');
 
     const pool = getPool();
     const leadId = uuidv4();
@@ -515,7 +516,7 @@ export const createPublicLead = async (req, res) => {
         JSON.stringify(dynamicFields || {}),
         'New',
         leadSource,
-        utmSource ? String(utmSource).trim() : null,
+        finalUtmSource ? String(finalUtmSource).trim() : null,
         utmMedium ? String(utmMedium).trim() : null,
         utmCampaign ? String(utmCampaign).trim() : null,
         utmTerm ? String(utmTerm).trim() : null,
