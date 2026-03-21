@@ -11,6 +11,8 @@ import {
   getAllLeadIds,
   getFilterOptions,
   getPublicFilterOptions,
+  getMismatchedLeadsReport,
+  getDuplicateLeadsReport,
 } from '../controllers/lead.controller.js';
 import {
   inspectBulkUpload,
@@ -56,6 +58,8 @@ const upload = multer({
 // Public routes (no authentication required)
 router.post('/public', createPublicLead);
 router.get('/filters/options/public', getPublicFilterOptions);
+router.get('/mismatch-report', getMismatchedLeadsReport);
+router.get('/duplicate-report', getDuplicateLeadsReport);
 
 // All other routes require authentication
 router.use(protect);
