@@ -161,6 +161,10 @@ export const getLeads = async (req, res) => {
       }
     }
 
+    if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
+      conditions.push('l.needs_manual_update = 1');
+    }
+
     // Touched today: leads with at least one comment or status_change activity for today by current user
     const touchedToday = req.query.touchedToday === 'true' || req.query.touchedToday === '1';
     if (touchedToday) {
