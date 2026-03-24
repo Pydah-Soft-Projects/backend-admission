@@ -829,30 +829,35 @@ const processImportJob = async (jobId) => {
     };
 
     const checkNeedsManualUpdate = (doc, lookup) => {
-      // Only district/mandal mismatch triggers needs_manual_update (Inter ambiguity excluded per request)
+      // Status Codes:
+      // 0: Resolved (Both District and Mandal are valid)
+      // 1: Needs update (District mismatch, or both)
+      // 2: Mandal need to be updated (District is valid, Mandal is not)
+      
       const stateKey = norm(doc.state || '');
-      if (!stateKey) return true;
+      if (!stateKey) return 1;
+      
       // Allow "Andhra Pradesh (AP)" or "AP" to match "Andhra Pradesh"
       const stateId = lookup.stateIdByName.get(stateKey)
         || lookup.stateIdByName.get(stateKey.replace(/\s*\(ap\)\s*$/i, '').trim() || stateKey)
         || (stateKey === 'ap' ? lookup.stateIdByName.get('andhra pradesh') : undefined);
-      if (!stateId) return true;
+      if (!stateId) return 1;
 
       const districtKeyRaw = norm(doc.district || '');
-      if (!districtKeyRaw) return true;
+      if (!districtKeyRaw) return 1;
       const districtKey = stripDistrictSuffix(districtKeyRaw) || districtKeyRaw;
       const districtMap = lookup.districtsByStateId.get(String(stateId));
-      if (!districtMap) return true;
+      if (!districtMap) return 1;
       let districtId = districtMap.get(districtKey) ?? districtMap.get(districtKeyRaw);
       if (!districtId) {
         const candidates = Array.from(districtMap.keys());
         const bestDistrict = findBestMatch(districtKey, candidates, 0.80);
         districtId = bestDistrict ? districtMap.get(bestDistrict) : null;
       }
-      if (!districtId) return true;
+      if (!districtId) return 1;
 
       const mandalKeyRaw = norm(doc.mandal || '');
-      if (!mandalKeyRaw) return true;
+      if (!mandalKeyRaw) return 2; // District found, but mandal missing/mismatched
       const mandalKey = stripMandalSuffix(mandalKeyRaw) || mandalKeyRaw;
       const mandalSet = lookup.mandalsByDistrictId.get(String(districtId));
       let mandalMatches = mandalSet && (mandalSet.has(mandalKey) || mandalSet.has(mandalKeyRaw));
@@ -860,10 +865,9 @@ const processImportJob = async (jobId) => {
         const bestMandal = findBestMatch(mandalKey, Array.from(mandalSet), 0.80);
         mandalMatches = !!bestMandal;
       }
-      if (!mandalMatches) return true;
+      if (!mandalMatches) return 2; // District found, but mandal missing/mismatched
 
-      // School/college name mismatch is excluded from needs_manual_update; only district and mandal trigger the tag
-      return false;
+      return 0; // Everything OK
     };
 
     let masterLookup = null;
@@ -1066,7 +1070,7 @@ const processImportJob = async (jobId) => {
               nil(doc.leadStatus, 'New'),
               (doc.academicYear !== undefined && doc.academicYear !== null && !Number.isNaN(Number(doc.academicYear))) ? Number(doc.academicYear) : null,
               nil(doc.studentGroup, 'Not Specified'),
-              doc.needsManualUpdate === true ? 1 : 0,
+              nil(doc.needs_manual_update, 1),
               nil(doc.source, 'Bulk Upload'),
               nil(job.created_by, null),
               nil(job.upload_batch_id, null),

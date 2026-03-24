@@ -59,7 +59,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     nextScheduledCall: leadData.next_scheduled_call,
     academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
     studentGroup: leadData.student_group || undefined,
-    needsManualUpdate: leadData.needs_manual_update === 1 || leadData.needs_manual_update === true,
+    needsManualUpdate: leadData.needs_manual_update != null ? Number(leadData.needs_manual_update) : 0,
     notes: leadData.notes,
     uploadedBy: uploadedByUser || leadData.uploaded_by,
     uploadBatchId: leadData.upload_batch_id,
@@ -162,7 +162,7 @@ export const getLeads = async (req, res) => {
     }
 
     if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
-      conditions.push('l.needs_manual_update = 1');
+      conditions.push('l.needs_manual_update IN (1, 2)');
     }
 
     // Touched today: leads with at least one comment or status_change activity for today by current user
@@ -226,7 +226,7 @@ export const getLeads = async (req, res) => {
     const total = countResult[0].total;
 
     // Get count of leads that need manual update (same filters)
-    const needsUpdateConditions = [...conditions, 'l.needs_manual_update = 1'];
+    const needsUpdateConditions = [...conditions, 'l.needs_manual_update IN (1, 2)'];
     const needsUpdateWhereClause = `WHERE ${needsUpdateConditions.join(' AND ')}`;
     const [needsUpdateResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads l ${needsUpdateWhereClause}`,

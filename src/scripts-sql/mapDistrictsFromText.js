@@ -49,7 +49,8 @@ async function mapLocations() {
       'ambedkarkonaseema': 'Konaseema',
       'ysr': 'YSR Kadapa',
       'kadapa': 'YSR Kadapa',
-      'ysrkadapa': 'YSR Kadapa'
+      'ysrkadapa': 'YSR Kadapa',
+      'ananthapuramu': 'Anantapur'
     };
 
     const MANDAL_ALIASES = {
@@ -161,6 +162,7 @@ async function mapLocations() {
     let totalMatchedDist = 0;
     let totalMatchedMandal = 0;
     let totalResolved = 0;
+    let totalMandalNeedsUpdate = 0;
     let noMatchFound = 0;
     const unresolvedSample = [];
 
@@ -169,11 +171,11 @@ async function mapLocations() {
 
     while (true) {
       const [leads] = await pool.query(
-        `SELECT id, enquiry_number, name, village, mandal, district
+        `SELECT id, enquiry_number, name, village, mandal, district, needs_manual_update
          FROM leads
          WHERE student_group IN (${groups.map(() => '?').join(',')})
            AND academic_year = ?
-           AND needs_manual_update = 1
+           AND needs_manual_update IN (1, 2)
            AND id > ?
          ORDER BY id ASC
          LIMIT ?`,
@@ -248,25 +250,36 @@ async function mapLocations() {
             }
           }
 
-          if (updatedDistrict || updatedMandal) {
+          // Status Check
+          const dNorm = norm(activeDistrictName);
+          const mNorm = norm(finalMandalName);
+          const checkDistId = districtNameToId.get(dNorm) || districtNameToId.get(superNorm(activeDistrictName));
+          
+          let resolveStatus = 1; // Default
+          if (checkDistId) {
+              const mMap = mandalsByDistrict.get(checkDistId);
+              const isMandalResolved = mMap && (mMap.has(mNorm) || mMap.has(superNorm(mNorm)));
+              if (isMandalResolved) {
+                  resolveStatus = 0; // Both OK
+              } else {
+                  resolveStatus = 2; // District OK, Mandal need to update
+              }
+          }
+
+          if (updatedDistrict || updatedMandal || resolveStatus !== lead.needs_manual_update) {
             if (updatedDistrict) totalMatchedDist++;
             if (updatedMandal) totalMatchedMandal++;
-
-            // Status Check
-            const dNorm = norm(activeDistrictName);
-            const mNorm = norm(finalMandalName);
-            const checkDistId = districtNameToId.get(dNorm) || districtNameToId.get(superNorm(activeDistrictName));
-            const isResolved = checkDistId && mandalsByDistrict.has(checkDistId) && (mandalsByDistrict.get(checkDistId).has(mNorm) || mandalsByDistrict.get(checkDistId).has(superNorm(mNorm)));
-
-            if (isResolved) totalResolved++;
+            if (resolveStatus === 0) totalResolved++;
+            if (resolveStatus === 2) totalMandalNeedsUpdate++;
 
             updatesByChunk.push({
               id: lead.id,
               district: updatedDistrict || lead.district,
               mandal: updatedMandal || lead.mandal,
-              isResolved
+              resolveStatus
             });
-          } else {
+          }
+ else {
               noMatchFound++;
               // Collect a small sample of unresolved cases
               if (unresolvedSample.length < 50) {
@@ -287,7 +300,7 @@ async function mapLocations() {
           const idList = chunk.map(u => `'${u.id}'`).join(',');
           const districtCase = chunk.map(u => `WHEN '${u.id}' THEN '${esc(u.district)}'`).join(' ');
           const mandalCase = chunk.map(u => `WHEN '${u.id}' THEN '${esc(u.mandal)}'`).join(' ');
-          const resolveCase = chunk.map(u => `WHEN '${u.id}' THEN ${u.isResolved ? 0 : 1}`).join(' ');
+          const resolveCase = chunk.map(u => `WHEN '${u.id}' THEN ${u.resolveStatus}`).join(' ');
 
           await pool.query(`
             UPDATE leads
@@ -312,6 +325,7 @@ async function mapLocations() {
     console.log(`New Districts Mapped:      ${totalMatchedDist}`);
     console.log(`New Mandals Mapped:        ${totalMatchedMandal}`);
     console.log(`Leads Fully Resolved:      ${totalResolved}`);
+    console.log(`Mandal Needs Update ONLY:  ${totalMandalNeedsUpdate}`);
     console.log(`Still Unresolved:          ${noMatchFound}`);
 
     if (unresolvedSample.length > 0) {
