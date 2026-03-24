@@ -73,8 +73,9 @@ export const assignLeads = async (req, res) => {
       }
 
       // Build filter for leads available to this user
-      const isProRole = user.role_name === 'PRO';
-      const assignmentCondition = isProRole ? '(assigned_to_pro IS NULL)' : '(assigned_to IS NULL)';
+      const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
+      // For PRO role, we can assign any leads (even if already assigned to someone else)
+      const assignmentCondition = isProRole ? '1=1' : '(assigned_to IS NULL)';
       const conditions = [assignmentCondition, 'academic_year = ?'];
       const params = [yearNum];
 
@@ -161,7 +162,7 @@ export const assignLeads = async (req, res) => {
         ? ', academic_year = ?'
         : '';
 
-      const isProRole = user.role_name === 'PRO';
+      const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
       let updateQuery;
       let updateParams;
 
@@ -275,9 +276,11 @@ export const getAssignmentStats = async (req, res) => {
 
     // Build filter for available leads
     // Use targetRole query parameter if provided (e.g. from UI when selecting a user)
-    const targetRole = req.query.targetRole || 'Student Counselor';
+    const rawTargetRole = req.query.targetRole || 'Student Counselor';
+    const targetRole = String(rawTargetRole).trim().toUpperCase();
     const isProTarget = targetRole === 'PRO';
-    const assignmentCondition = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
+    // For PRO targets, "Available" means all leads in the scope, not just unassigned ones
+    const assignmentCondition = isProTarget ? '1=1' : 'assigned_to IS NULL';
 
     const conditions = [assignmentCondition];
     const params = [];
@@ -339,6 +342,11 @@ export const getAssignmentStats = async (req, res) => {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+    // Condition to check what is TRULY unassigned in this role's context (for internal counts)
+    const trulyUnassignedCondition = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
+    const trulyUnassignedConditions = [...conditions.filter(c => c !== assignmentCondition), trulyUnassignedCondition];
+    const trulyUnassignedWhere = `WHERE ${trulyUnassignedConditions.join(' AND ')}`;
+
     // Base filter for total/assigned in same scope (when academic year / student group selected)
     const baseConditions = [];
     const baseParams = [];
@@ -385,8 +393,15 @@ export const getAssignmentStats = async (req, res) => {
     );
     const totalLeads = totalLeadsResult[0].total;
 
-    // Get assigned leads count (in same academic year scope when filter applied)
-    const assignedCount = totalLeads - unassignedCount;
+    // Get unassigned leads count (truly unassigned, for the "assigned" calculation)
+    const [trulyUnassignedResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM leads ${trulyUnassignedWhere}`,
+      params
+    );
+    const trulyUnassignedCount = trulyUnassignedResult[0].total;
+
+    // Get assigned leads count (in same scope)
+    const assignedCount = totalLeads - trulyUnassignedCount;
 
     // Get breakdown by mandal (for unassigned leads with same filters)
     const [mandalBreakdown] = await pool.execute(
@@ -563,7 +578,7 @@ export const removeAssignments = async (req, res) => {
     }
     const user = users[0];
 
-    const isPro = user.role_name === 'PRO';
+    const isPro = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
     const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
     const assignmentAtCol = isPro ? 'pro_assigned_at' : 'assigned_at';
     const assignmentByCol = isPro ? 'pro_assigned_by' : 'assigned_by';
