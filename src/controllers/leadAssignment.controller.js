@@ -707,12 +707,12 @@ export const getUserLeadAnalytics = async (req, res) => {
       [userId]
     );
 
-    if (usersResult.length === 0) {
+      if (usersResult.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
     const queriedUser = usersResult[0];
-    const isPro = queriedUser.role_name === 'PRO';
+    const isProRole = currentUser.role_name && String(currentUser.role_name).trim().toUpperCase() === 'PRO';
     const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
     const assignmentCondition = isPro
       ? '(assigned_to_pro = ? OR assigned_to = ?)'
