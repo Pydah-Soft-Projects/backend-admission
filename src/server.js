@@ -22,6 +22,7 @@ import formBuilderRoutes from './routes/formBuilder.routes.js';
 import masterDataRoutes from './routes/masterData.routes.js';
 import locationsRoutes from './routes/locations.routes.js';
 import visitorRoutes from './routes/visitor.routes.js';
+import leadGroupUpdateRoutes from './routes/leadGroupUpdate.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -98,6 +99,7 @@ app.use((req, res, next) => {
 });
 
 // Routes
+app.use('/api/leads', leadGroupUpdateRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/leads', leadRoutes);
