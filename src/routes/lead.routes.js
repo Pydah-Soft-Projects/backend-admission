@@ -15,6 +15,7 @@ import {
 import {
   getMismatchedLeadsReport,
   getDuplicateLeadsReport,
+  updateLeadPhone,
 } from '../controllers/leadReport.controller.js';
 import {
   inspectBulkUpload,
@@ -62,6 +63,7 @@ router.post('/public', createPublicLead);
 router.get('/filters/options/public', getPublicFilterOptions);
 router.get('/mismatch-report', getMismatchedLeadsReport);
 router.get('/duplicate-report', getDuplicateLeadsReport);
+router.patch('/:id/phone', updateLeadPhone);
 
 // All other routes require authentication
 router.use(protect);

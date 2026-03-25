@@ -70,6 +70,8 @@ const allowedOrigins = [
   'https://admissions.pydah.edu.in',
   'http://localhost:3000',
   'http://localhost:3001',
+  'http://localhost:5000',
+  'https://admission.raviburaga.shop'
 ].filter(Boolean);
 
 app.use(cors({

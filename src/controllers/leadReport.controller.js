@@ -191,7 +191,44 @@ export const getMismatchedLeadsReport = async (req, res) => {
           .field-tag { background: #fed7d7; color: #9b2c2c; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 5px; }
           .id-cell { font-family: monospace; color: #a0aec0; font-size: 11px; }
           .empty { text-align: center; padding: 60px; color: #a0aec0; }
+
+          .phone-input-group { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+          .phone-input { border: 1px solid #cbd5e0; border-radius: 4px; padding: 2px 5px; font-size: 11px; width: 100px; }
+          .btn-save-phone { background: #48bb78; color: white; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold; }
+          .btn-save-phone:hover { background: #38a169; }
+          .save-status { font-size: 9px; margin-left: 4px; display: none; }
         </style>
+        <script>
+          async function savePhone(leadId, field, inputId, statusId) {
+            const val = document.getElementById(inputId).value;
+            const status = document.getElementById(statusId);
+            status.style.display = 'inline';
+            status.innerText = 'Saving...';
+            status.style.color = '#718096';
+            
+            try {
+              const res = await fetch(\`/api/leads/\${leadId}/phone\`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ field, value: val })
+              });
+              const data = await res.json();
+              if (data.success) {
+                status.innerText = 'Saved!';
+                status.style.color = '#38a169';
+                setTimeout(() => { status.style.display = 'none'; }, 2000);
+              } else {
+                alert(data.message || 'Update failed');
+                status.innerText = 'Error';
+                status.style.color = '#e53e3e';
+              }
+            } catch (err) {
+              alert('Network error');
+              status.innerText = 'Error';
+              status.style.color = '#e53e3e';
+            }
+          }
+        </script>
       </head>
       <body>
         <div class="container">
@@ -217,20 +254,20 @@ export const getMismatchedLeadsReport = async (req, res) => {
             </div>
             <button type="submit" class="btn-refresh">Refresh Report</button>
           </form>
-
+ 
           <div class="summary">
             <div class="stat"><strong>${groupParam}</strong>Group</div>
             <div class="stat"><strong>${year}</strong>Year</div>
             <div class="stat"><strong>${totalMismatches}</strong>Mismatched Records</div>
             <div class="stat"><strong>${showAll ? 'YES' : 'NO'}</strong>Viewing All Records</div>
           </div>
-
+ 
           <div class="pagination">
             <a href="?group=${groupParam}&year=${year}&all=${showAll}&page=${page - 1}" class="page-btn ${page === 1 ? 'disabled' : ''}">← Previous 100</a>
             <span style="font-weight: bold; color: #718096;">Page ${page} of ${totalPages || 1}</span>
             <a href="?group=${groupParam}&year=${year}&all=${showAll}&page=${page + 1}" class="page-btn ${page >= totalPages ? 'disabled' : ''}">Next 100 →</a>
           </div>
-
+ 
           ${paginatedMismatches.length > 0 ? `
             <table>
               <thead>
@@ -243,12 +280,16 @@ export const getMismatchedLeadsReport = async (req, res) => {
                 </tr>
               </thead>
               <tbody>
-                ${paginatedMismatches.map(m => `
+                ${mismatches.slice((page - 1) * 100, page * 100).map(m => `
                   <tr>
-                    <td class="id-cell">${m.enquiry_number || m.id.slice(0,8)}</td>
+                    <td class="id-cell">${m.enquiry_number || m.id.toString().slice(0,8)}</td>
                     <td>
-                      <strong>${m.name}</strong><br/>
-                      <small style="color:#718096;">${m.phone || 'No Phone'}</small>
+                      <strong>${m.name}</strong>
+                      <div class="phone-input-group">
+                        <input class="phone-input" type="text" value="${m.phone || ''}" id="p_${m.id}" />
+                        <button class="btn-save-phone" onclick="savePhone('${m.id}', 'phone', 'p_${m.id}', 's_${m.id}')">Save</button>
+                        <span class="save-status" id="s_${m.id}"></span>
+                      </div>
                     </td>
                     <td>${m.inter_college || 'N/A'}</td>
                     <td>${m.district || 'N/A'} / ${m.mandal || 'N/A'}</td>
@@ -447,13 +488,50 @@ export const getDuplicateLeadsReport = async (req, res) => {
           .id-cell { font-family: monospace; color: #718096; font-size: 11px; }
           .exact-match { background: #fff5f5; }
           .match-tag { background: #c53030; color: white; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: bold; margin-left: 8px; }
-          .phone-val { font-size: 11px; color: #4a5568; display: block; }
+          .phone-val { font-size: 11px; color: #4a5568; display: flex; align-items: center; gap: 5px; margin-bottom: 4px; }
           .match-source { font-style: italic; color: #9b2c2c; font-size: 11px; }
           .updated-cell { font-weight: bold; color: #2d3748; }
           .no-phone-record { opacity: 0.7; font-style: italic; }
           .empty { text-align: center; padding: 60px; color: #a0aec0; }
           h2 { font-size: 18px; color: #4a5568; margin-top: 50px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
+          
+          .phone-input-group { display: flex; align-items: center; gap: 4px; }
+          .phone-input { border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 5px; font-size: 11px; width: 100px; }
+          .btn-save-phone { background: #48bb78; color: white; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold; }
+          .btn-save-phone:hover { background: #38a169; }
+          .save-status { font-size: 9px; margin-left: 4px; display: none; }
         </style>
+        <script>
+          async function savePhone(leadId, field, inputId, statusId) {
+            const val = document.getElementById(inputId).value;
+            const status = document.getElementById(statusId);
+            status.style.display = 'inline';
+            status.innerText = 'Saving...';
+            status.style.color = '#718096';
+            
+            try {
+              const res = await fetch(\`/api/leads/\${leadId}/phone\`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ field, value: val })
+              });
+              const data = await res.json();
+              if (data.success) {
+                status.innerText = 'Saved!';
+                status.style.color = '#38a169';
+                setTimeout(() => { status.style.display = 'none'; }, 2000);
+              } else {
+                alert(data.message || 'Update failed');
+                status.innerText = 'Error';
+                status.style.color = '#e53e3e';
+              }
+            } catch (err) {
+              alert('Network error');
+              status.innerText = 'Error';
+              status.style.color = '#e53e3e';
+            }
+          }
+        </script>
       </head>
       <body>
         <div class="container">
@@ -474,14 +552,14 @@ export const getDuplicateLeadsReport = async (req, res) => {
             </div>
             <button type="submit" class="btn-refresh">Refresh Report</button>
           </form>
-
+ 
           <div class="summary">
             <div class="stat"><strong>${groupParam}</strong>Student Group</div>
             <div class="stat"><strong>${year}</strong>Academic Year</div>
             <div class="stat"><strong>${totalGroups}</strong>Verified Number Groups</div>
             <div class="stat"><strong>${totalRecordsInvolved.size}</strong>Total Records Flagged</div>
           </div>
-
+ 
           <div class="pagination">
             <a href="?group=${groupParam}&year=${year}&page=${page - 1}" class="page-btn ${page === 1 ? 'disabled' : ''}">← Previous 100</a>
             <span style="font-weight: bold; color: #718096;">Page ${page} of ${totalPages || 1}</span>
@@ -500,7 +578,7 @@ export const getDuplicateLeadsReport = async (req, res) => {
                     <th>Enquiry #</th>
                     <th>Student Name</th>
                     <th>${(groupParam.toLowerCase() === '10th') ? 'School' : 'College'}</th>
-                    <th>Phones Found</th>
+                    <th>Phones Found & Update Info</th>
                     <th>Status</th>
                     <th>Last Activity</th>
                     <th>Created</th>
@@ -508,18 +586,42 @@ export const getDuplicateLeadsReport = async (req, res) => {
                   </tr>
                 </thead>
                 <tbody>
-                  ${group.records.map(r => `
+                  ${group.records.map((r, i) => `
                     <tr class="${r.isExactNameMatch ? 'exact-match' : ''} ${!(r.phone && r.phone.trim().length >= 5) ? 'no-phone-record' : ''}">
-                      <td class="id-cell">${r.enquiry_number || r.id.slice(0,8)}</td>
+                      <td class="id-cell">${r.enquiry_number || r.id.toString().slice(0,8)}</td>
                       <td>
                         <strong>${r.name}</strong>
                         ${r.isExactNameMatch ? '<span class="match-tag">EXACT NAME MATCH</span>' : ''}
                       </td>
                       <td>${r.inter_college || 'N/A'}</td>
                       <td>
-                        <span class="phone-val">S: ${r.phone || 'N/A'} ${r.phone === group.phone ? '<span class="match-source">★</span>' : ''}</span>
-                        <span class="phone-val">F: ${r.father_phone || 'N/A'} ${r.father_phone === group.phone ? '<span class="match-source">★</span>' : ''}</span>
-                        <span class="phone-val">A: ${r.alternate_mobile || 'N/A'} ${r.alternate_mobile === group.phone ? '<span class="match-source">★</span>' : ''}</span>
+                        <div class="phone-val">
+                          <span>S:</span>
+                          <div class="phone-input-group">
+                            <input class="phone-input" type="text" value="${r.phone || ''}" id="p_${r.id}" />
+                            <button class="btn-save-phone" onclick="savePhone('${r.id}', 'phone', 'p_${r.id}', 's_${r.id}_p')">Save</button>
+                            <span class="save-status" id="s_${r.id}_p"></span>
+                          </div>
+                          ${r.phone === group.phone ? '<span class="match-source">★</span>' : ''}
+                        </div>
+                        <div class="phone-val">
+                          <span>F:</span>
+                          <div class="phone-input-group">
+                            <input class="phone-input" type="text" value="${r.father_phone || ''}" id="f_${r.id}" />
+                            <button class="btn-save-phone" onclick="savePhone('${r.id}', 'father_phone', 'f_${r.id}', 's_${r.id}_f')">Save</button>
+                            <span class="save-status" id="s_${r.id}_f"></span>
+                          </div>
+                          ${r.father_phone === group.phone ? '<span class="match-source">★</span>' : ''}
+                        </div>
+                        <div class="phone-val">
+                          <span>A:</span>
+                          <div class="phone-input-group">
+                            <input class="phone-input" type="text" value="${r.alternate_mobile || ''}" id="a_${r.id}" />
+                            <button class="btn-save-phone" onclick="savePhone('${r.id}', 'alternate_mobile', 'a_${r.id}', 's_${r.id}_a')">Save</button>
+                            <span class="save-status" id="s_${r.id}_a"></span>
+                          </div>
+                          ${r.alternate_mobile === group.phone ? '<span class="match-source">★</span>' : ''}
+                        </div>
                       </td>
                       <td><span style="background: #ebf8ff; color: #2b6cb0; padding: 2px 6px; border-radius: 4px; font-size: 11px;">${r.lead_status}</span></td>
                       <td class="updated-cell">${new Date(r.updated_at).toLocaleString()}</td>
@@ -575,5 +677,37 @@ export const getDuplicateLeadsReport = async (req, res) => {
   } catch (error) {
     console.error('Duplicate Report Error:', error);
     return res.status(500).send(`<h1>Error generating report</h1><p>${error.message}</p>`);
+  }
+};
+
+/**
+ * @desc    Update a lead's phone number directly from the report
+ * @route   PATCH /api/leads/:id/phone
+ * @access  Private (Super Admin recommended, but currently Public as per report context)
+ */
+export const updateLeadPhone = async (req, res) => {
+  const { id } = req.params;
+  const { field, value } = req.body;
+  const pool = getPool();
+
+  const allowedFields = ['phone', 'father_phone', 'alternate_mobile'];
+  if (!allowedFields.includes(field)) {
+    return res.status(400).json({ success: false, message: 'Invalid field' });
+  }
+
+  try {
+    const [result] = await pool.execute(
+      `UPDATE leads SET ${field} = ?, updated_at = NOW() WHERE id = ?`,
+      [value, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    return res.json({ success: true, message: 'Phone number updated successfully' });
+  } catch (error) {
+    console.error('Update Phone Error:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
