@@ -11,9 +11,11 @@ import {
   getAllLeadIds,
   getFilterOptions,
   getPublicFilterOptions,
+} from '../controllers/lead.controller.js';
+import {
   getMismatchedLeadsReport,
   getDuplicateLeadsReport,
-} from '../controllers/lead.controller.js';
+} from '../controllers/leadReport.controller.js';
 import {
   inspectBulkUpload,
   bulkUploadLeads,
