@@ -197,6 +197,25 @@ export const getMismatchedLeadsReport = async (req, res) => {
           .btn-save-phone { background: #48bb78; color: white; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold; }
           .btn-save-phone:hover { background: #38a169; }
           .save-status { font-size: 9px; margin-left: 4px; display: none; }
+
+          .report-actions { display: flex; gap: 10px; margin-bottom: 20px; }
+          .btn-action { padding: 10px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; border: 1px solid #cbd5e0; background: white; color: #4a5568; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+          .btn-action:hover { background: #f7fafc; }
+          .btn-excel { background: #2f855a; color: white; border-color: #2f855a; }
+          .print-val { display: none; }
+          
+          @media print {
+            .filters, .pagination, .btn-save-phone, .report-actions, .btn-refresh, .save-status, .id-cell { display: none !important; }
+            body { padding: 0; background: white; font-size: 8.5px; line-height: 1.1; }
+            .container { box-shadow: none; max-width: 100%; padding: 0; margin: 0; }
+            table { width: 100% !important; border-collapse: collapse; }
+            th, td { padding: 4px 6px !important; border: 0.5pt solid #e2e8f0 !important; }
+            .phone-input { display: none !important; }
+            .print-val { display: inline !important; font-weight: bold; }
+            h1 { font-size: 16px; margin-bottom: 10px; }
+            .summary { padding: 8px; gap: 20px; margin-bottom: 10px; }
+            .stat strong { font-size: 14px; }
+          }
         </style>
         <script>
           async function savePhone(leadId, field, inputId, statusId) {
@@ -228,11 +247,47 @@ export const getMismatchedLeadsReport = async (req, res) => {
               status.style.color = '#e53e3e';
             }
           }
+
+          function exportToExcel() {
+            const table = document.querySelector('table');
+            if (!table) return alert('No data to export');
+
+            let csv = [];
+            const rows = table.querySelectorAll('tr');
+            for (let i = 0; i < rows.length; i++) {
+              const row = [], cols = rows[i].querySelectorAll('td, th');
+              for (let j = 0; j < cols.length; j++) {
+                // Clean text: remove newlines, multiple spaces, and "Save" button text
+                let text = cols[j].innerText.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim();
+                // For phone cells, we want the input value
+                const input = cols[j].querySelector('input');
+                if (input) {
+                  text = input.value;
+                }
+                row.push('"' + text.replace(/"/g, '""') + '"');
+              }
+              csv.push(row.join(','));
+            }
+
+            const csvFile = new Blob([csv.join('\\n')], { type: 'text/csv' });
+            const downloadLink = document.createElement('a');
+            downloadLink.download = 'Location_Mismatch_Report.csv';
+            downloadLink.href = window.URL.createObjectURL(csvFile);
+            downloadLink.style.display = 'none';
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+          }
         </script>
       </head>
       <body>
         <div class="container">
-          <h1>Location Mismatch Report</h1>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h1>Location Mismatch Report</h1>
+            <div class="report-actions">
+              <button class="btn-action" onclick="window.print()">Print Report</button>
+              <button class="btn-action btn-excel" onclick="exportToExcel()">Download Excel (CSV)</button>
+            </div>
+          </div>
           
           <form class="filters" id="filterForm" method="GET">
             <input type="hidden" name="page" value="1" />
@@ -286,6 +341,7 @@ export const getMismatchedLeadsReport = async (req, res) => {
                     <td>
                       <strong>${m.name}</strong>
                       <div class="phone-input-group">
+                        <span class="print-val">${m.phone || 'No Phone'}</span>
                         <input class="phone-input" type="text" value="${m.phone || ''}" id="p_${m.id}" />
                         <button class="btn-save-phone" onclick="savePhone('${m.id}', 'phone', 'p_${m.id}', 's_${m.id}')">Save</button>
                         <span class="save-status" id="s_${m.id}"></span>
@@ -500,9 +556,31 @@ export const getDuplicateLeadsReport = async (req, res) => {
           .btn-save-phone { background: #48bb78; color: white; border: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold; }
           .btn-save-phone:hover { background: #38a169; }
           .save-status { font-size: 9px; margin-left: 4px; display: none; }
+          
+          .print-val { display: none; }
+
+          .report-actions { display: flex; gap: 10px; margin-bottom: 20px; }
+          .btn-action { padding: 10px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; border: 1px solid #cbd5e0; background: white; color: #4a5568; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+          .btn-action:hover { background: #f7fafc; }
+          .btn-excel { background: #2f855a; color: white; border-color: #2f855a; }
+          .btn-excel:hover { background: #276749; }
+          
+          @media print {
+            .filters, .pagination, .btn-save-phone, .report-actions, .btn-refresh, .save-status, .id-cell, .school-col, .activity-col, .created-col { display: none !important; }
+            body { padding: 0; background: white; font-size: 8.5px; line-height: 1.1; }
+            .container { box-shadow: none; max-width: 100%; padding: 0; margin: 0; }
+            table { width: 100% !important; border-collapse: collapse; margin-bottom: 15px; }
+            th, td { padding: 3px 6px !important; border: 0.5pt solid #e2e8f0 !important; }
+            .phone-input { display: none !important; }
+            .print-val { display: inline !important; font-weight: bold; }
+            .duplicate-group { break-inside: avoid; margin-bottom: 10px; }
+            h1 { font-size: 16px; margin-bottom: 10px; }
+            h2 { font-size: 14px; margin-top: 20px; }
+          }
         </style>
         <script>
           async function savePhone(leadId, field, inputId, statusId) {
+            // ... (rest of script)
             const val = document.getElementById(inputId).value;
             const status = document.getElementById(statusId);
             status.style.display = 'inline';
@@ -531,11 +609,52 @@ export const getDuplicateLeadsReport = async (req, res) => {
               status.style.color = '#e53e3e';
             }
           }
+
+          function exportToExcel() {
+            const tables = document.querySelectorAll('table');
+            if (!tables.length) return alert('No data to export');
+
+            let csv = [];
+            const skipIndices = [2, 5, 6]; // School, Activity, Created
+            
+            tables.forEach((table) => {
+              const rows = table.querySelectorAll('tr');
+              for (let i = 0; i < rows.length; i++) {
+                const row = [], cols = rows[i].querySelectorAll('td, th');
+                for (let j = 0; j < cols.length; j++) {
+                  if (skipIndices.includes(j)) continue;
+                  
+                  let text = cols[j].innerText.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim();
+                  const input = cols[j].querySelector('input');
+                  if (input) {
+                    text = input.value;
+                  }
+                  row.push('"' + text.replace(/"/g, '""') + '"');
+                }
+                csv.push(row.join(','));
+              }
+              csv.push('');
+            });
+
+            const csvFile = new Blob([csv.join('\\n')], { type: 'text/csv' });
+            const downloadLink = document.createElement('a');
+            downloadLink.download = 'Duplicate_Leads_Report.csv';
+            downloadLink.href = window.URL.createObjectURL(csvFile);
+            downloadLink.style.display = 'none';
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+          }
         </script>
       </head>
       <body>
         <div class="container">
-          <h1>Duplicate Leads Report</h1>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h1>Duplicate Leads Report</h1>
+            <div class="report-actions">
+              <button class="btn-action" onclick="window.print()">Print Report</button>
+              <button class="btn-action btn-excel" onclick="exportToExcel()">Download Excel (CSV)</button>
+            </div>
+          </div>
           
           <form class="filters" id="filterForm" method="GET">
             <input type="hidden" name="page" value="1" />
@@ -575,13 +694,13 @@ export const getDuplicateLeadsReport = async (req, res) => {
               <table>
                 <thead>
                   <tr>
-                    <th>Enquiry #</th>
+                    <th class="id-cell">Enquiry #</th>
                     <th>Student Name</th>
-                    <th>${(groupParam.toLowerCase() === '10th') ? 'School' : 'College'}</th>
+                    <th class="school-col">${(groupParam.toLowerCase() === '10th') ? 'School' : 'College'}</th>
                     <th>Phones Found & Update Info</th>
                     <th>Status</th>
-                    <th>Last Activity</th>
-                    <th>Created</th>
+                    <th class="activity-col">Last Activity</th>
+                    <th class="created-col">Created</th>
                     <th>Location</th>
                   </tr>
                 </thead>
@@ -593,11 +712,12 @@ export const getDuplicateLeadsReport = async (req, res) => {
                         <strong>${r.name}</strong>
                         ${r.isExactNameMatch ? '<span class="match-tag">EXACT NAME MATCH</span>' : ''}
                       </td>
-                      <td>${r.inter_college || 'N/A'}</td>
+                      <td class="school-col">${r.inter_college || 'N/A'}</td>
                       <td>
                         <div class="phone-val">
                           <span>S:</span>
                           <div class="phone-input-group">
+                            <span class="print-val">${r.phone || ''}</span>
                             <input class="phone-input" type="text" value="${r.phone || ''}" id="p_${r.id}" />
                             <button class="btn-save-phone" onclick="savePhone('${r.id}', 'phone', 'p_${r.id}', 's_${r.id}_p')">Save</button>
                             <span class="save-status" id="s_${r.id}_p"></span>
@@ -607,6 +727,7 @@ export const getDuplicateLeadsReport = async (req, res) => {
                         <div class="phone-val">
                           <span>F:</span>
                           <div class="phone-input-group">
+                            <span class="print-val">${r.father_phone || ''}</span>
                             <input class="phone-input" type="text" value="${r.father_phone || ''}" id="f_${r.id}" />
                             <button class="btn-save-phone" onclick="savePhone('${r.id}', 'father_phone', 'f_${r.id}', 's_${r.id}_f')">Save</button>
                             <span class="save-status" id="s_${r.id}_f"></span>
@@ -616,6 +737,7 @@ export const getDuplicateLeadsReport = async (req, res) => {
                         <div class="phone-val">
                           <span>A:</span>
                           <div class="phone-input-group">
+                            <span class="print-val">${r.alternate_mobile || ''}</span>
                             <input class="phone-input" type="text" value="${r.alternate_mobile || ''}" id="a_${r.id}" />
                             <button class="btn-save-phone" onclick="savePhone('${r.id}', 'alternate_mobile', 'a_${r.id}', 's_${r.id}_a')">Save</button>
                             <span class="save-status" id="s_${r.id}_a"></span>
@@ -624,8 +746,8 @@ export const getDuplicateLeadsReport = async (req, res) => {
                         </div>
                       </td>
                       <td><span style="background: #ebf8ff; color: #2b6cb0; padding: 2px 6px; border-radius: 4px; font-size: 11px;">${r.lead_status}</span></td>
-                      <td class="updated-cell">${new Date(r.updated_at).toLocaleString()}</td>
-                      <td>${new Date(r.created_at).toLocaleDateString()}</td>
+                      <td class="activity-col updated-cell">${new Date(r.updated_at).toLocaleString()}</td>
+                      <td class="created-col">${new Date(r.created_at).toLocaleDateString()}</td>
                       <td>${r.district} / ${r.mandal}</td>
                     </tr>
                   `).join('')}
