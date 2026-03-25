@@ -153,12 +153,8 @@ export const getLeads = async (req, res) => {
       params.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      if (req.query.studentGroup === 'Inter') {
-        conditions.push("(l.student_group = 'Inter' OR l.student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('l.student_group = ?');
-        params.push(req.query.studentGroup);
-      }
+      conditions.push('l.student_group = ?');
+      params.push(req.query.studentGroup);
     }
 
     if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
@@ -1534,12 +1530,8 @@ export const getAllLeadIds = async (req, res) => {
       params.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      if (req.query.studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(req.query.studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(req.query.studentGroup);
     }
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();

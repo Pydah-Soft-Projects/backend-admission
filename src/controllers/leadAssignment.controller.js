@@ -99,12 +99,8 @@ export const assignLeads = async (req, res) => {
 
       // Add student group filter if provided
       if (studentGroup) {
-        if (studentGroup === 'Inter') {
-          conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-        } else {
-          conditions.push('student_group = ?');
-          params.push(studentGroup);
-        }
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
       }
 
       // Add school/college (institution) filter if provided – match lead's dynamic_fields school_or_college_name
@@ -305,12 +301,8 @@ export const getAssignmentStats = async (req, res) => {
 
     // Student group filter (optional)
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(studentGroup);
     }
 
     // Add mandal filter if provided
@@ -358,12 +350,8 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        baseConditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        baseConditions.push('student_group = ?');
-        baseParams.push(studentGroup);
-      }
+      baseConditions.push('student_group = ?');
+      baseParams.push(studentGroup);
     }
     if (mandal) {
       baseConditions.push('mandal = ?');
@@ -1003,12 +991,8 @@ export const getOverviewAnalytics = async (req, res) => {
       leadParams.push(Number(req.query.academicYear));
     }
     if (req.query.studentGroup) {
-      if (req.query.studentGroup === 'Inter') {
-        leadFilters.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        leadFilters.push('student_group = ?');
-        leadParams.push(req.query.studentGroup);
-      }
+      leadFilters.push('student_group = ?');
+      leadParams.push(req.query.studentGroup);
     }
     const leadWhere = leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')}` : '';
     const leadWhereAnd = (suffix) =>
