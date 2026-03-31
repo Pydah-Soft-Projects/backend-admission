@@ -11,6 +11,7 @@ import {
   getAllLeadIds,
   getFilterOptions,
   getPublicFilterOptions,
+  exportLeads,
 } from '../controllers/lead.controller.js';
 import {
   getMismatchedLeadsReport,
@@ -74,6 +75,9 @@ router.get('/filters/options', getFilterOptions);
 
 // Get all lead IDs route (for bulk operations)
 router.get('/ids', getAllLeadIds);
+
+// Export Leads route
+router.get('/export', exportLeads);
 
 // Bulk upload routes (Super Admin only)
 router.post('/bulk-upload/inspect', isSuperAdmin, upload.single('file'), inspectBulkUpload);

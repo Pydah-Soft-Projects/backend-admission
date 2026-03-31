@@ -29,7 +29,7 @@ const findLocationMismatches = async () => {
     try {
         pool = getPool();
         console.log('--- Student Location Mismatch Analysis ---');
-        console.log('Target: Student Group "10th", Academic Year 2026');
+        console.log('Target: Student Group "10th", Academic Year 2026, Needs Update IN (1, 2)\n');
         console.log('Limit: First 250 records\n');
 
         // 1. Load Master Data
@@ -73,7 +73,7 @@ const findLocationMismatches = async () => {
             FROM leads 
             WHERE student_group = '10th' 
               AND academic_year = 2026
-              AND needs_manual_update = 1
+              AND needs_manual_update IN (1, 2)
             ORDER BY created_at DESC
         `);
 

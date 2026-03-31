@@ -20,9 +20,21 @@ const stripMandalSuffix = (s) => (s == null || s === '' ? '' : String(s).trim().
 const fixLocationMismatches = async () => {
     let pool;
     try {
+        // Parse Command Line Arguments
+        const args = process.argv.slice(2);
+        const isDryRun = args.includes('--dry-run') || args.includes('-d');
+        
+        let studentGroup = '10th';
+        let academicYear = 2026;
+
+        args.forEach(arg => {
+            if (arg.startsWith('--group=')) studentGroup = arg.split('=')[1];
+            if (arg.startsWith('--year=')) academicYear = parseInt(arg.split('=')[1], 10);
+        });
+
         pool = getPool();
-        console.log('--- Student Location Auto-Fix Script ---');
-        console.log('Target: Student Group "10th", Academic Year 2026, Needs Update = 1\n');
+        console.log(`--- Student Location Auto-Fix Script ${isDryRun ? '(DRY RUN)' : ''} ---`);
+        console.log(`Target: Student Group "${studentGroup}", Academic Year ${academicYear}, Needs Update IN (1, 2)\n`);
 
         // 1. Load Master Data
         console.log('Loading master data...');
@@ -59,11 +71,11 @@ const fixLocationMismatches = async () => {
         const [leads] = await pool.execute(`
             SELECT id, name, state, district, mandal 
             FROM leads 
-            WHERE student_group = '10th' 
-              AND academic_year = 2026
-              AND needs_manual_update = 1
+            WHERE student_group = ? 
+              AND academic_year = ?
+              AND needs_manual_update IN (1, 2)
             ORDER BY created_at DESC
-        `);
+        `, [studentGroup, academicYear]);
 
         console.log(`Analyzing ${leads.length} records logic...\n`);
 
@@ -173,25 +185,26 @@ const fixLocationMismatches = async () => {
                 // Check if anything actually changed or if it just needed the flag cleared
                 const changed = finalDistrict !== lead.district || finalMandal !== lead.mandal;
                 
-                await pool.execute(
-                    'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
-                    [finalDistrict, finalMandal, lead.id]
-                );
-                
-                if (changed) {
-                    console.log(`✅ Fixed: ${lead.name} | ${lead.district}->${finalDistrict} | ${lead.mandal}->${finalMandal}`);
-                } else {
-                    console.log(`✅ Validated: ${lead.name} (Flag cleared)`);
+                if (!isDryRun) {
+                    await pool.execute(
+                        'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
+                        [finalDistrict, finalMandal, lead.id]
+                    );
                 }
+                
+                const prefix = isDryRun ? '[DRY RUN] ' : '✅ ';
+                const statusLabel = changed ? 'Fixed' : 'Validated';
+                console.log(`${prefix}${statusLabel}: ${lead.name} | District: ${lead.district}->${finalDistrict} | Mandal: ${lead.mandal}->${finalMandal}`);
+                
                 fixCount++;
             } else {
                 skipCount++;
             }
         }
 
-        console.log('\n--- Final Summary ---');
+        console.log(`\n--- Final Summary ${isDryRun ? '(DRY RUN)' : ''} ---`);
         console.log(`Total Leads Processed: ${leads.length}`);
-        console.log(`Leads Auto-Fixed/Validated: ${fixCount}`);
+        console.log(`Leads ${isDryRun ? 'That Would Be ' : ''}Auto-Fixed/Validated: ${fixCount}`);
         console.log(`Leads Still Needing Attention: ${skipCount}`);
 
         await closeDB();

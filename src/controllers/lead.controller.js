@@ -1,3 +1,4 @@
+import ExcelJS from 'exceljs';
 import PQueue from 'p-queue';
 import { v4 as uuidv4 } from 'uuid';
 import { getPool } from '../config-sql/database.js';
@@ -1738,3 +1739,220 @@ export const getFilterOptions = async (req, res) => {
 
 
 
+
+// @desc    Export leads to Excel with filters
+// @route   GET /api/leads/export
+// @access  Private (Super Admin / Admin)
+export const exportLeads = async (req, res) => {
+  try {
+    const pool = getPool();
+
+    // Reuse filter logic from getLeads
+    const conditions = [];
+    const params = [];
+
+    if (req.query.mandal) {
+      conditions.push('l.mandal = ?');
+      params.push(req.query.mandal);
+    }
+    if (req.query.state) {
+      conditions.push('l.state = ?');
+      params.push(req.query.state);
+    }
+    if (req.query.district) {
+      conditions.push('l.district = ?');
+      params.push(req.query.district);
+    }
+    if (req.query.quota) {
+      conditions.push('l.quota = ?');
+      params.push(req.query.quota);
+    }
+    if (req.query.leadStatus) {
+      conditions.push('l.lead_status = ?');
+      params.push(req.query.leadStatus);
+    }
+    if (req.query.applicationStatus) {
+      conditions.push('l.application_status = ?');
+      params.push(req.query.applicationStatus);
+    }
+    if (req.query.assignedTo) {
+      conditions.push('l.assigned_to = ?');
+      params.push(req.query.assignedTo);
+    }
+    if (req.query.courseInterested) {
+      conditions.push('l.course_interested = ?');
+      params.push(req.query.courseInterested);
+    }
+    if (req.query.source) {
+      conditions.push('l.source = ?');
+      params.push(req.query.source);
+    }
+
+    if (req.query.startDate) {
+      conditions.push('l.created_at >= ?');
+      const start = new Date(req.query.startDate);
+      start.setHours(0, 0, 0, 0);
+      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.endDate) {
+      conditions.push('l.created_at <= ?');
+      const end = new Date(req.query.endDate);
+      end.setHours(23, 59, 59, 999);
+      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (req.query.scheduledOn) {
+      conditions.push('l.next_scheduled_call >= ? AND l.next_scheduled_call <= ?');
+      params.push(`${req.query.scheduledOn} 00:00:00`, `${req.query.scheduledOn} 23:59:59`);
+    }
+    if (req.query.academicYear != null && req.query.academicYear !== '') {
+      conditions.push('l.academic_year = ?');
+      params.push(Number(req.query.academicYear));
+    }
+    if (req.query.studentGroup) {
+      conditions.push('l.student_group = ?');
+      params.push(req.query.studentGroup);
+    }
+
+    if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
+      conditions.push('l.needs_manual_update IN (1, 2)');
+    }
+
+    const touchedToday = req.query.touchedToday === 'true' || req.query.touchedToday === '1';
+    if (touchedToday) {
+      const touchedUserId = req.user.id || req.user._id;
+      conditions.push(`EXISTS (
+        SELECT 1 FROM activity_logs a
+        WHERE a.lead_id = l.id AND a.performed_by = ?
+        AND DATE(a.created_at) = CURDATE()
+        AND a.type IN ('status_change', 'comment')
+      )`);
+      params.push(touchedUserId);
+    }
+
+    if (req.query.enquiryNumber) {
+      const searchTerm = req.query.enquiryNumber.trim();
+      if (searchTerm.toUpperCase().startsWith('ENQ')) {
+        conditions.push('l.enquiry_number LIKE ?');
+        params.push(`${searchTerm}%`);
+      } else {
+        conditions.push('l.enquiry_number LIKE ?');
+        params.push(`%${searchTerm}%`);
+      }
+    }
+
+    if (req.query.search) {
+      const searchTerm = req.query.search.trim();
+      conditions.push(`(
+        MATCH(l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.mother_name, l.course_interested, l.district, l.mandal, l.state, l.application_status, l.hall_ticket_number, l.inter_college) 
+        AGAINST(? IN NATURAL LANGUAGE MODE)
+        OR l.name LIKE ?
+        OR l.phone LIKE ?
+        OR l.email LIKE ?
+        OR l.district LIKE ?
+      )`);
+      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+    }
+
+    // Access control
+    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
+      const userId = req.user.id || req.user._id;
+      if (req.user.roleName === 'PRO') {
+        conditions.push('(l.assigned_to_pro = ? OR l.assigned_to = ?)');
+        params.push(userId, userId);
+      } else {
+        conditions.push('l.assigned_to = ?');
+        params.push(userId);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const query = `
+      SELECT 
+        l.*,
+        u1.name as assigned_to_name,
+        u2.name as uploaded_by_name,
+        u3.name as assigned_to_pro_name
+      FROM leads l
+      LEFT JOIN users u1 ON l.assigned_to = u1.id
+      LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
+      ${whereClause}
+      ORDER BY l.created_at DESC
+    `;
+
+    const [leads] = await pool.execute(query, params);
+
+    // Create Excel Workbook
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Leads');
+
+    // Define Columns
+    worksheet.columns = [
+      { header: 'Enquiry Number', key: 'enquiryNumber', width: 20 },
+      { header: 'Name', key: 'name', width: 25 },
+      { header: 'Phone', key: 'phone', width: 15 },
+      { header: 'Email', key: 'email', width: 25 },
+      { header: 'Status', key: 'leadStatus', width: 15 },
+      { header: 'District', key: 'district', width: 15 },
+      { header: 'Mandal', key: 'mandal', width: 15 },
+      { header: 'Village', key: 'village', width: 20 },
+      { header: 'Father Name', key: 'fatherName', width: 20 },
+      { header: 'Father Phone', key: 'fatherPhone', width: 15 },
+      { header: 'Gender', key: 'gender', width: 10 },
+      { header: 'Admission Date', key: 'createdAt', width: 20 },
+      { header: 'Source', key: 'source', width: 15 },
+      { header: 'Assigned To', key: 'assignedToName', width: 20 },
+      { header: 'PRO Assigned To', key: 'assignedToProName', width: 20 },
+    ];
+
+    // Add Rows
+    leads.forEach(lead => {
+      worksheet.addRow({
+        enquiryNumber: lead.enquiry_number,
+        name: lead.name,
+        phone: lead.phone,
+        email: lead.email,
+        leadStatus: lead.lead_status,
+        district: lead.district,
+        mandal: lead.mandal,
+        village: lead.village,
+        fatherName: lead.father_name,
+        fatherPhone: lead.father_phone,
+        gender: lead.gender,
+        createdAt: lead.created_at ? new Date(lead.created_at).toLocaleString() : '',
+        source: lead.source,
+        assignedToName: lead.assigned_to_name || 'Unassigned',
+        assignedToProName: lead.assigned_to_pro_name || 'Unassigned',
+      });
+    });
+
+    // Style the header
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    // Set Response Headers
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=leads_export.xlsx'
+    );
+
+    // Write to stream
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (error) {
+    console.error('Error exporting leads:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export leads', 500);
+    }
+  }
+};
