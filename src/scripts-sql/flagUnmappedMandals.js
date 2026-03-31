@@ -17,7 +17,7 @@ const superNorm = (s) => norm(s).replace(/[^a-z0-9]/g, '');
 const stripDistrictSuffix = (s) => (s == null || s === '' ? '' : String(s).trim().replace(/\s+(dist(rict)?|dt\.?)\s*$/i, '').trim());
 const stripMandalSuffix = (s) => (s == null || s === '' ? '' : String(s).trim().replace(/\s+(mandal|mandalam|mndl\.?)\s*$/i, '').trim());
 
-const fixLocationMismatches = async () => {
+const flagUnmappedMandals = async () => {
     let pool;
     try {
         // Parse Command Line Arguments
@@ -35,39 +35,8 @@ const fixLocationMismatches = async () => {
         });
 
         pool = getPool();
-        console.log(`--- Student Location Auto-Fix Script ${isDryRun ? '(DRY RUN)' : ''} ---`);
+        console.log(`--- Student Location Flagging Script ${isDryRun ? '(DRY RUN)' : ''} ---`);
         console.log(`Target: District "${targetDistrict || 'ALL'}", Group "${studentGroup}", Year ${academicYear}\n`);
-
-        // 0. Pre-analysis: Get total counts for context
-        const countParams = [academicYear];
-        let countQuery = 'SELECT COUNT(*) as total FROM leads WHERE academic_year = ?';
-        
-        if (studentGroup !== 'ALL') {
-            countQuery += ' AND student_group = ?';
-            countParams.push(studentGroup);
-        }
-
-        if (targetDistrict) {
-            countQuery += ' AND district = ?';
-            countParams.push(targetDistrict);
-        }
-        
-        const [totalRows] = await pool.execute(countQuery, countParams);
-        const totalInGroup = totalRows[0].total;
-
-        const updateCountQuery = countQuery + ' AND needs_manual_update IN (1, 2)';
-        const [pendingRows] = await pool.execute(updateCountQuery, countParams);
-        const pendingInGroup = pendingRows[0].total;
-
-        console.log(`Context for ${targetDistrict || 'all districts'}:`);
-        console.log(`- Total Leads: ${totalInGroup}`);
-        console.log(`- Pending Updates (1, 2): ${pendingInGroup}\n`);
-
-        if (pendingInGroup === 0) {
-            console.log('✅ No leads need updating for this selection. Exiting.');
-            await closeDB();
-            return;
-        }
 
         // 1. Load Master Data
         console.log('Loading master data...');
@@ -100,14 +69,13 @@ const fixLocationMismatches = async () => {
             if (sName !== nName) mMap.set(sName, entry);
         });
 
-        // 2. Query Leads
-        console.log('Querying leads needing update...');
+        // 2. Query ALL leads for this group/district (not just those flagged)
+        console.log('Querying leads for analysis...');
         const queryParams = [academicYear];
         let mainQuery = `
-            SELECT id, name, state, district, mandal 
+            SELECT id, name, state, district, mandal, needs_manual_update 
             FROM leads 
             WHERE academic_year = ?
-              AND needs_manual_update IN (1, 2)
         `;
         
         if (studentGroup !== 'ALL') {
@@ -123,16 +91,22 @@ const fixLocationMismatches = async () => {
 
         const [leads] = await pool.execute(mainQuery, queryParams);
 
-        console.log(`Analyzing ${leads.length} records logic...\n`);
+        console.log(`Analyzing ${leads.length} leads...\n`);
 
-        let fixCount = 0;
+        let clearedCount = 0;
+        let flaggedCount = 0;
         let skipCount = 0;
+        
+        const clearedByDistrict = new Map();
+        const flaggedByDistrict = new Map();
 
         for (const lead of leads) {
             let finalState = lead.state || 'Andhra Pradesh';
             let finalDistrict = lead.district || '';
             let finalMandal = lead.mandal || '';
-            let resolved = false;
+            let isMapped = false;
+            
+            const originalDistrictNormalized = finalDistrict; // capture for counting
 
             const sId = stateIdByName.get(norm(finalState)) 
                       || (norm(finalState) === 'ap' ? stateIdByName.get('andhra pradesh') : null);
@@ -144,29 +118,19 @@ const fixLocationMismatches = async () => {
                 
                 let dMatch = districtMap?.get(nDist) || districtMap?.get(sDist);
                 
-                // If no exact match, try superNorm
+                // SuperNorm matching for district
                 if (!dMatch && districtMap) {
                     const suDist = superNorm(sDist);
                     for (const [key, value] of districtMap.entries()) {
                         if (superNorm(key) === suDist) {
                             dMatch = value;
-                            finalDistrict = dMatch.name;
                             break;
                         }
                     }
                 }
 
-                // If still no match, try fuzzy
-                if (!dMatch && districtMap) {
-                    const candidates = Array.from(districtMap.keys());
-                    const best = findBestMatch(sDist, candidates, 0.75);
-                    if (best) {
-                        dMatch = districtMap.get(best);
-                        finalDistrict = dMatch.name;
-                    }
-                }
-
                 if (dMatch) {
+                    finalDistrict = dMatch.name; // Use master data name (correct casing)
                     const mandalMap = mandalsByDistrictId.get(dMatch.id);
                     const nMandal = norm(finalMandal);
                     const sMandal = stripMandalSuffix(nMandal) || nMandal;
@@ -174,43 +138,30 @@ const fixLocationMismatches = async () => {
                     
                     let mMatch = mandalMap?.get(nMandal) || mandalMap?.get(sMandal);
                     
-                    // Try superNorm
+                    // Try superNorm for mandal
                     if (!mMatch && mandalMap) {
                         for (const [key, value] of mandalMap.entries()) {
                             if (superNorm(key) === suMandal) {
                                 mMatch = value;
-                                finalMandal = mMatch.name;
                                 break;
                             }
                         }
                     }
 
-                    // Try fuzzy
+                    // Try fuzzy for mandal (high confidence threshold)
                     if (!mMatch && mandalMap) {
                         const candidates = Array.from(mandalMap.keys());
-                        const best = findBestMatch(sMandal, candidates, 0.75);
+                        const best = findBestMatch(sMandal, candidates, 0.80);
                         if (best) {
                             mMatch = mandalMap.get(best);
-                            finalMandal = mMatch.name;
                         }
                     }
 
-                    // IF NOT FOUND IN THIS DISTRICT, SEARCH CROSS-DISTRICT (GLOBAL AP SEARCH)
+                    // SEARCH CROSS-DISTRICT (GLOBAL STATE SEARCH)
                     if (!mMatch) {
                         for (const [distId, mP] of mandalsByDistrictId.entries()) {
-                            // Try exact/suffix matches first
                             let potentialMatch = mP.get(nMandal) || mP.get(sMandal);
                             
-                            // Then try superNorm
-                            if (!potentialMatch) {
-                                for (const [key, value] of mP.entries()) {
-                                    if (superNorm(key) === suMandal) {
-                                        potentialMatch = value;
-                                        break;
-                                    }
-                                }
-                            }
-
                             if (potentialMatch) {
                                 // Find district name for this mandal
                                 const [dRows] = await pool.execute('SELECT name FROM districts WHERE id = ?', [potentialMatch.district_id]);
@@ -225,42 +176,77 @@ const fixLocationMismatches = async () => {
                     }
 
                     if (mMatch) {
-                        resolved = true;
+                        finalMandal = mMatch.name; // Use master data name (correct casing)
+                        isMapped = true;
                     }
                 }
             }
 
-            if (resolved) {
-                // Check if anything actually changed or if it just needed the flag cleared
-                const changed = finalDistrict !== lead.district || finalMandal !== lead.mandal;
-                
+            // Decide if we should perform an update
+            const newStatus = isMapped ? 0 : 2;
+            const casingChanged = isMapped && (finalDistrict !== lead.district || finalMandal !== lead.mandal);
+            const statusChanged = lead.needs_manual_update !== newStatus;
+            
+            if (casingChanged || statusChanged) {
                 if (!isDryRun) {
-                    await pool.execute(
-                        'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
-                        [finalDistrict, finalMandal, lead.id]
-                    );
+                    if (isMapped) {
+                        await pool.execute(
+                            'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
+                            [finalDistrict, finalMandal, lead.id]
+                        );
+                    } else {
+                        await pool.execute(
+                            'UPDATE leads SET needs_manual_update = 2 WHERE id = ?',
+                            [lead.id]
+                        );
+                    }
                 }
                 
                 const prefix = isDryRun ? '[DRY RUN] ' : '✅ ';
-                const statusLabel = changed ? 'Fixed' : 'Validated';
-                console.log(`${prefix}${statusLabel}: ${lead.name} | District: ${lead.district}->${finalDistrict} | Mandal: ${lead.mandal}->${finalMandal}`);
-                
-                fixCount++;
+                const distKey = originalDistrictNormalized || 'Unknown';
+
+                if (newStatus === 2) {
+                    if (isDryRun) {
+                        // Optional: only log if we are curious, but avoid 184k lines!
+                        // console.log(`${prefix}FLAGGED: ${lead.name} | District: ${lead.district} | Mandal: ${lead.mandal} (Status -> 2)`);
+                    }
+                    flaggedCount++;
+                    flaggedByDistrict.set(distKey, (flaggedByDistrict.get(distKey) || 0) + 1);
+                } else {
+                    const label = casingChanged ? 'SYNCED' : 'CLEARED';
+                    console.log(`${prefix}${label}: ${lead.name} | District: ${lead.district}->${finalDistrict} | Mandal: ${lead.mandal}->${finalMandal} (Status -> 0)`);
+                    clearedCount++;
+                    clearedByDistrict.set(distKey, (clearedByDistrict.get(distKey) || 0) + 1);
+                }
             } else {
                 skipCount++;
             }
         }
 
         console.log(`\n--- Final Summary ${isDryRun ? '(DRY RUN)' : ''} ---`);
-        console.log(`Total Leads Processed: ${leads.length}`);
-        console.log(`Leads ${isDryRun ? 'That Would Be ' : ''}Auto-Fixed/Validated: ${fixCount}`);
-        console.log(`Leads Still Needing Attention: ${skipCount}`);
+        console.log(`Total Leads Analyzed: ${leads.length}`);
+        console.log(`Leads That Can Be Cleared (Status 0): ${clearedCount}`);
+        console.log(`Leads That Are Broken (Status 2): ${flaggedCount}`);
+        console.log(`Leads Already Correct (Skipped): ${skipCount}`);
+
+        if (clearedCount > 0) {
+            console.log('\n--- Breakdown: Cleared (Potential Status 0) per District ---');
+            for (const [dist, count] of clearedByDistrict.entries()) {
+                console.log(`${dist.padEnd(25)}: ${count}`);
+            }
+        }
+
+        console.log('\n--- Breakdown: Broken (Potential Status 2) per District (Top 20) ---');
+        const sortedFlagged = Array.from(flaggedByDistrict.entries()).sort((a,b) => b[1] - a[1]);
+        sortedFlagged.slice(0, 20).forEach(([dist, count]) => {
+            console.log(`${dist.padEnd(25)}: ${count}`);
+        });
 
         await closeDB();
     } catch (error) {
-        console.error('Error in fix script:', error);
+        console.error('Error in flagging script:', error);
         if (pool) await closeDB();
     }
 };
 
-fixLocationMismatches();
+flagUnmappedMandals();

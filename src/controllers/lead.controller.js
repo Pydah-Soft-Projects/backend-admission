@@ -187,7 +187,7 @@ export const getLeads = async (req, res) => {
       }
     }
 
-    // Full-text search
+    // Full-text search and partial matching
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
       conditions.push(`(
@@ -197,8 +197,16 @@ export const getLeads = async (req, res) => {
         OR l.phone LIKE ?
         OR l.email LIKE ?
         OR l.district LIKE ?
+        OR l.enquiry_number LIKE ?
       )`);
-      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+      params.push(
+        searchTerm, 
+        `%${searchTerm}%`, 
+        `%${searchTerm}%`, 
+        `%${searchTerm}%`, 
+        `%${searchTerm}%`,
+        `%${searchTerm}%`
+      );
     }
 
     // Access control - if user is not Super Admin, only show assigned leads

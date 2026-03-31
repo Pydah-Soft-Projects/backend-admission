@@ -66,7 +66,7 @@ export const reclaimExpiredLeads = async () => {
           oldStatus,
           'New',
           `Automated Reassignment: Cycle ${newCycle}. Reclaimed from counselor due to 'Not Interested' status and target date reached.`,
-          'SYSTEM', // Special identifier for automated tasks
+          '00000000-0000-0000-0000-000000000000', // Special identifier for automated tasks
           JSON.stringify({
             reclamation: {
               previousCycle: lead.cycle_number || 1,
