@@ -299,10 +299,14 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
 
-    // Student group filter (optional)
+    // Student group filter (optional; align with assign/remove count logic for Inter variants)
     if (studentGroup) {
-      conditions.push('student_group = ?');
-      params.push(studentGroup);
+      if (studentGroup === 'Inter') {
+        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
+      }
     }
 
     // Add mandal filter if provided
@@ -350,8 +354,19 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
     if (studentGroup) {
-      baseConditions.push('student_group = ?');
-      baseParams.push(studentGroup);
+      if (studentGroup === 'Inter') {
+        baseConditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+      } else {
+        baseConditions.push('student_group = ?');
+        baseParams.push(studentGroup);
+      }
+    }
+    if (cycleNumber != null && cycleNumber !== '') {
+      const cycleBase = parseInt(cycleNumber, 10);
+      if (!Number.isNaN(cycleBase)) {
+        baseConditions.push('cycle_number = ?');
+        baseParams.push(cycleBase);
+      }
     }
     if (mandal) {
       baseConditions.push('mandal = ?');
@@ -364,6 +379,13 @@ export const getAssignmentStats = async (req, res) => {
     if (state) {
       baseConditions.push('state = ?');
       baseParams.push(state);
+    }
+    if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
+      const instBase = String(institutionName).trim();
+      baseConditions.push(
+        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
+      );
+      baseParams.push(instBase);
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
@@ -477,8 +499,17 @@ export const getAssignedCountForUser = async (req, res) => {
       return errorResponse(res, 'User ID is required', 400);
     }
 
-    const targetRole = req.query.targetRole || 'Student Counselor';
-    const isPro = targetRole === 'PRO';
+    // Use DB role (same as removeAssignments). PRO leads use assigned_to_pro; others use assigned_to.
+    // Query param targetRole was easy to omit from clients and produced wrong counts for PRO users.
+    const [targetUsers] = await pool.execute(
+      'SELECT id, role_name FROM users WHERE id = ?',
+      [userId]
+    );
+    if (targetUsers.length === 0) {
+      return errorResponse(res, 'User not found', 404);
+    }
+    const isPro =
+      targetUsers[0].role_name && String(targetUsers[0].role_name).trim().toUpperCase() === 'PRO';
     const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
 
     const conditions = [`${assignmentCol} = ?`];
@@ -525,11 +556,13 @@ export const getAssignedCountForUser = async (req, res) => {
       params
     );
 
-    const count = result[0]?.total ?? 0;
+    const rawTotal = result[0]?.total ?? 0;
+    const count = typeof rawTotal === 'bigint' ? Number(rawTotal) : Number(rawTotal);
+    const safeCount = Number.isFinite(count) ? count : 0;
 
     return successResponse(
       res,
-      { count },
+      { count: safeCount },
       'Assigned count retrieved',
       200
     );
@@ -544,7 +577,7 @@ export const getAssignedCountForUser = async (req, res) => {
 // @access  Private (Super Admin only)
 export const removeAssignments = async (req, res) => {
   try {
-    const { userId, mandal, district, state, academicYear, studentGroup, count } = req.body;
+    const { userId, mandal, district, state, academicYear, studentGroup, cycleNumber, count } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -558,7 +591,7 @@ export const removeAssignments = async (req, res) => {
 
     // Check user exists
     const [users] = await pool.execute(
-      'SELECT id, name FROM users WHERE id = ?',
+      'SELECT id, name, role_name FROM users WHERE id = ?',
       [userId]
     );
     if (users.length === 0) {
@@ -573,6 +606,13 @@ export const removeAssignments = async (req, res) => {
 
     const conditions = [`${assignmentCol} = ?`];
     const params = [userId];
+    if (cycleNumber != null && cycleNumber !== '') {
+      const cycle = parseInt(cycleNumber, 10);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('cycle_number = ?');
+        params.push(cycle);
+      }
+    }
     if (academicYear != null && academicYear !== '') {
       const year = parseInt(academicYear, 10);
       if (!Number.isNaN(year)) {
