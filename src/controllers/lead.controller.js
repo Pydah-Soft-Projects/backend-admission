@@ -7,14 +7,18 @@ import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
 import { findBestMatch, similarity } from '../utils/fuzzyMatch.util.js';
+import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
 });
 
 // Helper function to format lead data from SQL to camelCase
-const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null) => {
+const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null, viewerOptions = {}) => {
   if (!leadData) return null;
+  const viewerRole = viewerOptions.viewerRoleName;
+  const callStatus = leadData.call_status ?? null;
+  const visitStatus = leadData.visit_status ?? null;
   return {
     id: leadData.id,
     _id: leadData.id, // Keep _id for backward compatibility
@@ -43,6 +47,8 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
       ? JSON.parse(leadData.dynamic_fields)
       : leadData.dynamic_fields || {},
     leadStatus: leadData.lead_status || 'New',
+    ...(viewerRole !== 'PRO' ? { callStatus } : {}),
+    ...(viewerRole !== 'Student Counselor' ? { visitStatus } : {}),
     admissionNumber: leadData.admission_number,
     assignedTo: assignedToUser || leadData.assigned_to,
     assignedAt: leadData.assigned_at,
@@ -114,6 +120,14 @@ export const getLeads = async (req, res) => {
     if (req.query.leadStatus) {
       conditions.push('l.lead_status = ?');
       params.push(req.query.leadStatus);
+    }
+    if (req.query.callStatus) {
+      conditions.push('l.call_status = ?');
+      params.push(req.query.callStatus);
+    }
+    if (req.query.visitStatus) {
+      conditions.push('l.visit_status = ?');
+      params.push(req.query.visitStatus);
     }
     if (req.query.applicationStatus) {
       conditions.push('l.application_status = ?');
@@ -281,7 +295,9 @@ export const getLeads = async (req, res) => {
         email: lead.assigned_to_pro_email,
       } : null;
 
-      return formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser);
+      return formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
+        viewerRoleName: req.user.roleName,
+      });
     });
 
     return successResponse(res, {
@@ -381,7 +397,9 @@ export const getLead = async (req, res) => {
       email: leadData.assigned_to_pro_email,
     } : null;
 
-    const lead = formatLead(leadData, assignedToUser, uploadedByUser, assignedToProUser);
+    const lead = formatLead(leadData, assignedToUser, uploadedByUser, assignedToProUser, {
+      viewerRoleName: req.user.roleName,
+    });
 
     return successResponse(res, lead, 'Lead retrieved successfully', 200);
   } catch (error) {
@@ -748,6 +766,7 @@ export const updateLead = async (req, res) => {
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     const isAdmin = req.user.roleName === 'Admin';
     const isPro = req.user.roleName === 'PRO';
+    const isStudentCounselor = req.user.roleName === 'Student Counselor';
     const isAssigned = currentLead.assigned_to === userId || currentLead.assigned_to_pro === userId;
 
     if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
@@ -755,8 +774,8 @@ export const updateLead = async (req, res) => {
     }
 
     // Regular users can only update status and notes; Super Admin can update everything.
-    // Assigned counsellor or PRO can also update profile fields: name, phone, father, village, state, district, mandal.
-    const isAssignedCounsellor = !isSuperAdmin && isAssigned;
+    // Assigned Student Counselor (not PRO) can also update profile fields: name, phone, father, village, state, district, mandal.
+    const isAssignedCounsellorOnly = !isSuperAdmin && isStudentCounselor && currentLead.assigned_to === userId;
 
     // Store original values for comparison
     const originalLead = {
@@ -803,6 +822,8 @@ export const updateLead = async (req, res) => {
       applicationStatus,
       leadStatus,
       status: legacyStatus,
+      callStatus,
+      visitStatus,
       assignedTo,
       source,
       notes,
@@ -820,6 +841,7 @@ export const updateLead = async (req, res) => {
     let oldStatus = currentLead.lead_status || 'New';
     let oldAssignedTo = currentLead.assigned_to;
     let assignmentChanged = false;
+    let desiredLeadFromAssignment = null;
 
     // Only Super Admin can update these fields
     if (isSuperAdmin) {
@@ -923,8 +945,7 @@ export const updateLead = async (req, res) => {
           // If status is "New", automatically change to "Assigned"
           if (oldStatus === 'New' || !oldStatus) {
             oldStatus = oldStatus || 'New';
-            updateFields.push('lead_status = ?');
-            updateValues.push('Assigned');
+            desiredLeadFromAssignment = 'Assigned';
           }
         }
       }
@@ -938,8 +959,8 @@ export const updateLead = async (req, res) => {
       }
     }
 
-    // Assigned counsellor can update profile fields (same as edit form on user lead detail page)
-    if (isAssignedCounsellor) {
+    // Assigned counsellor can update profile fields (same as edit form on user lead detail page); PRO cannot via this path.
+    if (isAssignedCounsellorOnly) {
       if (interCollege !== undefined) {
         updateFields.push('inter_college = ?');
         updateValues.push(interCollege ? String(interCollege).trim() : '');
@@ -950,16 +971,83 @@ export const updateLead = async (req, res) => {
       }
     }
 
-    // Both Super Admin and regular users can update status and notes
-    if (newLeadStatus && newLeadStatus !== currentLead.lead_status) {
-      updateFields.push('lead_status = ?');
-      updateValues.push(newLeadStatus);
+    const assignedAsCounsellor = currentLead.assigned_to === userId;
+    const assignedAsPro = currentLead.assigned_to_pro === userId;
+
+    let nextCall = currentLead.call_status ?? null;
+    let nextVisit = currentLead.visit_status ?? null;
+    let desiredLead = desiredLeadFromAssignment ?? currentLead.lead_status;
+
+    const counsellorProfileBodyKeys = [
+      'hallTicketNumber', 'name', 'phone', 'email', 'fatherName', 'fatherPhone', 'motherName',
+      'village', 'district', 'courseInterested', 'mandal', 'state', 'gender', 'rank', 'interCollege',
+      'quota', 'applicationStatus', 'address', 'alternateMobile', 'dynamicFields',
+    ];
+    const proVisitBumpFromCounsellor =
+      isStudentCounselor &&
+      assignedAsCounsellor &&
+      currentLead.assigned_to_pro &&
+      (
+        callStatus !== undefined ||
+        notes !== undefined ||
+        nextScheduledCall !== undefined ||
+        academicYear !== undefined ||
+        studentGroup !== undefined ||
+        counsellorProfileBodyKeys.some((k) => Object.prototype.hasOwnProperty.call(req.body, k))
+      );
+    if (proVisitBumpFromCounsellor) {
+      nextVisit = 'Assigned';
     }
-    if (notes !== undefined) {
+
+    if ((isSuperAdmin || isAdmin) && callStatus !== undefined) {
+      nextCall = callStatus === '' || callStatus === null ? null : String(callStatus).trim();
+      updateFields.push('call_status = ?');
+      updateValues.push(nextCall);
+    }
+    if ((isSuperAdmin || isAdmin) && visitStatus !== undefined) {
+      nextVisit = visitStatus === '' || visitStatus === null ? null : String(visitStatus).trim();
+      updateFields.push('visit_status = ?');
+      updateValues.push(nextVisit);
+    }
+    if (isStudentCounselor && assignedAsCounsellor && callStatus !== undefined) {
+      nextCall = callStatus === '' || callStatus === null ? null : String(callStatus).trim();
+      updateFields.push('call_status = ?');
+      updateValues.push(nextCall);
+    }
+    if (isPro && assignedAsPro && visitStatus !== undefined) {
+      nextVisit = visitStatus === '' || visitStatus === null ? null : String(visitStatus).trim();
+      updateFields.push('visit_status = ?');
+      updateValues.push(nextVisit);
+    }
+
+    if (proVisitBumpFromCounsellor && !updateFields.some((f) => String(f).startsWith('visit_status'))) {
+      updateFields.push('visit_status = ?');
+      updateValues.push('Assigned');
+    }
+
+    if ((isSuperAdmin || isAdmin) && newLeadStatus && newLeadStatus !== currentLead.lead_status) {
+      desiredLead = newLeadStatus;
+    } else if (
+      newLeadStatus &&
+      newLeadStatus !== currentLead.lead_status &&
+      !isStudentCounselor &&
+      !isPro &&
+      isAssigned
+    ) {
+      desiredLead = newLeadStatus;
+    }
+
+    const resolvedLead = resolveLeadStatus(desiredLead, nextCall, nextVisit);
+    if (resolvedLead !== currentLead.lead_status) {
+      updateFields.push('lead_status = ?');
+      updateValues.push(resolvedLead);
+    }
+
+    if (notes !== undefined && (isSuperAdmin || isAdmin || !isPro)) {
       updateFields.push('notes = ?');
       updateValues.push(notes || null);
     }
-    if (nextScheduledCall !== undefined) {
+    if (nextScheduledCall !== undefined && (isSuperAdmin || isAdmin || !isPro)) {
       updateFields.push('next_scheduled_call = ?');
       updateValues.push(
         nextScheduledCall
@@ -967,16 +1055,16 @@ export const updateLead = async (req, res) => {
           : null
       );
     }
-    if (academicYear !== undefined) {
+    if (academicYear !== undefined && (isSuperAdmin || isAdmin || !isPro)) {
       updateFields.push('academic_year = ?');
       updateValues.push(academicYear != null && academicYear !== '' ? Number(academicYear) : null);
     }
-    if (studentGroup !== undefined) {
+    if (studentGroup !== undefined && (isSuperAdmin || isAdmin || !isPro)) {
       updateFields.push('student_group = ?');
       updateValues.push(studentGroup ? String(studentGroup).trim() || null : null);
     }
     // Clear needs_manual_update when lead is updated (Super Admin or assigned counsellor has reviewed/corrected)
-    if ((isSuperAdmin || isAssignedCounsellor) && updateFields.length > 0) {
+    if ((isSuperAdmin || isAssignedCounsellorOnly) && updateFields.length > 0) {
       updateFields.push('needs_manual_update = ?');
       updateValues.push(0);
     }
@@ -992,7 +1080,7 @@ export const updateLead = async (req, res) => {
     }
 
     // Create activity logs
-    const finalStatus = newLeadStatus || currentLead.lead_status;
+    const finalStatus = resolvedLead;
 
     // Log assignment change
     if (assignmentChanged && assignedTo) {
@@ -1018,8 +1106,8 @@ export const updateLead = async (req, res) => {
       );
     }
 
-    // Log status change (if status changed and not due to assignment)
-    if (newLeadStatus && newLeadStatus !== currentLead.lead_status && !assignmentChanged) {
+    // Log lead_status change (not from assignment row above)
+    if (resolvedLead !== currentLead.lead_status && !assignmentChanged) {
       const activityLogId = uuidv4();
       await pool.execute(
         `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, performed_by, created_at, updated_at)
@@ -1029,7 +1117,7 @@ export const updateLead = async (req, res) => {
           req.params.id,
           'status_change',
           currentLead.lead_status,
-          newLeadStatus,
+          resolvedLead,
           userId,
         ]
       );
@@ -1072,7 +1160,7 @@ export const updateLead = async (req, res) => {
     compareAndLog('Hall Ticket Number', originalLead.hallTicketNumber, hallTicketNumber, hallTicketNumber);
     compareAndLog('Application Status', originalLead.applicationStatus, applicationStatus, applicationStatus);
 
-    if ((isSuperAdmin || isAssignedCounsellor) && fieldChanges.length > 0 && !assignedTo) {
+    if ((isSuperAdmin || isAssignedCounsellorOnly) && fieldChanges.length > 0 && !assignedTo) {
       const activityLogId = uuidv4();
       const changeSummary = fieldChanges.map(c => `${c.field} (${c.old || 'empty'} -> ${c.new || 'empty'})`).join(', ');
 
@@ -1100,10 +1188,12 @@ export const updateLead = async (req, res) => {
       `SELECT 
         l.*,
         u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
+        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
       FROM leads l
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
+      LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
       WHERE l.id = ?`,
       [req.params.id]
     );
@@ -1121,7 +1211,16 @@ export const updateLead = async (req, res) => {
       name: updatedLeads[0].uploaded_by_name,
     } : null;
 
-    const lead = formatLead(updatedLeads[0], assignedToUser, uploadedByUser);
+    const assignedToProUser = updatedLeads[0].assigned_to_pro_id ? {
+      id: updatedLeads[0].assigned_to_pro_id,
+      _id: updatedLeads[0].assigned_to_pro_id,
+      name: updatedLeads[0].assigned_to_pro_name,
+      email: updatedLeads[0].assigned_to_pro_email,
+    } : null;
+
+    const lead = formatLead(updatedLeads[0], assignedToUser, uploadedByUser, assignedToProUser, {
+      viewerRoleName: req.user.roleName,
+    });
 
     return successResponse(res, lead, 'Lead updated successfully', 200);
   } catch (error) {
@@ -1645,12 +1744,17 @@ export const getFilterOptions = async (req, res) => {
   try {
     const pool = getPool();
 
-    // Build WHERE clause for access control
+    // Build WHERE clause for access control (mirror GET /leads: PRO uses assigned_to_pro OR assigned_to)
     const conditions = [];
 
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      const userId = req.user.id || req.user._id;
-      conditions.push('assigned_to = ?');
+    const adminLike = hasElevatedAdminPrivileges(req.user.roleName) || req.user.roleName === 'Admin';
+    const userId = req.user.id || req.user._id;
+    if (!adminLike) {
+      if (req.user.roleName === 'PRO') {
+        conditions.push('(assigned_to_pro = ? OR assigned_to = ?)');
+      } else {
+        conditions.push('assigned_to = ?');
+      }
     }
 
     // Add field-specific conditions
@@ -1659,11 +1763,13 @@ export const getFilterOptions = async (req, res) => {
     const stateCondition = [...conditions, 'state IS NOT NULL AND state != ""'];
     const quotaCondition = [...conditions, 'quota IS NOT NULL AND quota != ""'];
     const leadStatusCondition = [...conditions, 'lead_status IS NOT NULL AND lead_status != ""'];
+    const callStatusCondition = [...conditions, 'call_status IS NOT NULL AND TRIM(call_status) != ""'];
+    const visitStatusCondition = [...conditions, 'visit_status IS NOT NULL AND TRIM(visit_status) != ""'];
     const appStatusCondition = [...conditions, 'application_status IS NOT NULL AND application_status != ""'];
 
     const whereClause = (conditions) => conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const params = !hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin'
-      ? [req.user.id || req.user._id]
+    const params = !adminLike
+      ? (req.user.roleName === 'PRO' ? [userId, userId] : [userId])
       : [];
 
     // Get distinct values for each field
@@ -1685,6 +1791,14 @@ export const getFilterOptions = async (req, res) => {
     );
     const [leadStatuses] = await pool.execute(
       `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
+      params
+    );
+    const [callStatuses] = await pool.execute(
+      `SELECT DISTINCT call_status FROM leads ${whereClause(callStatusCondition)} ORDER BY call_status ASC`,
+      params
+    );
+    const [visitStatuses] = await pool.execute(
+      `SELECT DISTINCT visit_status FROM leads ${whereClause(visitStatusCondition)} ORDER BY visit_status ASC`,
       params
     );
     const [applicationStatuses] = await pool.execute(
@@ -1719,6 +1833,8 @@ export const getFilterOptions = async (req, res) => {
       states: states.map(r => r.state),
       quotas: quotas.map(r => r.quota),
       leadStatuses: leadStatuses.map(r => r.lead_status),
+      callStatuses: callStatuses.map(r => r.call_status),
+      visitStatuses: visitStatuses.map(r => r.visit_status),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
       academicYears,
       studentGroups,

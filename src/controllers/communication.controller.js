@@ -1,5 +1,6 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { sendSmsThroughBulkSmsApps } from '../services/bulkSms.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -180,6 +181,10 @@ export const logCallCommunication = async (req, res) => {
     const pool = getPool();
     const userId = req.user.id || req.user._id;
 
+    if (req.user.roleName === 'PRO') {
+      return errorResponse(res, 'Call logging is not available for PRO users', 403);
+    }
+
     const { lead, validatedNumbers } = await ensureLeadAndNumbers(leadId, [contactNumber]);
 
     const sanitizedNumber = validatedNumbers[0];
@@ -206,11 +211,26 @@ export const logCallCommunication = async (req, res) => {
       ]
     );
 
-    // Update lead's last follow up
-    await pool.execute(
-      'UPDATE leads SET last_follow_up = NOW(), updated_at = NOW() WHERE id = ?',
-      [lead.id]
-    );
+    if (req.user.roleName === 'Student Counselor' && outcome?.trim()) {
+      const oc = String(outcome).trim();
+      const [stRows] = await pool.execute(
+        'SELECT lead_status, call_status, visit_status, assigned_to_pro FROM leads WHERE id = ?',
+        [lead.id]
+      );
+      const st = stRows[0] || {};
+      const nextLead = resolveLeadStatus(st.lead_status || 'New', oc, st.visit_status ?? null);
+      const visitSql = st.assigned_to_pro ? ', visit_status = ?' : '';
+      const visitParams = st.assigned_to_pro ? [oc, nextLead, 'Assigned', lead.id] : [oc, nextLead, lead.id];
+      await pool.execute(
+        `UPDATE leads SET last_follow_up = NOW(), updated_at = NOW(), call_status = ?, lead_status = ?${visitSql} WHERE id = ?`,
+        visitParams
+      );
+    } else {
+      await pool.execute(
+        'UPDATE leads SET last_follow_up = NOW(), updated_at = NOW() WHERE id = ?',
+        [lead.id]
+      );
+    }
 
     // Fetch created communication
     const [communications] = await pool.execute(
@@ -264,6 +284,10 @@ export const sendSmsCommunication = async (req, res) => {
     const { templates, contactNumbers } = req.body;
     const pool = getPool();
     const userId = req.user.id || req.user._id;
+
+    if (req.user.roleName === 'PRO') {
+      return errorResponse(res, 'SMS is not available for PRO users', 403);
+    }
 
     if (!Array.isArray(templates) || templates.length === 0) {
       return errorResponse(res, 'At least one template is required', 400);
@@ -546,6 +570,13 @@ export const getLeadCommunications = async (req, res) => {
       return errorResponse(res, 'Invalid lead ID', 400);
     }
 
+    if (req.user.roleName === 'PRO') {
+      return successResponse(res, {
+        items: [],
+        pagination: { page, limit, total: 0, pages: 0 },
+      });
+    }
+
     // Build WHERE conditions with table alias for JOIN query
     const conditions = ['c.lead_id = ?'];
     const params = [leadId];
@@ -639,6 +670,10 @@ export const getLeadCommunicationStats = async (req, res) => {
 
     if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
       return errorResponse(res, 'Invalid lead ID', 400);
+    }
+
+    if (req.user.roleName === 'PRO') {
+      return successResponse(res, { stats: [] });
     }
 
     // Get aggregated stats by contact number

@@ -1,4 +1,5 @@
 import { getPool } from '../config-sql/database.js';
+import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 /**
  * Generate a new visitor code for a lead.
@@ -122,10 +123,15 @@ export const consumeVisitorCode = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Could not consume code. It may be already used or expired.' });
       }
 
-      // 2. Update lead status to Visited
-      await connection.execute(
-        'UPDATE leads SET lead_status = "Visited" WHERE id = ?',
+      const [lr] = await connection.execute(
+        'SELECT lead_status, call_status, visit_status FROM leads WHERE id = ? FOR UPDATE',
         [leadId]
+      );
+      const row = lr[0] || {};
+      const nextLead = resolveLeadStatus('Visited', row.call_status ?? null, 'Visited');
+      await connection.execute(
+        'UPDATE leads SET visit_status = ?, lead_status = ? WHERE id = ?',
+        ['Visited', nextLead, leadId]
       );
 
       await connection.commit();

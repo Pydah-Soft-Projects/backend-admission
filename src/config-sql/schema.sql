@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS leads (
     application_status VARCHAR(100) DEFAULT 'Not Provided',
     dynamic_fields JSON DEFAULT (JSON_OBJECT()),
     lead_status VARCHAR(50) DEFAULT 'New',
+    call_status VARCHAR(50) NULL COMMENT 'Counsellor phone/call workflow; hidden from PRO in API',
+    visit_status VARCHAR(50) NULL COMMENT 'PRO field-visit workflow; hidden from counsellor in API',
     academic_year SMALLINT UNSIGNED NULL,
     student_group VARCHAR(50) NULL,
     admission_number VARCHAR(100) UNIQUE,

@@ -164,7 +164,7 @@ export const assignLeads = async (req, res) => {
 
       if (isProRole) {
         updateQuery = `UPDATE leads SET 
-          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, updated_at = NOW()
+          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
          WHERE id = ?`;
       } else {
         updateQuery = `UPDATE leads SET 
@@ -180,6 +180,9 @@ export const assignLeads = async (req, res) => {
 
       // Create activity log
       const activityLogId = uuidv4();
+      const assigneeLabel = isProRole
+        ? `PRO ${user.name}`
+        : `${user.role_name === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`;
       await pool.execute(
         `INSERT INTO activity_logs (
           id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
@@ -190,12 +193,13 @@ export const assignLeads = async (req, res) => {
           'status_change',
           oldStatus,
           newStatus,
-          `Assigned to ${user.role_name === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`,
+          `Assigned to ${assigneeLabel}`,
           currentUserId,
           JSON.stringify({
             assignment: {
               assignedTo: userId,
               assignedBy: currentUserId,
+              targetRole: isProRole ? 'PRO' : 'counsellor',
             },
           }),
         ]
@@ -747,19 +751,19 @@ export const getUserLeadAnalytics = async (req, res) => {
       [userId]
     );
 
-      if (usersResult.length === 0) {
+    if (usersResult.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
 
     const queriedUser = usersResult[0];
-    const isProRole = currentUser.role_name && String(currentUser.role_name).trim().toUpperCase() === 'PRO';
-    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
-    const assignmentCondition = isPro
+    const isProRole =
+      queriedUser.role_name && String(queriedUser.role_name).trim().toUpperCase() === 'PRO';
+    const assignmentCondition = isProRole
       ? '(assigned_to_pro = ? OR assigned_to = ?)'
       : 'assigned_to = ?';
 
     const conditions = [assignmentCondition];
-    const params = isPro ? [userId, userId] : [userId];
+    const params = isProRole ? [userId, userId] : [userId];
 
     if (academicYear != null && academicYear !== '') {
       const yearNum = parseInt(academicYear, 10);
@@ -792,7 +796,7 @@ export const getUserLeadAnalytics = async (req, res) => {
     // Get grand total assigned to user (without filters)
     const [overallTotalResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads WHERE ${assignmentCondition}`,
-      isPro ? [userId, userId] : [userId]
+      isProRole ? [userId, userId] : [userId]
     );
     const overallTotalLeads = overallTotalResult[0].total;
 

@@ -1,6 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // Helper function to format activity log data
@@ -49,6 +50,7 @@ export const addActivity = async (req, res) => {
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     const isAdmin = req.user.roleName === 'Admin';
     const isPro = req.user.roleName === 'PRO';
+    const isStudentCounselor = req.user.roleName === 'Student Counselor';
     const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
 
     if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
@@ -64,14 +66,63 @@ export const addActivity = async (req, res) => {
     const updateFields = [];
     const updateValues = [];
 
-    // If status is being changed
-    if (newStatus && newStatus !== lead.lead_status) {
-      oldStatus = lead.lead_status;
-      newStatusValue = newStatus;
-      activityType = 'status_change';
-      updateFields.push('lead_status = ?');
-      updateValues.push(newStatus);
-      leadModified = true;
+    const nextCallBase = lead.call_status ?? null;
+    const nextVisitBase = lead.visit_status ?? null;
+
+    if (newStatus) {
+      if (isSuperAdmin || isAdmin) {
+        const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
+        if (resolved !== lead.lead_status) {
+          oldStatus = lead.lead_status;
+          newStatusValue = resolved;
+          activityType = 'status_change';
+          metadata.statusChannel = 'lead_status';
+          updateFields.push('lead_status = ?');
+          updateValues.push(resolved);
+          leadModified = true;
+        }
+      } else if (isStudentCounselor && lead.assigned_to === userId) {
+        if (newStatus !== nextCallBase) {
+          const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
+          oldStatus = lead.lead_status;
+          newStatusValue = resolved;
+          activityType = 'status_change';
+          metadata.statusChannel = 'call_status';
+          updateFields.push('call_status = ?');
+          updateValues.push(newStatus);
+          if (resolved !== lead.lead_status) {
+            updateFields.push('lead_status = ?');
+            updateValues.push(resolved);
+          }
+          leadModified = true;
+        }
+      } else if (isPro && lead.assigned_to_pro === userId) {
+        if (newStatus !== nextVisitBase) {
+          const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
+          oldStatus = lead.lead_status;
+          newStatusValue = resolved;
+          activityType = 'status_change';
+          metadata.statusChannel = 'visit_status';
+          updateFields.push('visit_status = ?');
+          updateValues.push(newStatus);
+          if (resolved !== lead.lead_status) {
+            updateFields.push('lead_status = ?');
+            updateValues.push(resolved);
+          }
+          leadModified = true;
+        }
+      } else if (isAssigned && !isPro && !isStudentCounselor) {
+        const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
+        if (resolved !== lead.lead_status) {
+          oldStatus = lead.lead_status;
+          newStatusValue = resolved;
+          activityType = 'status_change';
+          metadata.statusChannel = 'lead_status';
+          updateFields.push('lead_status = ?');
+          updateValues.push(resolved);
+          leadModified = true;
+        }
+      }
     }
 
     // If quota is being changed
@@ -101,6 +152,19 @@ export const addActivity = async (req, res) => {
       } else {
         activityType = 'comment';
       }
+    }
+
+    // Counsellor touched lead while a PRO is assigned → queue field visit as "Assigned" for PRO
+    if (
+      isStudentCounselor &&
+      lead.assigned_to === userId &&
+      lead.assigned_to_pro &&
+      !updateFields.some((f) => String(f).startsWith('visit_status')) &&
+      (leadModified || (comment && comment.trim()))
+    ) {
+      updateFields.push('visit_status = ?');
+      updateValues.push('Assigned');
+      leadModified = true;
     }
 
     // Update lead if modified
@@ -133,7 +197,7 @@ export const addActivity = async (req, res) => {
 
     // Fetch created activity log with user info
     const [activityLogs] = await pool.execute(
-      `SELECT a.*, u.id as performed_by_id, u.name as performed_by_name, u.email as performed_by_email
+      `SELECT a.*, u.id as performed_by_id, u.name as performed_by_name, u.email as performed_by_email, u.role_name as performed_by_role_name
        FROM activity_logs a
        LEFT JOIN users u ON a.performed_by = u.id
        WHERE a.id = ?`,
@@ -145,6 +209,7 @@ export const addActivity = async (req, res) => {
       _id: activityLogs[0].performed_by_id,
       name: activityLogs[0].performed_by_name,
       email: activityLogs[0].performed_by_email,
+      roleName: activityLogs[0].performed_by_role_name,
     } : null;
 
     const activityLog = formatActivityLog(activityLogs[0], performedByUser);
@@ -170,7 +235,7 @@ export const getActivityLogs = async (req, res) => {
 
     // Validate lead exists
     const [leads] = await pool.execute(
-      'SELECT assigned_to FROM leads WHERE id = ?',
+      'SELECT assigned_to, assigned_to_pro FROM leads WHERE id = ?',
       [leadId]
     );
 
@@ -183,16 +248,35 @@ export const getActivityLogs = async (req, res) => {
     // Check if user has access
     const isSuperAdmin = hasElevatedAdminPrivileges(req.user.roleName);
     const isAdmin = req.user.roleName === 'Admin';
-    const isPro = req.user.roleName === 'PRO';
+    const isProViewer = req.user.roleName === 'PRO';
+    const isStudentCounselorViewer = req.user.roleName === 'Student Counselor';
+    const isElevatedViewer = isSuperAdmin || isAdmin;
     const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
 
-    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
+    if (!isSuperAdmin && !isAdmin && !isProViewer && !isAssigned) {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    // Get total count
+    let roleFilterSql = '';
+    if (!isElevatedViewer && isProViewer) {
+      roleFilterSql = ` AND (
+        u.role_name = 'PRO'
+        OR JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status'
+        OR JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetRole')) = 'PRO'
+      )`;
+    } else if (!isElevatedViewer && isStudentCounselorViewer) {
+      roleFilterSql = ` AND (
+        (u.role_name IS NULL OR u.role_name != 'PRO')
+        AND IFNULL(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')), '') != 'visit_status'
+        AND IFNULL(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetRole')), '') != 'PRO'
+      )`;
+    }
+
+    // Get total count (same role filter as list)
     const [countResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM activity_logs WHERE lead_id = ?',
+      `SELECT COUNT(*) as total FROM activity_logs a
+       LEFT JOIN users u ON a.performed_by = u.id
+       WHERE a.lead_id = ?${roleFilterSql}`,
       [leadId]
     );
     const total = countResult[0].total;
@@ -200,10 +284,10 @@ export const getActivityLogs = async (req, res) => {
     // Get activity logs with user info
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const [logs] = await pool.execute(
-      `SELECT a.*, u.id as performed_by_id, u.name as performed_by_name, u.email as performed_by_email
+      `SELECT a.*, u.id as performed_by_id, u.name as performed_by_name, u.email as performed_by_email, u.role_name as performed_by_role_name
        FROM activity_logs a
        LEFT JOIN users u ON a.performed_by = u.id
-       WHERE a.lead_id = ?
+       WHERE a.lead_id = ?${roleFilterSql}
        ORDER BY a.created_at DESC
        LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
       [leadId]
@@ -215,6 +299,7 @@ export const getActivityLogs = async (req, res) => {
         _id: log.performed_by_id,
         name: log.performed_by_name,
         email: log.performed_by_email,
+        roleName: log.performed_by_role_name,
       } : null;
       return formatActivityLog(log, performedByUser);
     });
