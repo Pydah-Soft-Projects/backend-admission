@@ -14,6 +14,8 @@
     "migrate:data-collection-type": "node src/scripts-sql/addDataCollectionTypeFields.js",
     "migrate:state-field": "node src/scripts-sql/addStateFieldToDefaultForm.js",
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
+    "sync:mandal-from-staging": "node src/scripts-sql/syncMandalFromStaging.js",
+    "sync:mandal-from-staging:dry": "node src/scripts-sql/syncMandalFromStaging.js --dry-run",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

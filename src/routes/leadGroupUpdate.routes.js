@@ -1,5 +1,10 @@
 import express from 'express';
-import { bulkUpdateLeadGroups, executeLeadGroupSync, getStagedCount, revertManualUpdateFlag } from '../controllers/leadGroupUpdate.controller.js';
+import {
+  bulkUpdateLeadGroups,
+  executeLeadGroupSync,
+  getStagedCount,
+  getStagedRows,
+} from '../controllers/leadGroupUpdate.controller.js';
 import multer from 'multer';
 import os from 'os';
 import { extname } from 'path';
@@ -24,13 +29,11 @@ const upload = multer({
 // Bulk group update route (Super Admin only)
 router.post('/bulk-group-update', protect, isSuperAdmin, upload.single('file'), bulkUpdateLeadGroups);
 
-// Execute final sync route (Super Admin only)
+// Read-only compare: staged Excel vs leads (no writes to leads)
 router.post('/execute-group-sync', protect, isSuperAdmin, executeLeadGroupSync);
 
-// Get staged count (Super Admin only)
 router.get('/staged-count', protect, isSuperAdmin, getStagedCount);
 
-// Revert sync flag (Super Admin only)
-router.post('/revert-group-sync-flag', protect, isSuperAdmin, revertManualUpdateFlag);
+router.get('/staged-rows', protect, isSuperAdmin, getStagedRows);
 
 export default router;

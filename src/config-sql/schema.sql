@@ -986,3 +986,17 @@ CREATE TABLE IF NOT EXISTS form_builder_fields (
     INDEX idx_form_builder_fields_is_active (is_active),
     INDEX idx_form_builder_fields_form_order (form_id, display_order)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- LEAD LOCATION STAGING (Excel → temp table → compare only; no automatic updates to leads)
+-- ============================================
+CREATE TABLE IF NOT EXISTS lead_location_staging (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    enquiry_number VARCHAR(64) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    village VARCHAR(512) NULL,
+    mandal VARCHAR(512) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_lead_loc_stg_enquiry (enquiry_number),
+    INDEX idx_lead_loc_stg_name (name(128))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

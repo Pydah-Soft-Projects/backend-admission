@@ -39,6 +39,8 @@ export const assignLeads = async (req, res) => {
       return errorResponse(res, 'Cannot assign leads to inactive user', 400);
     }
 
+    const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
+
     let leadIdsToAssign = [];
 
     // Single assignment mode: assign specific lead IDs
@@ -73,7 +75,6 @@ export const assignLeads = async (req, res) => {
       }
 
       // Build filter for leads available to this user
-      const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
       // For PRO role, we can assign any leads (even if already assigned to someone else)
       const assignmentCondition = isProRole ? '1=1' : '(assigned_to IS NULL)';
       const conditions = [assignmentCondition, 'academic_year = ?'];
@@ -158,7 +159,6 @@ export const assignLeads = async (req, res) => {
         ? ', academic_year = ?'
         : '';
 
-      const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
       let updateQuery;
       let updateParams;
 
@@ -209,8 +209,9 @@ export const assignLeads = async (req, res) => {
 
     // Get full lead details for notification AND response (limit to 50 for email display, but we want all for export?)
     // Verify: If we assign 1000 leads, returning 1000 objects is fine.
+    const exportExtraFields = isProRole ? ', district, mandal, village, address' : '';
     const [leadsDetails] = await pool.execute(
-      `SELECT id, name, phone, enquiry_number, notes FROM leads WHERE id IN (${placeholders})`,
+      `SELECT id, name, phone, enquiry_number, notes${exportExtraFields} FROM leads WHERE id IN (${placeholders})`,
       leadIdsToAssign
     );
 
@@ -233,12 +234,22 @@ export const assignLeads = async (req, res) => {
       console.error('[LeadAssignment] Error sending notifications:', error);
     });
 
-    // Format for response (Include all assigned leads for Excel export)
-    const assignedLeadsForExport = leadsDetails.map(l => ({
-      name: l.name,
-      phone: l.phone,
-      remarks: l.notes || '', // Map notes to remarks
-    }));
+    // Format for response (Include all assigned leads for Excel export; PRO gets location + address for field work)
+    const assignedLeadsForExport = leadsDetails.map((l) => {
+      const base = {
+        name: l.name,
+        phone: l.phone,
+        remarks: l.notes || '',
+      };
+      if (!isProRole) return base;
+      return {
+        ...base,
+        district: l.district ?? '',
+        mandal: l.mandal ?? '',
+        village: l.village ?? '',
+        address: l.address ?? '',
+      };
+    });
 
     return successResponse(
       res,
@@ -247,11 +258,12 @@ export const assignLeads = async (req, res) => {
         requested: leadIds ? leadIds.length : parseInt(count),
         userId,
         userName: user.name,
+        targetRole: user.role_name,
         mandal: mandal || 'All',
         district: district || 'All',
         state: state || 'All',
         mode: leadIds ? 'single' : 'bulk',
-        assignedLeads: assignedLeadsForExport, // Return full list for export
+        assignedLeads: assignedLeadsForExport,
       },
       `Successfully assigned ${modifiedCount} lead${modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
       200
