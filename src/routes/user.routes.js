@@ -6,6 +6,7 @@ import {
   updateUser,
   deleteUser,
   searchHrmsEmployees,
+  getHrmsEmployeeByEmpNo,
 } from '../controllers/user.controller.js';
 import { getMySettings, updateMySettings } from '../controllers/userSettings.controller.js';
 import { updateMyProfile } from '../controllers/userProfile.controller.js';
@@ -27,6 +28,7 @@ router.get('/me/login-logs', getMyLoginLogs);
 router.route('/').get(isSuperAdmin, getUsers).post(isSuperAdmin, createUser);
 router.get('/all/login-logs', isSuperAdmin, getAllUserLoginLogs);
 router.get('/hrms/search', isSuperAdmin, searchHrmsEmployees);
+router.get('/hrms/:empNo', isSuperAdmin, getHrmsEmployeeByEmpNo);
 
 // Require time tracking for User/Counsellor/Manager dashboard routes below
 router.use(requireTimeTrackingEnabled);

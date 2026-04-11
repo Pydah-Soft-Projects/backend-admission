@@ -64,6 +64,56 @@ export const getUsers = async (req, res) => {
 
     const formattedUsers = users.map(formatUser);
 
+    // Hydrate users with HRMS organizational details if linked
+    const empNos = formattedUsers.filter(u => u.emp_no).map(u => u.emp_no);
+    if (empNos.length > 0) {
+      try {
+        const hrmsConn = await connectHRMS();
+        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+        const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+        const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+        const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+        const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
+          .select('emp_no division_id department_id employee_group_id');
+
+        if (hrmsEmployees.length > 0) {
+          const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(id => id))];
+          const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(id => id))];
+          const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(id => id))];
+
+          const [divisions, departments, groups] = await Promise.all([
+            Division.find({ _id: { $in: divIds } }).select('name'),
+            Department.find({ _id: { $in: deptIds } }).select('name'),
+            Group.find({ _id: { $in: groupIds } }).select('name')
+          ]);
+
+          const divMap = Object.fromEntries(divisions.map(d => [d._id.toString(), d.name]));
+          const deptMap = Object.fromEntries(departments.map(d => [d._id.toString(), d.name]));
+          const groupMap = Object.fromEntries(groups.map(g => [g._id.toString(), g.name]));
+
+          const hrmsMap = Object.fromEntries(hrmsEmployees.map(emp => [
+            emp.emp_no,
+            {
+              division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+              department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-'
+            }
+          ]));
+
+          formattedUsers.forEach(user => {
+            if (user.emp_no && hrmsMap[user.emp_no]) {
+              user.division = hrmsMap[user.emp_no].division;
+              user.department = hrmsMap[user.emp_no].department;
+              user.group = hrmsMap[user.emp_no].group;
+            }
+          });
+        }
+      } catch (hrmsError) {
+        console.error('HRMS hydration error in getUsers:', hrmsError);
+      }
+    }
+
     return successResponse(res, formattedUsers, 'Users retrieved successfully', 200);
   } catch (error) {
     console.error('Get users error:', error);
@@ -468,13 +518,31 @@ export const searchHrmsEmployees = async (req, res) => {
 
     const hrmsConn = await connectHRMS();
     
-    // Define model only if it doesn't exist
+    // Define models if they don't exist
     const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+    const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+    const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+    const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
 
     // Search by employee_name (case-insensitive partial match)
     const employees = await Employee.find({
       employee_name: { $regex: name, $options: 'i' }
-    }).limit(20).select('_id emp_no employee_name email phone_number');
+    }).limit(20).select('_id emp_no employee_name email phone_number division_id department_id employee_group_id');
+
+    // Collect IDs for bulk resolution
+    const divIds = [...new Set(employees.map(e => e.division_id).filter(id => id))];
+    const deptIds = [...new Set(employees.map(e => e.department_id).filter(id => id))];
+    const groupIds = [...new Set(employees.map(e => e.employee_group_id).filter(id => id))];
+
+    const [divisions, departments, groups] = await Promise.all([
+      Division.find({ _id: { $in: divIds } }).select('name'),
+      Department.find({ _id: { $in: deptIds } }).select('name'),
+      Group.find({ _id: { $in: groupIds } }).select('name')
+    ]);
+
+    const divMap = Object.fromEntries(divisions.map(d => [d._id.toString(), d.name]));
+    const deptMap = Object.fromEntries(departments.map(d => [d._id.toString(), d.name]));
+    const groupMap = Object.fromEntries(groups.map(g => [g._id.toString(), g.name]));
 
     // Map fields for frontend consistency (employee_name -> name)
     const formattedEmployees = employees.map(emp => ({
@@ -483,13 +551,75 @@ export const searchHrmsEmployees = async (req, res) => {
       emp_no: emp.emp_no,
       name: emp.employee_name,
       email: emp.email,
-      mobileNumber: emp.phone_number
+      mobileNumber: emp.phone_number,
+      division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+      department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+      group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-'
     }));
 
     return successResponse(res, formattedEmployees, 'Employees retrieved successfully');
   } catch (error) {
     console.error('Search HRMS employees error:', error);
     return errorResponse(res, 'Failed to search HRMS employees', 500);
+  }
+};
+
+// @desc    Get employee details from HRMS by emp_no
+// @route   GET /api/users/hrms/:empNo
+// @access  Private (Super Admin)
+export const getHrmsEmployeeByEmpNo = async (req, res) => {
+  try {
+    const { empNo } = req.params;
+
+    const hrmsConn = await connectHRMS();
+    
+    const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+    const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+    const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+    const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+    const employee = await Employee.findOne({ emp_no: empNo });
+
+    if (!employee) {
+      return errorResponse(res, 'Employee not found in HRMS', 404);
+    }
+
+    // Resolve IDs to names
+    let division = '-';
+    let department = '-';
+    let group = '-';
+
+    if (employee.division_id) {
+      const divDoc = await Division.findById(employee.division_id);
+      if (divDoc) division = divDoc.name;
+    }
+
+    if (employee.department_id) {
+      const deptDoc = await Department.findById(employee.department_id);
+      if (deptDoc) department = deptDoc.name;
+    }
+
+    if (employee.employee_group_id) {
+      const groupDoc = await Group.findById(employee.employee_group_id);
+      if (groupDoc) group = groupDoc.name;
+    }
+
+    const result = {
+      _id: employee._id,
+      id: employee._id,
+      emp_no: employee.emp_no,
+      name: employee.employee_name,
+      email: employee.email,
+      mobileNumber: employee.phone_number,
+      division,
+      department,
+      group
+    };
+
+    return successResponse(res, result, 'Employee details retrieved successfully');
+  } catch (error) {
+    console.error('Get HRMS employee error:', error);
+    return errorResponse(res, 'Failed to fetch HRMS employee details', 500);
   }
 };
 
