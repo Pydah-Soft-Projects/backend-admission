@@ -758,6 +758,7 @@ export const getUserLeadAnalytics = async (req, res) => {
     const queriedUser = usersResult[0];
     const isProRole =
       queriedUser.role_name && String(queriedUser.role_name).trim().toUpperCase() === 'PRO';
+    const isStudentCounselor = queriedUser.role_name === 'Student Counselor';
     const assignmentCondition = isProRole
       ? '(assigned_to_pro = ? OR assigned_to = ?)'
       : 'assigned_to = ?';
@@ -800,12 +801,18 @@ export const getUserLeadAnalytics = async (req, res) => {
     );
     const overallTotalLeads = overallTotalResult[0].total;
 
-    // Get leads by status
+    // Dashboard breakdown: PRO → visit_status, Student Counselor → call_status, others → lead_status
+    const statusGroupExpr = isProRole
+      ? `COALESCE(NULLIF(TRIM(visit_status), ''), 'Not set')`
+      : isStudentCounselor
+        ? `COALESCE(NULLIF(TRIM(call_status), ''), 'Not set')`
+        : 'lead_status';
+
     const [statusBreakdown] = await pool.execute(
-      `SELECT lead_status, COUNT(*) as count 
+      `SELECT ${statusGroupExpr} AS lead_status, COUNT(*) as count 
        FROM leads 
        WHERE ${whereClause}
-       GROUP BY lead_status 
+       GROUP BY ${statusGroupExpr}
        ORDER BY count DESC`,
       params
     );
@@ -841,10 +848,17 @@ export const getUserLeadAnalytics = async (req, res) => {
       params
     );
 
-    // Convert status breakdown to object
+    // Convert status breakdown to object (keys are call/visit/pipeline values per role)
     const statusCounts = {};
     statusBreakdown.forEach((item) => {
-      statusCounts[item.lead_status || 'New'] = item.count;
+      const key = item.lead_status;
+      const label =
+        key === null || key === undefined || String(key).trim() === ''
+          ? isProRole || isStudentCounselor
+            ? 'Not set'
+            : 'New'
+          : String(key).trim();
+      statusCounts[label] = item.count;
     });
 
     // Get recent activity (last 7 days)

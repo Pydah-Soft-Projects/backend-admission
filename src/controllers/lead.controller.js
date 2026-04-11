@@ -113,6 +113,10 @@ export const getLeads = async (req, res) => {
       conditions.push('l.district = ?');
       params.push(req.query.district);
     }
+    if (req.query.village) {
+      conditions.push('l.village = ?');
+      params.push(req.query.village);
+    }
     if (req.query.quota) {
       conditions.push('l.quota = ?');
       params.push(req.query.quota);
@@ -1760,6 +1764,7 @@ export const getFilterOptions = async (req, res) => {
     // Add field-specific conditions
     const mandalCondition = [...conditions, 'mandal IS NOT NULL AND mandal != ""'];
     const districtCondition = [...conditions, 'district IS NOT NULL AND district != ""'];
+    const villageCondition = [...conditions, 'village IS NOT NULL AND TRIM(village) != ""'];
     const stateCondition = [...conditions, 'state IS NOT NULL AND state != ""'];
     const quotaCondition = [...conditions, 'quota IS NOT NULL AND quota != ""'];
     const leadStatusCondition = [...conditions, 'lead_status IS NOT NULL AND lead_status != ""'];
@@ -1779,6 +1784,10 @@ export const getFilterOptions = async (req, res) => {
     );
     const [districts] = await pool.execute(
       `SELECT DISTINCT district FROM leads ${whereClause(districtCondition)} ORDER BY district ASC`,
+      params
+    );
+    const [villages] = await pool.execute(
+      `SELECT DISTINCT village FROM leads ${whereClause(villageCondition)} ORDER BY village ASC`,
       params
     );
     const [states] = await pool.execute(
@@ -1830,6 +1839,7 @@ export const getFilterOptions = async (req, res) => {
     return successResponse(res, {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
+      villages: villages.map((r) => r.village),
       states: states.map(r => r.state),
       quotas: quotas.map(r => r.quota),
       leadStatuses: leadStatuses.map(r => r.lead_status),

@@ -16,6 +16,7 @@
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
     "sync:mandal-from-staging": "node src/scripts-sql/syncMandalFromStaging.js",
     "sync:mandal-from-staging:dry": "node src/scripts-sql/syncMandalFromStaging.js --dry-run",
+    "db:copy-remote-to-local": "node src/scripts-sql/copyRemoteDbToLocal.js",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
