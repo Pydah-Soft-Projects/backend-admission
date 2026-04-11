@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
+import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
@@ -150,8 +151,10 @@ export const assignLeads = async (req, res) => {
     let modifiedCount = 0;
 
     for (const lead of leadsToAssign) {
-      const oldStatus = lead.lead_status || 'New';
-      const newStatus = oldStatus === 'New' ? 'Assigned' : oldStatus;
+      const oldStatus = lead.lead_status && String(lead.lead_status).trim() !== ''
+        ? String(lead.lead_status).trim()
+        : 'New';
+      const newStatus = isPipelineNewLeadStatus(lead.lead_status) ? 'Assigned' : oldStatus;
 
       // Update lead
       const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : null;
@@ -168,7 +171,7 @@ export const assignLeads = async (req, res) => {
          WHERE id = ?`;
       } else {
         updateQuery = `UPDATE leads SET 
-          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, updated_at = NOW()
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, call_status = 'Assigned', updated_at = NOW()
          WHERE id = ?`;
       }
 

@@ -7,11 +7,23 @@ import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
 import { findBestMatch, similarity } from '../utils/fuzzyMatch.util.js';
-import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
+import { resolveLeadStatus, isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
 });
+
+/** One SET slot per column so assignment defaults and body fields do not duplicate (e.g. call_status twice). */
+function upsertLeadUpdateColumn(updateFields, updateValues, column, value) {
+  const clause = `${column} = ?`;
+  const i = updateFields.findIndex((f) => String(f) === clause);
+  if (i >= 0) {
+    updateValues[i] = value;
+  } else {
+    updateFields.push(clause);
+    updateValues.push(value);
+  }
+}
 
 // Helper function to format lead data from SQL to camelCase
 const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null, viewerOptions = {}) => {
@@ -846,6 +858,8 @@ export const updateLead = async (req, res) => {
     let oldAssignedTo = currentLead.assigned_to;
     let assignmentChanged = false;
     let desiredLeadFromAssignment = null;
+    let nextCall = currentLead.call_status ?? null;
+    let nextVisit = currentLead.visit_status ?? null;
 
     // Only Super Admin can update these fields
     if (isSuperAdmin) {
@@ -946,10 +960,22 @@ export const updateLead = async (req, res) => {
           updateFields.push('assigned_by = ?');
           updateValues.push(userId);
 
-          // If status is "New", automatically change to "Assigned"
-          if (oldStatus === 'New' || !oldStatus) {
-            oldStatus = oldStatus || 'New';
+          // New pipeline (any casing / blank) → Assigned when assigning to a counsellor
+          if (isPipelineNewLeadStatus(currentLead.lead_status)) {
             desiredLeadFromAssignment = 'Assigned';
+          }
+
+          const [assigneeRows] = await pool.execute(
+            'SELECT role_name FROM users WHERE id = ? LIMIT 1',
+            [newAssignedTo]
+          );
+          const assigneeRole = String(assigneeRows[0]?.role_name || '').trim().toUpperCase();
+          if (assigneeRole === 'PRO') {
+            upsertLeadUpdateColumn(updateFields, updateValues, 'visit_status', 'Assigned');
+            nextVisit = 'Assigned';
+          } else {
+            upsertLeadUpdateColumn(updateFields, updateValues, 'call_status', 'Assigned');
+            nextCall = 'Assigned';
           }
         }
       }
@@ -978,8 +1004,6 @@ export const updateLead = async (req, res) => {
     const assignedAsCounsellor = currentLead.assigned_to === userId;
     const assignedAsPro = currentLead.assigned_to_pro === userId;
 
-    let nextCall = currentLead.call_status ?? null;
-    let nextVisit = currentLead.visit_status ?? null;
     let desiredLead = desiredLeadFromAssignment ?? currentLead.lead_status;
 
     const counsellorProfileBodyKeys = [
@@ -1005,28 +1029,23 @@ export const updateLead = async (req, res) => {
 
     if ((isSuperAdmin || isAdmin) && callStatus !== undefined) {
       nextCall = callStatus === '' || callStatus === null ? null : String(callStatus).trim();
-      updateFields.push('call_status = ?');
-      updateValues.push(nextCall);
+      upsertLeadUpdateColumn(updateFields, updateValues, 'call_status', nextCall);
     }
     if ((isSuperAdmin || isAdmin) && visitStatus !== undefined) {
       nextVisit = visitStatus === '' || visitStatus === null ? null : String(visitStatus).trim();
-      updateFields.push('visit_status = ?');
-      updateValues.push(nextVisit);
+      upsertLeadUpdateColumn(updateFields, updateValues, 'visit_status', nextVisit);
     }
     if (isStudentCounselor && assignedAsCounsellor && callStatus !== undefined) {
       nextCall = callStatus === '' || callStatus === null ? null : String(callStatus).trim();
-      updateFields.push('call_status = ?');
-      updateValues.push(nextCall);
+      upsertLeadUpdateColumn(updateFields, updateValues, 'call_status', nextCall);
     }
     if (isPro && assignedAsPro && visitStatus !== undefined) {
       nextVisit = visitStatus === '' || visitStatus === null ? null : String(visitStatus).trim();
-      updateFields.push('visit_status = ?');
-      updateValues.push(nextVisit);
+      upsertLeadUpdateColumn(updateFields, updateValues, 'visit_status', nextVisit);
     }
 
-    if (proVisitBumpFromCounsellor && !updateFields.some((f) => String(f).startsWith('visit_status'))) {
-      updateFields.push('visit_status = ?');
-      updateValues.push('Assigned');
+    if (proVisitBumpFromCounsellor && !updateFields.some((f) => String(f) === 'visit_status = ?')) {
+      upsertLeadUpdateColumn(updateFields, updateValues, 'visit_status', 'Assigned');
     }
 
     if ((isSuperAdmin || isAdmin) && newLeadStatus && newLeadStatus !== currentLead.lead_status) {
@@ -1777,18 +1796,42 @@ export const getFilterOptions = async (req, res) => {
       ? (req.user.roleName === 'PRO' ? [userId, userId] : [userId])
       : [];
 
+    const districtFilter = (req.query.district && String(req.query.district).trim()) || '';
+    const mandalFilter = (req.query.mandal && String(req.query.mandal).trim()) || '';
+
+    const mandalConditionScoped = [...mandalCondition];
+    const mandalParams = [...params];
+    if (districtFilter) {
+      mandalConditionScoped.push('district = ?');
+      mandalParams.push(districtFilter);
+    }
+
+    const villageConditionScoped = [...villageCondition];
+    const villageParams = [...params];
+    if (districtFilter) {
+      villageConditionScoped.push('district = ?');
+      villageParams.push(districtFilter);
+    }
+    if (mandalFilter) {
+      villageConditionScoped.push('mandal = ?');
+      villageParams.push(mandalFilter);
+    } else if (!districtFilter && mandalFilter) {
+      villageConditionScoped.push('mandal = ?');
+      villageParams.push(mandalFilter);
+    }
+
     // Get distinct values for each field
     const [mandals] = await pool.execute(
-      `SELECT DISTINCT mandal FROM leads ${whereClause(mandalCondition)} ORDER BY mandal ASC`,
-      params
+      `SELECT DISTINCT mandal FROM leads ${whereClause(mandalConditionScoped)} ORDER BY mandal ASC`,
+      mandalParams
     );
     const [districts] = await pool.execute(
       `SELECT DISTINCT district FROM leads ${whereClause(districtCondition)} ORDER BY district ASC`,
       params
     );
     const [villages] = await pool.execute(
-      `SELECT DISTINCT village FROM leads ${whereClause(villageCondition)} ORDER BY village ASC`,
-      params
+      `SELECT DISTINCT village FROM leads ${whereClause(villageConditionScoped)} ORDER BY village ASC`,
+      villageParams
     );
     const [states] = await pool.execute(
       `SELECT DISTINCT state FROM leads ${whereClause(stateCondition)} ORDER BY state ASC`,
