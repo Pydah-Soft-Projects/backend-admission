@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, district, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate } = req.body;
+    const { userId, mandal, district, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate, cycleNumber } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -101,8 +101,20 @@ export const assignLeads = async (req, res) => {
 
       // Add student group filter if provided
       if (studentGroup) {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
+        if (studentGroup === 'Inter') {
+          conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+        } else {
+          conditions.push('student_group = ?');
+          params.push(studentGroup);
+        }
+      }
+
+      if (cycleNumber != null && cycleNumber !== '') {
+        const cyc = parseInt(cycleNumber, 10);
+        if (!Number.isNaN(cyc)) {
+          conditions.push('cycle_number = ?');
+          params.push(cyc);
+        }
       }
 
       // Add school/college (institution) filter if provided – match lead's dynamic_fields school_or_college_name
@@ -451,6 +463,90 @@ export const getAssignmentStats = async (req, res) => {
       [...params]
     );
 
+    // Optional: per-district or per-mandal assigned vs unassigned (bulk assign UI dropdown hints)
+    const geoBreakdown = req.query.geoBreakdown ? String(req.query.geoBreakdown).trim().toLowerCase() : '';
+    const nullAssignedExpr = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
+
+    const buildGeoScopeConditions = (opts) => {
+      const { includeDistrict, districtValue } = opts;
+      const gc = [];
+      const gp = [];
+      if (academicYear != null && academicYear !== '') {
+        const year = parseInt(academicYear, 10);
+        if (!Number.isNaN(year)) {
+          gc.push('academic_year = ?');
+          gp.push(year);
+        }
+      }
+      if (studentGroup) {
+        if (studentGroup === 'Inter') {
+          gc.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
+        } else {
+          gc.push('student_group = ?');
+          gp.push(studentGroup);
+        }
+      }
+      if (cycleNumber != null && cycleNumber !== '') {
+        const cyc = parseInt(cycleNumber, 10);
+        if (!Number.isNaN(cyc)) {
+          gc.push('cycle_number = ?');
+          gp.push(cyc);
+        }
+      }
+      if (state) {
+        gc.push('state = ?');
+        gp.push(state);
+      }
+      if (includeDistrict && districtValue) {
+        gc.push('district = ?');
+        gp.push(districtValue);
+      }
+      return { gc, gp };
+    };
+
+    let districtAssignmentBreakdown;
+    let mandalAssignmentBreakdown;
+
+    if (geoBreakdown === 'district' && state) {
+      const { gc, gp } = buildGeoScopeConditions({ includeDistrict: false });
+      if (gc.length > 0) {
+        const [dRows] = await pool.execute(
+          `SELECT COALESCE(NULLIF(TRIM(district), ''), '(Unknown)') AS district,
+            SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned_count,
+            SUM(CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS assigned_count
+           FROM leads WHERE ${gc.join(' AND ')}
+           GROUP BY COALESCE(NULLIF(TRIM(district), ''), '(Unknown)')
+           ORDER BY district ASC`,
+          gp
+        );
+        districtAssignmentBreakdown = (dRows || []).map((r) => ({
+          district: r.district,
+          unassignedCount: Number(r.unassigned_count) || 0,
+          assignedCount: Number(r.assigned_count) || 0,
+        }));
+      }
+    }
+
+    if (geoBreakdown === 'mandal' && state && district) {
+      const { gc, gp } = buildGeoScopeConditions({ includeDistrict: true, districtValue: district });
+      if (gc.length > 0) {
+        const [mRows] = await pool.execute(
+          `SELECT COALESCE(NULLIF(TRIM(mandal), ''), '(Unknown)') AS mandal,
+            SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned_count,
+            SUM(CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS assigned_count
+           FROM leads WHERE ${gc.join(' AND ')}
+           GROUP BY COALESCE(NULLIF(TRIM(mandal), ''), '(Unknown)')
+           ORDER BY mandal ASC`,
+          gp
+        );
+        mandalAssignmentBreakdown = (mRows || []).map((r) => ({
+          mandal: r.mandal,
+          unassignedCount: Number(r.unassigned_count) || 0,
+          assignedCount: Number(r.assigned_count) || 0,
+        }));
+      }
+    }
+
     const payload = {
       totalLeads,
       assignedCount,
@@ -463,6 +559,8 @@ export const getAssignmentStats = async (req, res) => {
         state: item.state || 'Unknown',
         count: item.count,
       })),
+      ...(districtAssignmentBreakdown ? { districtAssignmentBreakdown } : {}),
+      ...(mandalAssignmentBreakdown ? { mandalAssignmentBreakdown } : {}),
     };
 
     // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
