@@ -4,6 +4,7 @@ import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
 import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import { connectHRMS } from '../config-mongo/hrms.js';
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
@@ -1470,9 +1471,11 @@ export const getUserAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate, userId, academicYear } = req.query;
+    const { startDate, endDate, userId, academicYear, division, department, group } = req.query;
     const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
+
+    const hasOrgFilters = division || department || group;
 
     // Set date range for filtering activities
     let activityDateConditions = [];
@@ -1507,6 +1510,52 @@ export const getUserAnalytics = async (req, res) => {
     if (userId) {
       userConditions = ['id = ?'];
       userParams = [userId];
+    } else if (hasOrgFilters) {
+      // Filter by HRMS organizational units
+      try {
+        const hrmsConn = await connectHRMS();
+        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+        const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+        const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+        const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+        const hrmsQuery = {};
+        if (division) {
+          const divDoc = await Division.findOne({ name: division });
+          if (divDoc) hrmsQuery.division_id = divDoc._id;
+          else {
+            // Division not found, return empty results
+            return successResponse(res, { users: [] }, 'No users found for this division', 200);
+          }
+        }
+        if (department) {
+          const deptDoc = await Department.findOne({ name: department });
+          if (deptDoc) hrmsQuery.department_id = deptDoc._id;
+          else {
+            return successResponse(res, { users: [] }, 'No users found for this department', 200);
+          }
+        }
+        if (group) {
+          const groupDoc = await Group.findOne({ name: group });
+          if (groupDoc) hrmsQuery.employee_group_id = groupDoc._id;
+          else {
+            return successResponse(res, { users: [] }, 'No users found for this group', 200);
+          }
+        }
+
+        const matchingEmployees = await Employee.find(hrmsQuery).select('emp_no');
+        const empNos = matchingEmployees.map(e => e.emp_no).filter(Boolean);
+
+        if (empNos.length === 0) {
+          return successResponse(res, { users: [] }, 'No employees found matching organizational filters', 200);
+        }
+
+        userConditions.push(`emp_no IN (${empNos.map(() => '?').join(',')})`);
+        userParams.push(...empNos);
+      } catch (hrmsError) {
+        console.error('HRMS filtering error in getUserAnalytics:', hrmsError);
+        // Fallback: continue without HRMS filtering (or could return error)
+      }
     }
 
     const userWhereClause = `WHERE ${userConditions.join(' AND ')}`;
@@ -1518,15 +1567,23 @@ export const getUserAnalytics = async (req, res) => {
     );
 
     // Get aggregate counts for all users in one go
+    // Note: If filters are applied, we only aggregate for those specific users to improve performance
+    const filteredUserIds = users.map(u => u.id);
+    if (filteredUserIds.length === 0) {
+      return successResponse(res, { users: [] }, 'No users found', 200);
+    }
+    const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
+
     const [leadCounts] = await pool.execute(
       `SELECT 
         COALESCE(assigned_to, assigned_to_pro) as user_id_combined,
         COUNT(*) as total_assigned,
         SUM(CASE WHEN lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN 1 ELSE 0 END) as active_leads
       FROM leads 
-      ${useAcademicYear ? 'WHERE academic_year = ?' : ''}
+      WHERE (assigned_to IN (${userIdPlaceholders}) OR assigned_to_pro IN (${userIdPlaceholders}))
+      ${useAcademicYear ? 'AND academic_year = ?' : ''}
       GROUP BY user_id_combined`,
-      useAcademicYear ? [yearNum] : []
+      [...filteredUserIds, ...filteredUserIds, ...(useAcademicYear ? [yearNum] : [])]
     );
 
     const [statusCounts] = await pool.execute(
@@ -1535,9 +1592,10 @@ export const getUserAnalytics = async (req, res) => {
         lead_status,
         COUNT(*) as count
       FROM leads 
-      ${useAcademicYear ? 'WHERE academic_year = ?' : ''}
+      WHERE (assigned_to IN (${userIdPlaceholders}) OR assigned_to_pro IN (${userIdPlaceholders}))
+      ${useAcademicYear ? 'AND academic_year = ?' : ''}
       GROUP BY user_id_combined, lead_status`,
-      useAcademicYear ? [yearNum] : []
+      [...filteredUserIds, ...filteredUserIds, ...(useAcademicYear ? [yearNum] : [])]
     );
 
     const [conversionCounts] = await pool.execute(
@@ -1546,9 +1604,10 @@ export const getUserAnalytics = async (req, res) => {
         COUNT(DISTINCT a.lead_id) as total_converted
       FROM admissions a
       INNER JOIN leads l ON a.lead_id = l.id
-      ${useAcademicYear ? 'WHERE l.academic_year = ?' : ''}
+      WHERE (l.assigned_to IN (${userIdPlaceholders}) OR l.assigned_to_pro IN (${userIdPlaceholders}))
+      ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
       GROUP BY user_id_combined`,
-      useAcademicYear ? [yearNum] : []
+      [...filteredUserIds, ...filteredUserIds, ...(useAcademicYear ? [yearNum] : [])]
     );
 
     const [commCounts] = await pool.execute(
@@ -1559,9 +1618,9 @@ export const getUserAnalytics = async (req, res) => {
         SUM(CASE WHEN type = 'call' THEN duration_seconds ELSE 0 END) as total_duration,
         COUNT(DISTINCT lead_id) as unique_leads
       FROM communications 
-      WHERE 1=1 ${activityDateClause}
+      WHERE sent_by IN (${userIdPlaceholders}) ${activityDateClause}
       GROUP BY sent_by, type`,
-      activityDateParams
+      [...filteredUserIds, ...activityDateParams]
     );
 
     const [actLogsCountResult] = await pool.execute(
@@ -1570,9 +1629,9 @@ export const getUserAnalytics = async (req, res) => {
         COUNT(*) as total_logs,
         SUM(CASE WHEN type = 'status_change' THEN 1 ELSE 0 END) as status_changes
       FROM activity_logs 
-      WHERE 1=1 ${activityDateClause.split('sent_at').join('created_at')}
+      WHERE performed_by IN (${userIdPlaceholders}) ${activityDateClause.split('sent_at').join('created_at')}
       GROUP BY performed_by`,
-      activityDateParams
+      [...filteredUserIds, ...activityDateParams]
     );
 
     // Maps for fast lookup
