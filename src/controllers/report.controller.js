@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { findBestMatch } from '../utils/fuzzyMatch.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { connectHRMS } from '../config-mongo/hrms.js';
 
 // @desc    Get daily call reports per user
 // @route   GET /api/reports/calls/daily
@@ -12,7 +13,7 @@ export const getDailyCallReports = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate, userId } = req.query;
+    const { startDate, endDate, userId, division, department, group } = req.query;
 
     // Validate and parse dates
     let start, end;
@@ -63,6 +64,51 @@ export const getDailyCallReports = async (req, res) => {
       }
       conditions.push('sent_by = ?');
       params.push(userId);
+    } else if (division || department || group) {
+      // Filter by HRMS organizational units
+      try {
+        const hrmsConn = await connectHRMS();
+        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+        const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+        const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+        const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+        const hrmsQuery = {};
+        if (division) {
+          const divDoc = await Division.findOne({ name: division });
+          if (divDoc) hrmsQuery.division_id = divDoc._id;
+        }
+        if (department) {
+          const deptDoc = await Department.findOne({ name: department });
+          if (deptDoc) hrmsQuery.department_id = deptDoc._id;
+        }
+        if (group) {
+          const groupDoc = await Group.findOne({ name: group });
+          if (groupDoc) hrmsQuery.employee_group_id = groupDoc._id;
+        }
+
+        const matchingEmployees = await Employee.find(hrmsQuery).select('emp_no');
+        const empNos = matchingEmployees.map(e => e.emp_no).filter(Boolean);
+
+        if (empNos.length > 0) {
+          // Find matching users in SQL
+          const [filteredUsers] = await pool.execute(
+            `SELECT id FROM users WHERE emp_no IN (${empNos.map(() => '?').join(',')})`,
+            empNos
+          );
+          const filteredUserIds = filteredUsers.map(u => u.id);
+          if (filteredUserIds.length > 0) {
+            conditions.push(`sent_by IN (${filteredUserIds.map(() => '?').join(',')})`);
+            params.push(...filteredUserIds);
+          } else {
+            return successResponse(res, { reports: [], summary: [] }, 'No users found matching filters', 200);
+          }
+        } else {
+          return successResponse(res, { reports: [], summary: [] }, 'No employees found matching filters', 200);
+        }
+      } catch (hrmsError) {
+        console.error('HRMS filtering error in getDailyCallReports:', hrmsError);
+      }
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;

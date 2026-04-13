@@ -4,6 +4,7 @@ import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
 import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import { connectHRMS } from '../config-mongo/hrms.js';
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
@@ -1509,6 +1510,52 @@ export const getUserAnalytics = async (req, res) => {
     if (userId) {
       userConditions = ['id = ?'];
       userParams = [userId];
+    } else if (hasOrgFilters) {
+      // Filter by HRMS organizational units
+      try {
+        const hrmsConn = await connectHRMS();
+        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+        const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+        const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+        const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+        const hrmsQuery = {};
+        if (division) {
+          const divDoc = await Division.findOne({ name: division });
+          if (divDoc) hrmsQuery.division_id = divDoc._id;
+          else {
+            // Division not found, return empty results
+            return successResponse(res, { users: [] }, 'No users found for this division', 200);
+          }
+        }
+        if (department) {
+          const deptDoc = await Department.findOne({ name: department });
+          if (deptDoc) hrmsQuery.department_id = deptDoc._id;
+          else {
+            return successResponse(res, { users: [] }, 'No users found for this department', 200);
+          }
+        }
+        if (group) {
+          const groupDoc = await Group.findOne({ name: group });
+          if (groupDoc) hrmsQuery.employee_group_id = groupDoc._id;
+          else {
+            return successResponse(res, { users: [] }, 'No users found for this group', 200);
+          }
+        }
+
+        const matchingEmployees = await Employee.find(hrmsQuery).select('emp_no');
+        const empNos = matchingEmployees.map(e => e.emp_no).filter(Boolean);
+
+        if (empNos.length === 0) {
+          return successResponse(res, { users: [] }, 'No employees found matching organizational filters', 200);
+        }
+
+        userConditions.push(`emp_no IN (${empNos.map(() => '?').join(',')})`);
+        userParams.push(...empNos);
+      } catch (hrmsError) {
+        console.error('HRMS filtering error in getUserAnalytics:', hrmsError);
+        // Fallback: continue without HRMS filtering (or could return error)
+      }
     }
 
     const userWhereClause = `WHERE ${userConditions.join(' AND ')}`;
@@ -1527,6 +1574,13 @@ export const getUserAnalytics = async (req, res) => {
     const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
 
     // Get aggregate counts for all users in one go
+    // Note: If filters are applied, we only aggregate for those specific users to improve performance
+    const filteredUserIds = users.map(u => u.id);
+    if (filteredUserIds.length === 0) {
+      return successResponse(res, { users: [] }, 'No users found', 200);
+    }
+    const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
+
     const [leadCounts] = await pool.execute(
       `SELECT 
         COALESCE(assigned_to, assigned_to_pro) as user_id_combined,
