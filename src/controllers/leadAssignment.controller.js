@@ -6,6 +6,35 @@ import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { connectHRMS } from '../config-mongo/hrms.js';
 
+const assignmentStatsCache = new Map();
+const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
+
+const stableStringify = (value) => {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${k}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const getCachedAssignmentStats = (key) => {
+  const hit = assignmentStatsCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    assignmentStatsCache.delete(key);
+    return null;
+  }
+  return hit.value;
+};
+
+const setCachedAssignmentStats = (key, value) => {
+  assignmentStatsCache.set(key, {
+    value,
+    expiresAt: Date.now() + ASSIGNMENT_STATS_CACHE_MS,
+  });
+};
+
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
 // @access  Private (Super Admin only)
@@ -301,6 +330,25 @@ export const getAssignmentStats = async (req, res) => {
   try {
     const { mandal, district, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
     const pool = getPool();
+    const includeBreakdowns = String(req.query.includeBreakdowns || 'true').toLowerCase() !== 'false';
+    const geoBreakdown = req.query.geoBreakdown ? String(req.query.geoBreakdown).trim().toLowerCase() : '';
+    const cacheKey = stableStringify({
+      mandal,
+      district,
+      state,
+      academicYear,
+      studentGroup,
+      institutionName,
+      forBreakdown,
+      cycleNumber,
+      targetRole: req.query.targetRole,
+      includeBreakdowns,
+      geoBreakdown,
+    });
+    const cached = getCachedAssignmentStats(cacheKey);
+    if (cached) {
+      return successResponse(res, cached, 'Assignment statistics retrieved successfully', 200);
+    }
 
     // Build filter for available leads
     // Use targetRole query parameter if provided (e.g. from UI when selecting a user)
@@ -421,51 +469,43 @@ export const getAssignmentStats = async (req, res) => {
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
-    // Get unassigned leads count
-    const [unassignedCountResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${whereClause}`,
-      params
-    );
-    const unassignedCount = unassignedCountResult[0].total;
-
-    // Get total leads count (optionally scoped by academic year and student group)
-    const [totalLeadsResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${baseWhere}`,
-      baseParams
-    );
-    const totalLeads = totalLeadsResult[0].total;
-
-    // Get unassigned leads count (truly unassigned, for the "assigned" calculation)
-    const [trulyUnassignedResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads ${trulyUnassignedWhere}`,
-      params
-    );
-    const trulyUnassignedCount = trulyUnassignedResult[0].total;
+    const [unassignedCountResult, totalLeadsResult, trulyUnassignedResult] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) as total FROM leads ${whereClause}`, params),
+      pool.execute(`SELECT COUNT(*) as total FROM leads ${baseWhere}`, baseParams),
+      pool.execute(`SELECT COUNT(*) as total FROM leads ${trulyUnassignedWhere}`, params),
+    ]);
+    const unassignedCount = unassignedCountResult[0][0].total;
+    const totalLeads = totalLeadsResult[0][0].total;
+    const trulyUnassignedCount = trulyUnassignedResult[0][0].total;
 
     // Get assigned leads count (in same scope)
     const assignedCount = totalLeads - trulyUnassignedCount;
 
-    // Get breakdown by mandal (for unassigned leads with same filters)
-    const [mandalBreakdown] = await pool.execute(
-      `SELECT mandal, COUNT(*) as count 
-       FROM leads ${whereClause}
-       GROUP BY mandal 
-       ORDER BY count DESC 
-       LIMIT 20`,
-      [...params]
-    );
-
-    // Get breakdown by state (for unassigned leads with same filters)
-    const [stateBreakdown] = await pool.execute(
-      `SELECT state, COUNT(*) as count 
-       FROM leads ${whereClause}
-       GROUP BY state 
-       ORDER BY count DESC`,
-      [...params]
-    );
+    let mandalBreakdown = [];
+    let stateBreakdown = [];
+    if (includeBreakdowns) {
+      const [mandalRows, stateRows] = await Promise.all([
+        pool.execute(
+          `SELECT mandal, COUNT(*) as count 
+           FROM leads ${whereClause}
+           GROUP BY mandal 
+           ORDER BY count DESC 
+           LIMIT 20`,
+          [...params]
+        ),
+        pool.execute(
+          `SELECT state, COUNT(*) as count 
+           FROM leads ${whereClause}
+           GROUP BY state 
+           ORDER BY count DESC`,
+          [...params]
+        ),
+      ]);
+      mandalBreakdown = mandalRows[0] || [];
+      stateBreakdown = stateRows[0] || [];
+    }
 
     // Optional: per-district or per-mandal assigned vs unassigned (bulk assign UI dropdown hints)
-    const geoBreakdown = req.query.geoBreakdown ? String(req.query.geoBreakdown).trim().toLowerCase() : '';
     const nullAssignedExpr = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
 
     const buildGeoScopeConditions = (opts) => {
@@ -567,32 +607,31 @@ export const getAssignmentStats = async (req, res) => {
     // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
     if (forBreakdown === 'school' || forBreakdown === 'college') {
       const table = forBreakdown === 'school' ? 'schools' : 'colleges';
-      const [institutions] = await pool.execute(
-        `SELECT id, name FROM ${table} WHERE is_active = 1 ORDER BY name ASC`
+      const [institutionRows] = await pool.execute(
+        `SELECT i.id, i.name, COUNT(l.id) as count
+         FROM ${table} i
+         LEFT JOIN leads l
+           ON LOWER(TRIM(COALESCE(
+             JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.school_or_college_name')),
+             JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.schoolOrCollegeName')),
+             ''
+           ))) = LOWER(TRIM(i.name))
+           ${baseConditions.length > 0 ? `AND ${baseConditions.join(' AND ')}` : ''}
+           AND ${isProTarget ? '1=1' : 'l.assigned_to IS NULL'}
+         WHERE i.is_active = 1
+         GROUP BY i.id, i.name
+         HAVING count > 0
+         ORDER BY i.name ASC`,
+        [...baseParams]
       );
-      const institutionBreakdown = [];
-      for (const inst of institutions || []) {
-        const instName = (inst.name || '').trim();
-        if (!instName) continue;
-        const instConditions = [...conditions];
-        const instParams = [...params];
-        instConditions.push(
-          "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
-        );
-        instParams.push(instName);
-        const instWhere = `WHERE ${instConditions.join(' AND ')}`;
-        const [countResult] = await pool.execute(
-          `SELECT COUNT(*) as total FROM leads ${instWhere}`,
-          instParams
-        );
-        const total = countResult[0].total;
-        if (total > 0) {
-          institutionBreakdown.push({ id: inst.id, name: instName, count: total });
-        }
-      }
-      payload.institutionBreakdown = institutionBreakdown;
+      payload.institutionBreakdown = (institutionRows || []).map((r) => ({
+        id: r.id,
+        name: r.name,
+        count: Number(r.count) || 0,
+      }));
     }
 
+    setCachedAssignmentStats(cacheKey, payload);
     return successResponse(
       res,
       payload,
