@@ -1763,16 +1763,6 @@ export const getUserAnalytics = async (req, res) => {
       assignmentDateTargetRows = assignmentTargetsRows;
     }
 
-    // Debug: verify assignment-detail pipeline for reports performance tab
-    console.log('[UserAnalytics][debug] includeAssignmentDetails:', shouldIncludeAssignmentDetails, {
-      startDate: startDate || null,
-      endDate: endDate || null,
-      academicYear: useAcademicYear ? yearNum : null,
-      selectedUsers: selectedUserIds.length,
-      assignmentRows: assignmentDateRows.length,
-      assignmentSummaryRows: assignmentDateSummaryRows.length,
-      assignmentTargetRows: assignmentDateTargetRows.length,
-    });
 
     // Maps for fast lookup
     const leadMap = new Map();
@@ -1913,11 +1903,6 @@ export const getUserAnalytics = async (req, res) => {
       }
       bucket.targetDateCounts[targetDateKey] = (bucket.targetDateCounts[targetDateKey] || 0) + count;
     });
-
-    const sampleMapKeys = Array.from(assignmentByDateMap.keys()).slice(0, 10);
-    const sampleUserIds = selectedUserIds.slice(0, 10).map((id) => String(id || '').trim().toLowerCase());
-    console.log('[UserAnalytics][debug] assignment map keys sample:', sampleMapKeys);
-    console.log('[UserAnalytics][debug] selected user ids sample:', sampleUserIds);
 
     // Compile analytics for each user
     const userAnalytics = users.map((user) => {
