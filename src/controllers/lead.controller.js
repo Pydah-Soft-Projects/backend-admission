@@ -847,9 +847,10 @@ export const updateLead = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    // Regular users can only update status and notes; Super Admin can update everything.
-    // Assigned Student Counselor (not PRO) can also update profile fields: name, phone, father, village, state, district, mandal.
+    // Regular users can only update allowed scoped fields; Super Admin can update everything.
+    // Assigned counselor/PRO can update limited profile fields from user edit flow.
     const isAssignedCounsellorOnly = !isSuperAdmin && isStudentCounselor && currentLead.assigned_to === userId;
+    const isAssignedProOnly = !isSuperAdmin && isPro && currentLead.assigned_to_pro === userId;
 
     // Store original values for comparison
     const originalLead = {
@@ -1047,8 +1048,8 @@ export const updateLead = async (req, res) => {
       }
     }
 
-    // Assigned counsellor can update profile fields (same as edit form on user lead detail page); PRO cannot via this path.
-    if (isAssignedCounsellorOnly) {
+    // Assigned counsellor / PRO can update limited profile fields from user lead detail edit flow.
+    if (isAssignedCounsellorOnly || isAssignedProOnly) {
       if (interCollege !== undefined) {
         updateFields.push('inter_college = ?');
         updateValues.push(interCollege ? String(interCollege).trim() : '');
@@ -1140,12 +1141,12 @@ export const updateLead = async (req, res) => {
       updateFields.push('academic_year = ?');
       updateValues.push(academicYear != null && academicYear !== '' ? Number(academicYear) : null);
     }
-    if (studentGroup !== undefined && (isSuperAdmin || isAdmin || !isPro)) {
+    if (studentGroup !== undefined && (isSuperAdmin || isAdmin || isAssignedCounsellorOnly || isAssignedProOnly)) {
       updateFields.push('student_group = ?');
       updateValues.push(studentGroup ? String(studentGroup).trim() || null : null);
     }
     // Clear needs_manual_update when lead is updated (Super Admin or assigned counsellor has reviewed/corrected)
-    if ((isSuperAdmin || isAssignedCounsellorOnly) && updateFields.length > 0) {
+    if ((isSuperAdmin || isAssignedCounsellorOnly || isAssignedProOnly) && updateFields.length > 0) {
       updateFields.push('needs_manual_update = ?');
       updateValues.push(0);
     }
