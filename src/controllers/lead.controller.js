@@ -13,6 +13,50 @@ const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
 });
 
+// Lightweight in-memory caches to reduce repeated heavy reads on large lead tables.
+const queryCache = new Map();
+const CACHE_TTL = {
+  leadsCountMs: Number(process.env.LEADS_COUNT_CACHE_MS || 15000),
+  filterOptionsMs: Number(process.env.LEADS_FILTER_OPTIONS_CACHE_MS || 120000),
+};
+
+const stableStringify = (value) => {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${k}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const getCached = (key) => {
+  const entry = queryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    queryCache.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const setCached = (key, value, ttlMs) => {
+  queryCache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+};
+
+const getCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
+  const key = `count:${scopeKey}:${sql}:${stableStringify(params)}`;
+  const cached = getCached(key);
+  if (cached !== null) return cached;
+  const [rows] = await pool.execute(sql, params);
+  const raw = rows?.[0]?.total ?? 0;
+  const count = typeof raw === 'bigint' ? Number(raw) : Number(raw || 0);
+  setCached(key, count, ttlMs);
+  return count;
+};
+
 /** One SET slot per column so assignment defaults and body fields do not duplicate (e.g. call_status twice). */
 function upsertLeadUpdateColumn(updateFields, updateValues, column, value) {
   const clause = `${column} = ?`;
@@ -253,21 +297,25 @@ export const getLeads = async (req, res) => {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Get total count for pagination (use alias l so same whereClause works)
-    const [countResult] = await pool.execute(
+    // Get total count for pagination (cached briefly to avoid repetitive scans)
+    const total = await getCachedCount(
+      pool,
       `SELECT COUNT(*) as total FROM leads l ${whereClause}`,
-      params
+      params,
+      CACHE_TTL.leadsCountMs,
+      'leads-total'
     );
-    const total = countResult[0].total;
 
-    // Get count of leads that need manual update (same filters)
+    // Get count of leads needing manual update (cached briefly, same filter scope)
     const needsUpdateConditions = [...conditions, 'l.needs_manual_update IN (1, 2)'];
     const needsUpdateWhereClause = `WHERE ${needsUpdateConditions.join(' AND ')}`;
-    const [needsUpdateResult] = await pool.execute(
+    const needsUpdateCount = await getCachedCount(
+      pool,
       `SELECT COUNT(*) as total FROM leads l ${needsUpdateWhereClause}`,
-      params
+      params,
+      CACHE_TTL.leadsCountMs,
+      'leads-needs-update'
     );
-    const needsUpdateCount = needsUpdateResult[0]?.total ?? 0;
 
     // Get leads with pagination and user info
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
@@ -688,10 +736,20 @@ export const createLead = async (req, res) => {
       getFieldValue(district, ['district'], dynamicFields) || 'Not Provided';
     const finalMandal =
       getFieldValue(mandal, ['mandal', 'tehsil'], dynamicFields) || 'Not Provided';
+    const finalStudentGroup =
+      getFieldValue(
+        studentGroup,
+        ['student_group', 'studentgroup', 'student group'],
+        dynamicFields
+      ) || null;
 
-    // For internal lead creation, only name and phone are truly required.
-    if (!finalName || !finalPhone) {
-      return errorResponse(res, 'Please provide name and phone', 400);
+    // Internal lead creation requires name, phone and student group.
+    if (!finalName || !finalPhone || !finalStudentGroup) {
+      const missing = [];
+      if (!finalName) missing.push('name');
+      if (!finalPhone) missing.push('phone');
+      if (!finalStudentGroup) missing.push('studentGroup');
+      return errorResponse(res, `Please provide ${missing.join(', ')}`, 400);
     }
 
     // Generate enquiry number
@@ -733,7 +791,7 @@ export const createLead = async (req, res) => {
         JSON.stringify(dynamicFields || {}),
         'New',
         source || 'Manual Entry',
-        studentGroup ? String(studentGroup).trim() : null,
+        finalStudentGroup,
         userId,
       ]
     );
@@ -1739,6 +1797,11 @@ export const getAllLeadIds = async (req, res) => {
 export const getPublicFilterOptions = async (req, res) => {
   try {
     const pool = getPool();
+    const cacheKey = 'filter-options:public';
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return successResponse(res, cached, 'Filter options retrieved successfully', 200);
+    }
 
     // Get distinct values for each field
     const [mandals] = await pool.execute('SELECT DISTINCT mandal FROM leads WHERE mandal IS NOT NULL AND mandal != "" ORDER BY mandal ASC');
@@ -1747,13 +1810,15 @@ export const getPublicFilterOptions = async (req, res) => {
     const [quotas] = await pool.execute('SELECT DISTINCT quota FROM leads WHERE quota IS NOT NULL AND quota != "" ORDER BY quota ASC');
     const [applicationStatuses] = await pool.execute('SELECT DISTINCT application_status FROM leads WHERE application_status IS NOT NULL AND application_status != "" ORDER BY application_status ASC');
 
-    return successResponse(res, {
+    const payload = {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
       states: states.map(r => r.state),
       quotas: quotas.map(r => r.quota),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
-    }, 'Filter options retrieved successfully', 200);
+    };
+    setCached(cacheKey, payload, CACHE_TTL.filterOptionsMs);
+    return successResponse(res, payload, 'Filter options retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting public filter options:', error);
     return errorResponse(res, error.message || 'Failed to get filter options', 500);
@@ -1798,6 +1863,16 @@ export const getFilterOptions = async (req, res) => {
 
     const districtFilter = (req.query.district && String(req.query.district).trim()) || '';
     const mandalFilter = (req.query.mandal && String(req.query.mandal).trim()) || '';
+    const privateCacheKey = `filter-options:private:${stableStringify({
+      roleName: req.user.roleName,
+      userId: adminLike ? 'admin-like' : userId,
+      districtFilter,
+      mandalFilter,
+    })}`;
+    const cached = getCached(privateCacheKey);
+    if (cached) {
+      return successResponse(res, cached, 'Filter options retrieved successfully', 200);
+    }
 
     const mandalConditionScoped = [...mandalCondition];
     const mandalParams = [...params];
@@ -1879,7 +1954,7 @@ export const getFilterOptions = async (req, res) => {
     const studentGroupsFromDb = studentGroupsRows.map(r => r.student_group).filter(Boolean);
     const studentGroups = [...new Set([...studentGroupOptions, ...studentGroupsFromDb])].sort();
 
-    return successResponse(res, {
+    const payload = {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
       villages: villages.map((r) => r.village),
@@ -1891,7 +1966,9 @@ export const getFilterOptions = async (req, res) => {
       applicationStatuses: applicationStatuses.map(r => r.application_status),
       academicYears,
       studentGroups,
-    }, 'Filter options retrieved successfully', 200);
+    };
+    setCached(privateCacheKey, payload, CACHE_TTL.filterOptionsMs);
+    return successResponse(res, payload, 'Filter options retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting filter options:', error);
     return errorResponse(res, error.message || 'Failed to get filter options', 500);
