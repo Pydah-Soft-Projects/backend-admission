@@ -1471,11 +1471,21 @@ export const getUserAnalytics = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate, userId, academicYear, includeAssignmentDetails } = req.query;
+    const {
+      startDate,
+      endDate,
+      userId,
+      academicYear,
+      includeAssignmentDetails,
+      division,
+      department,
+      group,
+    } = req.query;
     const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
     const shouldIncludeAssignmentDetails =
       String(includeAssignmentDetails || '').toLowerCase() === 'true';
+    const hasOrgFilters = Boolean(division || department || group);
 
     // Set date range for filtering activities
     let activityDateConditions = [];
@@ -1664,13 +1674,20 @@ export const getUserAnalytics = async (req, res) => {
         assignmentDateConditions.push('l.academic_year = ?');
         assignmentDateParams.push(yearNum);
       }
-      assignmentDateConditions.push(
-        `JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${selectedUserPlaceholders})`
-      );
+      const assignmentParams = [...assignmentDateParams];
+
+      // Keep this filter only for explicit single-user drilldown.
+      // For full reports, filtering by a large IN-list can miss rows in some environments
+      // due to type/collation differences on JSON-unquoted values.
+      if (userId) {
+        assignmentDateConditions.push(
+          `JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) = ?`
+        );
+        assignmentParams.push(userId);
+      }
       const assignmentDateWhere = assignmentDateConditions.length > 0
         ? `AND ${assignmentDateConditions.join(' AND ')}`
         : '';
-      const assignmentParams = [...assignmentDateParams, ...selectedUserIds];
 
       const [assignmentRows] = await pool.execute(
       `SELECT
@@ -1746,6 +1763,17 @@ export const getUserAnalytics = async (req, res) => {
       assignmentDateTargetRows = assignmentTargetsRows;
     }
 
+    // Debug: verify assignment-detail pipeline for reports performance tab
+    console.log('[UserAnalytics][debug] includeAssignmentDetails:', shouldIncludeAssignmentDetails, {
+      startDate: startDate || null,
+      endDate: endDate || null,
+      academicYear: useAcademicYear ? yearNum : null,
+      selectedUsers: selectedUserIds.length,
+      assignmentRows: assignmentDateRows.length,
+      assignmentSummaryRows: assignmentDateSummaryRows.length,
+      assignmentTargetRows: assignmentDateTargetRows.length,
+    });
+
     // Maps for fast lookup
     const leadMap = new Map();
     leadCounts.forEach(c => leadMap.set(c.user_id_combined, c));
@@ -1777,7 +1805,7 @@ export const getUserAnalytics = async (req, res) => {
 
     const assignmentByDateMap = new Map();
     assignmentDateRows.forEach((row) => {
-      const userKey = row.assigned_to_user_id;
+      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
       if (!userKey) return;
       if (!assignmentByDateMap.has(userKey)) {
         assignmentByDateMap.set(userKey, new Map());
@@ -1803,7 +1831,7 @@ export const getUserAnalytics = async (req, res) => {
     });
 
     assignmentDateSummaryRows.forEach((row) => {
-      const userKey = row.assigned_to_user_id;
+      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
       if (!userKey) return;
       if (!assignmentByDateMap.has(userKey)) {
         assignmentByDateMap.set(userKey, new Map());
@@ -1852,7 +1880,7 @@ export const getUserAnalytics = async (req, res) => {
     });
 
     assignmentDateTargetRows.forEach((row) => {
-      const userKey = row.assigned_to_user_id;
+      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
       if (!userKey) return;
       if (!assignmentByDateMap.has(userKey)) {
         assignmentByDateMap.set(userKey, new Map());
@@ -1880,8 +1908,16 @@ export const getUserAnalytics = async (req, res) => {
         : String(row.target_date || '').slice(0, 10);
       if (!targetDateKey) return;
       const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
+      if (!bucket.targetDateCounts || typeof bucket.targetDateCounts !== 'object') {
+        bucket.targetDateCounts = {};
+      }
       bucket.targetDateCounts[targetDateKey] = (bucket.targetDateCounts[targetDateKey] || 0) + count;
     });
+
+    const sampleMapKeys = Array.from(assignmentByDateMap.keys()).slice(0, 10);
+    const sampleUserIds = selectedUserIds.slice(0, 10).map((id) => String(id || '').trim().toLowerCase());
+    console.log('[UserAnalytics][debug] assignment map keys sample:', sampleMapKeys);
+    console.log('[UserAnalytics][debug] selected user ids sample:', sampleUserIds);
 
     // Compile analytics for each user
     const userAnalytics = users.map((user) => {
@@ -1919,7 +1955,7 @@ export const getUserAnalytics = async (req, res) => {
           total: logs.status_changes,
         },
         assignmentsByDate: (() => {
-          const perDateMap = assignmentByDateMap.get(user.id);
+          const perDateMap = assignmentByDateMap.get(String(user.id || '').trim().toLowerCase());
           if (!perDateMap) return [];
           return Array.from(perDateMap.values())
             .sort((a, b) => String(b.date).localeCompare(String(a.date)));
