@@ -1611,12 +1611,92 @@ export const getUserAnalytics = async (req, res) => {
 
     // Get users based on filter
     const [users] = await pool.execute(
-      `SELECT id, name, email, role_name, is_active FROM users ${userWhereClause}`,
+      `SELECT id, name, email, role_name, designation, is_active FROM users ${userWhereClause}`,
       userParams
     );
 
     if (!users || users.length === 0) {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
+    }
+
+    // Hydrate designation/org fields from HRMS by emp_no (source of truth)
+    try {
+      const hrmsConn = await connectHRMS();
+      const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+      const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+      const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+      const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+      const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
+
+      const [usersWithEmp] = await pool.execute(
+        `SELECT id, emp_no FROM users WHERE id IN (${users.map(() => '?').join(',')})`,
+        users.map((u) => u.id)
+      );
+      const empNos = usersWithEmp.map((u) => u.emp_no).filter(Boolean);
+      if (empNos.length > 0) {
+        const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
+          .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+        const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(Boolean))];
+        const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(Boolean))];
+        const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(Boolean))];
+        const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(Boolean))];
+
+        const [divisions, departments, groups, designations] = await Promise.all([
+          Division.find({ _id: { $in: divIds } }).select('name'),
+          Department.find({ _id: { $in: deptIds } }).select('name'),
+          Group.find({ _id: { $in: groupIds } }).select('name'),
+          Designation.find({ _id: { $in: designationIds } }).select('name'),
+        ]);
+        const divMap = Object.fromEntries(divisions.map((d) => [d._id.toString(), d.name]));
+        const deptMap = Object.fromEntries(departments.map((d) => [d._id.toString(), d.name]));
+        const groupMap = Object.fromEntries(groups.map((g) => [g._id.toString(), g.name]));
+        const designationMap = Object.fromEntries(designations.map((d) => [d._id.toString(), d.name]));
+
+        const extractDesignationName = (emp) => {
+          const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
+          if (byId) return byId;
+          const dynamicFields = emp.dynamicFields || {};
+          if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
+            return dynamicFields.designation_name.trim();
+          }
+          const rawDesignation = dynamicFields.designation;
+          if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
+            try {
+              const parsed = JSON.parse(rawDesignation);
+              if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
+            } catch {
+              // ignore parse errors and fallback
+            }
+          }
+          return null;
+        };
+
+        const hrmsByEmpNo = new Map(
+          hrmsEmployees.map((emp) => [
+            String(emp.emp_no),
+            {
+              division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+              department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
+              designation: extractDesignationName(emp),
+            },
+          ])
+        );
+
+        const empByUserId = new Map(usersWithEmp.map((u) => [u.id, String(u.emp_no || '')]));
+        users.forEach((u) => {
+          const empNo = empByUserId.get(u.id);
+          const hrms = empNo ? hrmsByEmpNo.get(empNo) : null;
+          if (hrms) {
+            u.division = hrms.division;
+            u.department = hrms.department;
+            u.group = hrms.group;
+            u.designation = hrms.designation || u.designation || null;
+          }
+        });
+      }
+    } catch (hrmsHydrationError) {
+      console.error('HRMS hydration error in getUserAnalytics:', hrmsHydrationError);
     }
 
     const selectedUserIds = users.map((u) => u.id).filter(Boolean);
@@ -1679,6 +1759,24 @@ export const getUserAnalytics = async (req, res) => {
       [...selectedUserIds, ...activityDateParams]
     );
 
+    // Calls done only on leads that are CURRENTLY with same user (for pending/balance metric)
+    const [currentPortfolioCallCounts] = await pool.execute(
+      `SELECT
+        c.sent_by as user_id,
+        COUNT(DISTINCT c.lead_id) as unique_current_leads_called
+      FROM communications c
+      INNER JOIN leads l ON l.id = c.lead_id
+      WHERE c.type = 'call'
+        AND c.sent_by IN (${selectedUserPlaceholders})
+        ${activityDateClause}
+        AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
+        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      GROUP BY c.sent_by`,
+      useAcademicYear
+        ? [...selectedUserIds, ...activityDateParams, yearNum]
+        : [...selectedUserIds, ...activityDateParams]
+    );
+
     const [actLogsCountResult] = await pool.execute(
       `SELECT 
         performed_by as user_id, 
@@ -1694,6 +1792,7 @@ export const getUserAnalytics = async (req, res) => {
     let assignmentDateRows = [];
     let assignmentDateSummaryRows = [];
     let assignmentDateTargetRows = [];
+    let reclaimedUniqueRows = [];
     if (shouldIncludeAssignmentDetails) {
       const assignmentDateConditions = [];
       const assignmentDateParams = [];
@@ -1797,9 +1896,29 @@ export const getUserAnalytics = async (req, res) => {
       assignmentParams
       );
 
+      const [reclaimedDistinctRows] = await pool.execute(
+      `SELECT
+        ae.assigned_to_user_id,
+        COUNT(DISTINCT ae.lead_id) as reclaimed_unique_count
+      FROM (
+        SELECT DISTINCT
+          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
+          a.lead_id
+        FROM activity_logs a
+        LEFT JOIN leads l ON l.id = a.lead_id
+        WHERE a.type = 'status_change'
+          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+          ${assignmentDateWhere}
+          AND COALESCE(l.cycle_number, 1) > 1
+      ) ae
+      GROUP BY ae.assigned_to_user_id`,
+      assignmentParams
+      );
+
       assignmentDateRows = assignmentRows;
       assignmentDateSummaryRows = assignmentSummaryRows;
       assignmentDateTargetRows = assignmentTargetsRows;
+      reclaimedUniqueRows = reclaimedDistinctRows;
     }
 
 
@@ -1831,6 +1950,16 @@ export const getUserAnalytics = async (req, res) => {
 
     const logsMap = new Map();
     actLogsCountResult.forEach(c => logsMap.set(c.user_id, c));
+
+    const currentPortfolioCallsMap = new Map();
+    currentPortfolioCallCounts.forEach((c) => {
+      currentPortfolioCallsMap.set(
+        c.user_id,
+        typeof c.unique_current_leads_called === 'bigint'
+          ? Number(c.unique_current_leads_called)
+          : Number(c.unique_current_leads_called || 0)
+      );
+    });
 
     const assignmentByDateMap = new Map();
     assignmentDateRows.forEach((row) => {
@@ -1943,6 +2072,16 @@ export const getUserAnalytics = async (req, res) => {
       bucket.targetDateCounts[targetDateKey] = (bucket.targetDateCounts[targetDateKey] || 0) + count;
     });
 
+    const reclaimedUniqueMap = new Map();
+    reclaimedUniqueRows.forEach((row) => {
+      const key = String(row.assigned_to_user_id || '').trim().toLowerCase();
+      if (!key) return;
+      const count = typeof row.reclaimed_unique_count === 'bigint'
+        ? Number(row.reclaimed_unique_count)
+        : Number(row.reclaimed_unique_count || 0);
+      reclaimedUniqueMap.set(key, count);
+    });
+
     // Compile analytics for each user
     const userAnalytics = users.map((user) => {
       const leads = leadMap.get(user.id) || { total_assigned: 0, active_leads: 0 };
@@ -1950,6 +2089,8 @@ export const getUserAnalytics = async (req, res) => {
       const convertedLeads = conversionMap.get(user.id) || 0;
       const comms = commMap.get(user.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
       const logs = logsMap.get(user.id) || { total_logs: 0, status_changes: 0 };
+      const callsOnCurrentPortfolio = currentPortfolioCallsMap.get(user.id) || 0;
+      const reclaimedUniqueLeads = reclaimedUniqueMap.get(String(user.id || '').trim().toLowerCase()) || 0;
 
       const totalAssigned = leads.total_assigned;
 
@@ -1959,11 +2100,16 @@ export const getUserAnalytics = async (req, res) => {
         name: user.name,
         email: user.email,
         roleName: user.role_name,
+        designation: user.designation || null,
+        division: user.division || '-',
+        department: user.department || '-',
+        group: user.group || '-',
         isActive: user.is_active === 1 || user.is_active === true,
         totalAssigned,
         activeLeads: leads.active_leads,
         convertedLeads,
         interested: statusBreakdown['Interested'] || 0,
+        admittedLeads: statusBreakdown['Admitted'] || 0,
         conversionRate: totalAssigned > 0 ? parseFloat(((convertedLeads / totalAssigned) * 100).toFixed(2)) : 0,
         statusBreakdown,
         activityLogsCount: logs.total_logs,
@@ -1972,6 +2118,9 @@ export const getUserAnalytics = async (req, res) => {
           totalDuration: comms.calls.duration,
           averageDuration: comms.calls.total > 0 ? Math.round(comms.calls.duration / comms.calls.total) : 0,
         },
+        callsOnCurrentPortfolio,
+        pendingBalance: Math.max(Number(totalAssigned || 0) - Number(callsOnCurrentPortfolio || 0), 0),
+        reclaimedUniqueLeads,
         sms: {
           total: comms.sms,
         },

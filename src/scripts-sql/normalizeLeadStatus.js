@@ -1,11 +1,11 @@
 /**
- * Normalize legacy values on leads.lead_status to a canonical set used across the app.
+ * Recompute leads.lead_status from call_status + visit_status using the
+ * same merged mapping used by runtime resolver logic.
  *
- * Canonical:
- *   New | Assigned | Interested | Not Interested | Partial | Admitted | Closed | Cancelled
- *   | Not Answered | Call Back | Wrong Data | Confirmed | CET Applied
+ * Canonical lead_status after merge:
+ *   New | Assigned | Interested | Not Interested | Call Back | Wrong Data | Visited | Confirmed
  *
- * Usage (manual):
+ * Usage:
  *   node src/scripts-sql/normalizeLeadStatus.js --dry-run
  *   node src/scripts-sql/normalizeLeadStatus.js --apply
  *
@@ -28,50 +28,48 @@ function normKey(s) {
     .toLowerCase();
 }
 
-const CANONICAL = [
-  'New',
-  'Assigned',
-  'Interested',
-  'Not Interested',
-  'Partial',
-  'Admitted',
-  'Closed',
-  'Cancelled',
-  'Not Answered',
-  'Call Back',
-  'Wrong Data',
-  'Confirmed',
-  'CET Applied',
-];
+const normExpr = (col) => `LOWER(REGEXP_REPLACE(TRIM(${col}), '[[:space:]]+', ' '))`;
 
-const LEGACY_ALIASES = [
-  ['New', ['new', 'NEW']],
-  ['Assigned', ['assigned', 'ASSIGNED']],
-  ['Interested', ['interested', 'INTERESTED']],
-  ['Not Interested', ['not interested', 'not_interested', 'NOT_INTERESTED', 'not interest', 'not-interest']],
-  ['Partial', ['partial', 'PARTIAL', 'partially interested', 'partial interested']],
-  ['Admitted', ['admitted', 'ADMITTED', 'admission done', 'admission_done']],
-  ['Closed', ['closed', 'CLOSED']],
-  ['Cancelled', ['cancelled', 'CANCELLED', 'canceled', 'CANCELED']],
-  ['Not Answered', ['not answered', 'not_answered', 'NOT_ANSWERED', 'no answer', 'no_answer', 'NO_ANSWER', 'not answer', 'unanswered', 'no anser']],
-  ['Call Back', ['call back', 'call_back', 'CALL_BACK', 'callback', 'call back requested']],
+/**
+ * Channel status aliases -> merged lead_status.
+ * Keep aligned with src/utils/leadChannelStatus.util.js
+ */
+const CHANNEL_ALIASES = [
+  ['Confirmed', ['confirmed']],
+  ['Visited', ['visited']],
+  ['Interested', ['interested', 'cet applied', 'cet_applied']],
+  ['Not Interested', ['not interested', 'not_interested', 'not-interest', 'not interest']],
+  ['Call Back', ['call back', 'call_back', 'callback', 're-visit', 'revisit', 'scheduled revisit']],
   ['Wrong Data', ['wrong data', 'wrong_data', 'wrong number', 'invalid number']],
-  ['Confirmed', ['confirmed', 'CONFIRMED']],
-  ['CET Applied', ['cet applied', 'cet_applied', 'CET_APPLIED', 'eamcet applied', 'eamcet_applied', 'polycet applied', 'polycet_applied']],
+  ['Assigned', ['assigned']],
+  ['New', ['new']],
 ];
 
-function buildNormalizationMap() {
+/**
+ * Legacy lead_status aliases -> merged lead_status
+ * (fallback when neither call_status nor visit_status yields a mapped value).
+ */
+const LEAD_ALIASES = [
+  ['New', ['new']],
+  ['Assigned', ['assigned']],
+  ['Interested', ['interested', 'cet applied', 'cet_applied', 'partial', 'partially interested', 'partial interested']],
+  ['Not Interested', ['not interested', 'not_interested', 'not-interest', 'not interest']],
+  ['Call Back', ['call back', 'call_back', 'callback', 'scheduled revisit', 're-visit', 'revisit', 'not answered', 'not_answered', 'no answer', 'unanswered']],
+  ['Wrong Data', ['wrong data', 'wrong_data', 'wrong number', 'invalid number']],
+  ['Visited', ['visited']],
+  ['Confirmed', ['confirmed', 'admitted', 'admission done', 'admission_done']],
+];
+
+function buildMap(aliasRows) {
   const map = new Map();
-  for (const [canonical, aliases] of LEGACY_ALIASES) {
-    for (const a of aliases) map.set(normKey(a), canonical);
+  for (const [canonical, aliases] of aliasRows) {
+    for (const alias of aliases) map.set(normKey(alias), canonical);
+    map.set(normKey(canonical), canonical);
   }
-  for (const c of CANONICAL) map.set(normKey(c), c);
   return map;
 }
 
-const normExpr = (col) => `LOWER(REGEXP_REPLACE(TRIM(${col}), '[[:space:]]+', ' '))`;
-
-function buildCaseSql(columnName, map) {
+function buildCaseSql(columnName, map, elseSql = 'NULL') {
   const byTarget = new Map();
   for (const [nk, canon] of map.entries()) {
     if (!byTarget.has(canon)) byTarget.set(canon, new Set());
@@ -83,7 +81,42 @@ function buildCaseSql(columnName, map) {
     const list = [...normKeys].map((k) => esc(k)).join(', ');
     branches.push(`WHEN ${normExpr(columnName)} IN (${list}) THEN ${esc(canon)}`);
   }
-  return `CASE\n      ${branches.join('\n      ')}\n      ELSE ${columnName}\n    END`;
+  return `CASE
+      ${branches.join('\n      ')}
+      ELSE ${elseSql}
+    END`;
+}
+
+function buildRankExpr(expr) {
+  return `CASE ${expr}
+      WHEN 'Confirmed' THEN 1
+      WHEN 'Visited' THEN 2
+      WHEN 'Interested' THEN 3
+      WHEN 'Call Back' THEN 4
+      WHEN 'Not Interested' THEN 5
+      WHEN 'Wrong Data' THEN 6
+      WHEN 'Assigned' THEN 7
+      WHEN 'New' THEN 8
+      ELSE 999
+    END`;
+}
+
+function buildResolvedLeadSql(mappedCallExpr, mappedVisitExpr, mappedDesiredExpr) {
+  const callRank = buildRankExpr(mappedCallExpr);
+  const visitRank = buildRankExpr(mappedVisitExpr);
+  return `CASE
+      WHEN ${mappedCallExpr} IS NOT NULL AND ${mappedVisitExpr} IS NOT NULL THEN
+        CASE
+          WHEN ${mappedCallExpr} = ${mappedVisitExpr} THEN ${mappedCallExpr}
+          WHEN ${mappedDesiredExpr} IS NOT NULL AND (${mappedDesiredExpr} = ${mappedCallExpr} OR ${mappedDesiredExpr} = ${mappedVisitExpr}) THEN ${mappedDesiredExpr}
+          WHEN ${callRank} <= ${visitRank} THEN ${mappedCallExpr}
+          ELSE ${mappedVisitExpr}
+        END
+      WHEN ${mappedCallExpr} IS NOT NULL THEN ${mappedCallExpr}
+      WHEN ${mappedVisitExpr} IS NOT NULL THEN ${mappedVisitExpr}
+      WHEN ${mappedDesiredExpr} IS NOT NULL THEN ${mappedDesiredExpr}
+      ELSE 'New'
+    END`;
 }
 
 async function run() {
@@ -95,8 +128,13 @@ async function run() {
     process.exit(1);
   }
 
-  const map = buildNormalizationMap();
-  const caseSql = buildCaseSql('lead_status', map);
+  const channelMap = buildMap(CHANNEL_ALIASES);
+  const leadMap = buildMap(LEAD_ALIASES);
+
+  const mappedCallSql = buildCaseSql('call_status', channelMap, 'NULL');
+  const mappedVisitSql = buildCaseSql('visit_status', channelMap, 'NULL');
+  const mappedDesiredSql = buildCaseSql('lead_status', leadMap, 'NULL');
+  const resolvedLeadSql = buildResolvedLeadSql(mappedCallSql, mappedVisitSql, mappedDesiredSql);
 
   const pool = mysql.createPool({
     host,
@@ -110,61 +148,42 @@ async function run() {
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
   });
 
-  const previewSql = `
-    SELECT
-      lead_status AS raw_value,
-      ${normExpr('lead_status')} AS normalized,
-      (${caseSql}) AS would_become,
-      COUNT(*) AS cnt
-    FROM leads
-    WHERE lead_status IS NOT NULL AND TRIM(lead_status) <> ''
-    GROUP BY lead_status
-    HAVING lead_status <> (${caseSql})
-    ORDER BY cnt DESC
-  `;
-
-  const countSql = `
-    SELECT COUNT(*) AS cnt FROM leads
-    WHERE lead_status IS NOT NULL AND TRIM(lead_status) <> ''
-      AND lead_status <> (${caseSql})
-  `;
-
   try {
     console.log(DRY ? 'Mode: DRY-RUN (no writes)' : 'Mode: APPLY (writes enabled)');
 
     const [distinctBefore] = await pool.query(`
       SELECT lead_status AS v, COUNT(*) AS cnt
       FROM leads
-      WHERE lead_status IS NOT NULL AND TRIM(lead_status) <> ''
       GROUP BY lead_status
       ORDER BY cnt DESC
       LIMIT 200
     `);
-    console.log('\nTop distinct lead_status values (up to 200 groups):');
+    console.log('\nTop distinct existing lead_status values (up to 200 groups):');
     console.table(distinctBefore);
 
-    const [previewRows] = await pool.query(previewSql);
-    console.log('\nPlanned lead_status changes (grouped):');
+    const [previewRows] = await pool.query(`
+      SELECT
+        lead_status AS old_lead_status,
+        (${mappedCallSql}) AS mapped_call_status,
+        (${mappedVisitSql}) AS mapped_visit_status,
+        (${resolvedLeadSql}) AS new_lead_status,
+        COUNT(*) AS cnt
+      FROM leads
+      GROUP BY old_lead_status, mapped_call_status, mapped_visit_status, new_lead_status
+      HAVING COALESCE(old_lead_status, '') <> COALESCE(new_lead_status, '')
+      ORDER BY cnt DESC
+      LIMIT 300
+    `);
+    console.log('\nPlanned lead_status changes (grouped by old + mapped channel statuses):');
     console.table(previewRows);
 
-    const [countRows] = await pool.query(countSql);
+    const [countRows] = await pool.query(`
+      SELECT COUNT(*) AS cnt
+      FROM leads
+      WHERE COALESCE(lead_status, '') <> COALESCE((${resolvedLeadSql}), '')
+    `);
     const changeCount = Number(countRows[0]?.cnt ?? 0);
     console.log(`\nLead rows that would change: ${changeCount}`);
-
-    const allKeys = [...map.keys()].map((k) => esc(k)).join(', ');
-    const [unmapped] = await pool.query(`
-      SELECT lead_status AS v, COUNT(*) AS cnt
-      FROM leads
-      WHERE lead_status IS NOT NULL AND TRIM(lead_status) <> ''
-      GROUP BY lead_status
-      HAVING ${normExpr('lead_status')} NOT IN (${allKeys})
-      ORDER BY cnt DESC
-      LIMIT 50
-    `);
-    if (unmapped.length > 0) {
-      console.log('\nDistinct lead_status values NOT covered by mapping:');
-      console.table(unmapped);
-    }
 
     if (DRY) {
       console.log('\nDry run complete. Re-run with --apply to execute updates.');
@@ -176,14 +195,12 @@ async function run() {
       return;
     }
 
-    const updateSql = `
+    const [ur] = await pool.query(`
       UPDATE leads
-      SET lead_status = (${caseSql}),
+      SET lead_status = (${resolvedLeadSql}),
           updated_at = NOW()
-      WHERE lead_status IS NOT NULL AND TRIM(lead_status) <> ''
-        AND lead_status <> (${caseSql})
-    `;
-    const [ur] = await pool.query(updateSql);
+      WHERE COALESCE(lead_status, '') <> COALESCE((${resolvedLeadSql}), '')
+    `);
     console.log(`\nLeads updated (matched): ${ur.affectedRows ?? 'n/a'}, changed: ${ur.changedRows ?? 'n/a'}`);
     console.log('\nApply complete.');
   } catch (e) {

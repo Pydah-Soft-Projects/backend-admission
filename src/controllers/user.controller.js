@@ -73,31 +73,55 @@ export const getUsers = async (req, res) => {
         const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
         const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
         const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+        const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
 
         const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
-          .select('emp_no division_id department_id employee_group_id');
+          .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
 
         if (hrmsEmployees.length > 0) {
           const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(id => id))];
           const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(id => id))];
           const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(id => id))];
+          const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(id => id))];
 
-          const [divisions, departments, groups] = await Promise.all([
+          const [divisions, departments, groups, designations] = await Promise.all([
             Division.find({ _id: { $in: divIds } }).select('name'),
             Department.find({ _id: { $in: deptIds } }).select('name'),
-            Group.find({ _id: { $in: groupIds } }).select('name')
+            Group.find({ _id: { $in: groupIds } }).select('name'),
+            Designation.find({ _id: { $in: designationIds } }).select('name')
           ]);
 
           const divMap = Object.fromEntries(divisions.map(d => [d._id.toString(), d.name]));
           const deptMap = Object.fromEntries(departments.map(d => [d._id.toString(), d.name]));
           const groupMap = Object.fromEntries(groups.map(g => [g._id.toString(), g.name]));
+          const designationMap = Object.fromEntries(designations.map(d => [d._id.toString(), d.name]));
+
+          const extractDesignationName = (emp) => {
+            const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
+            if (byId) return byId;
+            const dynamicFields = emp.dynamicFields || {};
+            if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
+              return dynamicFields.designation_name.trim();
+            }
+            const rawDesignation = dynamicFields.designation;
+            if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
+              try {
+                const parsed = JSON.parse(rawDesignation);
+                if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
+              } catch {
+                // ignore parse errors and fallback
+              }
+            }
+            return null;
+          };
 
           const hrmsMap = Object.fromEntries(hrmsEmployees.map(emp => [
             emp.emp_no,
             {
               division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
               department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-'
+              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
+              designation: extractDesignationName(emp) || null,
             }
           ]));
 
@@ -106,6 +130,8 @@ export const getUsers = async (req, res) => {
               user.division = hrmsMap[user.emp_no].division;
               user.department = hrmsMap[user.emp_no].department;
               user.group = hrmsMap[user.emp_no].group;
+              // HRMS designation is source of truth; fallback to SQL designation if unavailable
+              user.designation = hrmsMap[user.emp_no].designation || user.designation || null;
             }
           });
         }

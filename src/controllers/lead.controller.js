@@ -46,6 +46,13 @@ const setCached = (key, value, ttlMs) => {
   });
 };
 
+const toLocalYmd = (date) => {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
 const getCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
   const key = `count:${scopeKey}:${sql}:${stableStringify(params)}`;
   const cached = getCached(key);
@@ -151,6 +158,48 @@ export const getLeads = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 50;
     const offset = (page - 1) * limit;
     const pool = getPool();
+    const autoRescheduledFromYesterday = new Map();
+
+    /**
+     * Auto-rollover missed scheduled calls:
+     * if a call was scheduled yesterday and no call communication was logged yesterday,
+     * move it to today so it appears in today's scheduled calls list.
+     */
+    if (req.query.scheduledOn) {
+      const todayYmd = toLocalYmd(new Date());
+      const requestedYmd = String(req.query.scheduledOn).slice(0, 10);
+      if (requestedYmd === todayYmd) {
+        const [missedRows] = await pool.execute(
+          `SELECT l.id, l.next_scheduled_call
+           FROM leads l
+           WHERE l.next_scheduled_call IS NOT NULL
+             AND DATE(l.next_scheduled_call) = DATE_SUB(?, INTERVAL 1 DAY)
+             AND NOT EXISTS (
+               SELECT 1
+               FROM communications c
+               WHERE c.lead_id = l.id
+                 AND c.type = 'call'
+                 AND DATE(c.sent_at) = DATE(l.next_scheduled_call)
+             )`,
+          [requestedYmd]
+        );
+
+        if (missedRows.length > 0) {
+          for (const row of missedRows) {
+            autoRescheduledFromYesterday.set(row.id, String(row.next_scheduled_call).slice(0, 10));
+          }
+          const idPlaceholders = missedRows.map(() => '?').join(',');
+          const ids = missedRows.map((r) => r.id);
+          await pool.execute(
+            `UPDATE leads
+             SET next_scheduled_call = DATE_ADD(next_scheduled_call, INTERVAL 1 DAY),
+                 updated_at = NOW()
+             WHERE id IN (${idPlaceholders})`,
+            ids
+          );
+        }
+      }
+    }
 
     // Build WHERE conditions
     const conditions = [];
@@ -359,9 +408,14 @@ export const getLeads = async (req, res) => {
         email: lead.assigned_to_pro_email,
       } : null;
 
-      return formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
+      const formattedLead = formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
         viewerRoleName: req.user.roleName,
       });
+      if (autoRescheduledFromYesterday.has(lead.id)) {
+        formattedLead.isYesterdayMissedCall = true;
+        formattedLead.missedScheduledDate = autoRescheduledFromYesterday.get(lead.id);
+      }
+      return formattedLead;
     });
 
     return successResponse(res, {
