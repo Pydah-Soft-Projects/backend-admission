@@ -1711,39 +1711,46 @@ export const getUserAnalytics = async (req, res) => {
     const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
 
     const [leadCounts] = await pool.execute(
-      `SELECT 
-        COALESCE(assigned_to, assigned_to_pro) as user_id_combined,
-        COUNT(*) as total_assigned,
-        SUM(CASE WHEN lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN 1 ELSE 0 END) as active_leads
-      FROM leads 
-      WHERE COALESCE(assigned_to, assigned_to_pro) IN (${selectedUserPlaceholders})
-      ${useAcademicYear ? 'AND academic_year = ?' : ''}
-      GROUP BY user_id_combined`,
-      useAcademicYear ? [...selectedUserIds, yearNum] : [...selectedUserIds]
+      `SELECT
+        u.id as user_id_combined,
+        COUNT(DISTINCT l.id) as total_assigned,
+        COUNT(DISTINCT CASE WHEN l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN l.id END) as active_leads
+      FROM users u
+      LEFT JOIN leads l
+        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      WHERE u.id IN (${selectedUserPlaceholders})
+      GROUP BY u.id`,
+      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
     );
 
     const [statusCounts] = await pool.execute(
-      `SELECT 
-        COALESCE(assigned_to, assigned_to_pro) as user_id_combined,
-        lead_status,
-        COUNT(*) as count
-      FROM leads 
-      WHERE COALESCE(assigned_to, assigned_to_pro) IN (${selectedUserPlaceholders})
-      ${useAcademicYear ? 'AND academic_year = ?' : ''}
-      GROUP BY user_id_combined, lead_status`,
-      useAcademicYear ? [...selectedUserIds, yearNum] : [...selectedUserIds]
+      `SELECT
+        u.id as user_id_combined,
+        l.lead_status,
+        COUNT(DISTINCT l.id) as count
+      FROM users u
+      LEFT JOIN leads l
+        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      WHERE u.id IN (${selectedUserPlaceholders})
+        AND l.id IS NOT NULL
+      GROUP BY u.id, l.lead_status`,
+      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
     );
 
     const [conversionCounts] = await pool.execute(
-      `SELECT 
-        COALESCE(l.assigned_to, l.assigned_to_pro) as user_id_combined,
+      `SELECT
+        u.id as user_id_combined,
         COUNT(DISTINCT a.lead_id) as total_converted
-      FROM admissions a
-      INNER JOIN leads l ON a.lead_id = l.id
-      WHERE COALESCE(l.assigned_to, l.assigned_to_pro) IN (${selectedUserPlaceholders})
-      ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-      GROUP BY user_id_combined`,
-      useAcademicYear ? [...selectedUserIds, yearNum] : [...selectedUserIds]
+      FROM users u
+      LEFT JOIN leads l
+        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      LEFT JOIN admissions a ON a.lead_id = l.id
+      WHERE u.id IN (${selectedUserPlaceholders})
+      GROUP BY u.id`,
+      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
     );
 
     const [commCounts] = await pool.execute(
@@ -1792,6 +1799,7 @@ export const getUserAnalytics = async (req, res) => {
     let assignmentDateRows = [];
     let assignmentDateSummaryRows = [];
     let assignmentDateTargetRows = [];
+    let assignmentDateStudentGroupRows = [];
     let reclaimedUniqueRows = [];
     if (shouldIncludeAssignmentDetails) {
       const assignmentDateConditions = [];
@@ -1896,6 +1904,29 @@ export const getUserAnalytics = async (req, res) => {
       assignmentParams
       );
 
+      const [assignmentStudentGroupRows] = await pool.execute(
+      `SELECT
+        ae.assigned_to_user_id,
+        ae.assigned_date,
+        COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') as student_group,
+        COUNT(*) as count
+      FROM (
+        SELECT DISTINCT
+          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
+          DATE(a.created_at) as assigned_date,
+          a.lead_id
+        FROM activity_logs a
+        LEFT JOIN leads l ON l.id = a.lead_id
+        WHERE a.type = 'status_change'
+          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+          ${assignmentDateWhere}
+      ) ae
+      LEFT JOIN leads l ON l.id = ae.lead_id
+      GROUP BY ae.assigned_to_user_id, ae.assigned_date, COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
+      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, count DESC`,
+      assignmentParams
+      );
+
       const [reclaimedDistinctRows] = await pool.execute(
       `SELECT
         ae.assigned_to_user_id,
@@ -1918,6 +1949,7 @@ export const getUserAnalytics = async (req, res) => {
       assignmentDateRows = assignmentRows;
       assignmentDateSummaryRows = assignmentSummaryRows;
       assignmentDateTargetRows = assignmentTargetsRows;
+      assignmentDateStudentGroupRows = assignmentStudentGroupRows;
       reclaimedUniqueRows = reclaimedDistinctRows;
     }
 
@@ -1979,6 +2011,7 @@ export const getUserAnalytics = async (req, res) => {
           totalAssigned: 0,
           leadStatusCounts: {},
           currentlyUnassigned: 0,
+          studentGroupCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2009,6 +2042,7 @@ export const getUserAnalytics = async (req, res) => {
           movedToOtherUser: 0,
           reclaimedCount: 0,
           targetDateCounts: {},
+          studentGroupCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2058,6 +2092,7 @@ export const getUserAnalytics = async (req, res) => {
           movedToOtherUser: 0,
           reclaimedCount: 0,
           targetDateCounts: {},
+          studentGroupCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2070,6 +2105,39 @@ export const getUserAnalytics = async (req, res) => {
         bucket.targetDateCounts = {};
       }
       bucket.targetDateCounts[targetDateKey] = (bucket.targetDateCounts[targetDateKey] || 0) + count;
+    });
+
+    assignmentDateStudentGroupRows.forEach((row) => {
+      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
+      if (!userKey) return;
+      if (!assignmentByDateMap.has(userKey)) {
+        assignmentByDateMap.set(userKey, new Map());
+      }
+      const perDate = assignmentByDateMap.get(userKey);
+      const dateKey = row.assigned_date instanceof Date
+        ? row.assigned_date.toISOString().slice(0, 10)
+        : String(row.assigned_date || '').slice(0, 10);
+      if (!dateKey) return;
+      if (!perDate.has(dateKey)) {
+        perDate.set(dateKey, {
+          date: dateKey,
+          totalAssigned: 0,
+          leadStatusCounts: {},
+          currentlyUnassigned: 0,
+          currentlyWithSameUser: 0,
+          movedToOtherUser: 0,
+          reclaimedCount: 0,
+          targetDateCounts: {},
+          studentGroupCounts: {},
+        });
+      }
+      const bucket = perDate.get(dateKey);
+      if (!bucket.studentGroupCounts || typeof bucket.studentGroupCounts !== 'object') {
+        bucket.studentGroupCounts = {};
+      }
+      const groupLabel = String(row.student_group || 'Unknown');
+      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
+      bucket.studentGroupCounts[groupLabel] = (bucket.studentGroupCounts[groupLabel] || 0) + count;
     });
 
     const reclaimedUniqueMap = new Map();
