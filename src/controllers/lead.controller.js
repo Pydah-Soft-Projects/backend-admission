@@ -127,6 +127,10 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     utmContent: leadData.utm_content,
     lastFollowUp: leadData.last_follow_up,
     nextScheduledCall: leadData.next_scheduled_call,
+    cycle_number: leadData.cycle_number != null ? Number(leadData.cycle_number) : undefined,
+    cycleNumber: leadData.cycle_number != null ? Number(leadData.cycle_number) : undefined,
+    target_date: leadData.target_date || undefined,
+    targetDate: leadData.target_date || undefined,
     academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
     studentGroup: leadData.student_group || undefined,
     needsManualUpdate: leadData.needs_manual_update != null ? Number(leadData.needs_manual_update) : 0,
@@ -279,6 +283,13 @@ export const getLeads = async (req, res) => {
     if (req.query.studentGroup) {
       conditions.push('l.student_group = ?');
       params.push(req.query.studentGroup);
+    }
+    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
+      const cycle = Number(req.query.cycleNumber);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('l.cycle_number = ?');
+        params.push(cycle);
+      }
     }
 
     if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
@@ -1777,6 +1788,13 @@ export const getAllLeadIds = async (req, res) => {
       conditions.push('student_group = ?');
       params.push(req.query.studentGroup);
     }
+    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
+      const cycle = Number(req.query.cycleNumber);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('cycle_number = ?');
+        params.push(cycle);
+      }
+    }
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
       if (searchTerm.toUpperCase().startsWith('ENQ')) {
@@ -2120,6 +2138,13 @@ export const exportLeads = async (req, res) => {
     if (req.query.studentGroup) {
       conditions.push('l.student_group = ?');
       params.push(req.query.studentGroup);
+    }
+    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
+      const cycle = Number(req.query.cycleNumber);
+      if (!Number.isNaN(cycle)) {
+        conditions.push('l.cycle_number = ?');
+        params.push(cycle);
+      }
     }
 
     if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
