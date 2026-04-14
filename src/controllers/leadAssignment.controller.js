@@ -106,8 +106,8 @@ export const assignLeads = async (req, res) => {
       }
 
       // Build filter for leads available to this user
-      // For PRO role, we can assign any leads (even if already assigned to someone else)
-      const assignmentCondition = isProRole ? '1=1' : '(assigned_to IS NULL)';
+      // For PRO role, availability means not yet assigned to any PRO.
+      const assignmentCondition = isProRole ? '(assigned_to_pro IS NULL)' : '(assigned_to IS NULL)';
       const conditions = [assignmentCondition, 'academic_year = ?'];
       const params = [yearNum];
 
@@ -355,8 +355,8 @@ export const getAssignmentStats = async (req, res) => {
     const rawTargetRole = req.query.targetRole || 'Student Counselor';
     const targetRole = String(rawTargetRole).trim().toUpperCase();
     const isProTarget = targetRole === 'PRO';
-    // For PRO targets, "Available" means all leads in the scope, not just unassigned ones
-    const assignmentCondition = isProTarget ? '1=1' : 'assigned_to IS NULL';
+    // For PRO targets, "Available" means not yet assigned to any PRO.
+    const assignmentCondition = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
 
     const conditions = [assignmentCondition];
     const params = [];
@@ -608,7 +608,7 @@ export const getAssignmentStats = async (req, res) => {
     if (forBreakdown === 'school' || forBreakdown === 'college') {
       const table = forBreakdown === 'school' ? 'schools' : 'colleges';
       const [institutionRows] = await pool.execute(
-        `SELECT i.id, i.name, COUNT(l.id) as count
+          `SELECT i.id, i.name, COUNT(l.id) as count
          FROM ${table} i
          LEFT JOIN leads l
            ON LOWER(TRIM(COALESCE(
@@ -617,7 +617,7 @@ export const getAssignmentStats = async (req, res) => {
              ''
            ))) = LOWER(TRIM(i.name))
            ${baseConditions.length > 0 ? `AND ${baseConditions.join(' AND ')}` : ''}
-           AND ${isProTarget ? '1=1' : 'l.assigned_to IS NULL'}
+           AND ${isProTarget ? 'l.assigned_to_pro IS NULL' : 'l.assigned_to IS NULL'}
          WHERE i.is_active = 1
          GROUP BY i.id, i.name
          HAVING count > 0
@@ -1709,34 +1709,51 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'No users found', 200);
     }
     const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
+    const assignmentBridgeSql = `
+      SELECT
+        assigned_to as user_id,
+        id as lead_id,
+        lead_status
+      FROM leads
+      WHERE assigned_to IS NOT NULL
+      ${useAcademicYear ? 'AND academic_year = ?' : ''}
+      UNION ALL
+      SELECT
+        assigned_to_pro as user_id,
+        id as lead_id,
+        lead_status
+      FROM leads
+      WHERE assigned_to_pro IS NOT NULL
+      ${useAcademicYear ? 'AND academic_year = ?' : ''}
+      AND (assigned_to IS NULL OR assigned_to <> assigned_to_pro)
+    `;
+    const assignmentBridgeParams = useAcademicYear ? [yearNum, yearNum] : [];
 
     const [leadCounts] = await pool.execute(
       `SELECT
         u.id as user_id_combined,
-        COUNT(DISTINCT l.id) as total_assigned,
-        COUNT(DISTINCT CASE WHEN l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN l.id END) as active_leads
+        COUNT(DISTINCT al.lead_id) as total_assigned,
+        COUNT(DISTINCT CASE WHEN al.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN al.lead_id END) as active_leads
       FROM users u
-      LEFT JOIN leads l
-        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
-        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      LEFT JOIN (${assignmentBridgeSql}) al
+        ON al.user_id = u.id
       WHERE u.id IN (${selectedUserPlaceholders})
       GROUP BY u.id`,
-      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
+      [...assignmentBridgeParams, ...selectedUserIds]
     );
 
     const [statusCounts] = await pool.execute(
       `SELECT
         u.id as user_id_combined,
-        l.lead_status,
-        COUNT(DISTINCT l.id) as count
+        al.lead_status,
+        COUNT(DISTINCT al.lead_id) as count
       FROM users u
-      LEFT JOIN leads l
-        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
-        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+      LEFT JOIN (${assignmentBridgeSql}) al
+        ON al.user_id = u.id
       WHERE u.id IN (${selectedUserPlaceholders})
-        AND l.id IS NOT NULL
-      GROUP BY u.id, l.lead_status`,
-      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
+        AND al.lead_id IS NOT NULL
+      GROUP BY u.id, al.lead_status`,
+      [...assignmentBridgeParams, ...selectedUserIds]
     );
 
     const [conversionCounts] = await pool.execute(
@@ -1744,13 +1761,12 @@ export const getUserAnalytics = async (req, res) => {
         u.id as user_id_combined,
         COUNT(DISTINCT a.lead_id) as total_converted
       FROM users u
-      LEFT JOIN leads l
-        ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
-        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-      LEFT JOIN admissions a ON a.lead_id = l.id
+      LEFT JOIN (${assignmentBridgeSql}) al
+        ON al.user_id = u.id
+      LEFT JOIN admissions a ON a.lead_id = al.lead_id
       WHERE u.id IN (${selectedUserPlaceholders})
       GROUP BY u.id`,
-      useAcademicYear ? [yearNum, ...selectedUserIds] : [...selectedUserIds]
+      [...assignmentBridgeParams, ...selectedUserIds]
     );
 
     const [commCounts] = await pool.execute(

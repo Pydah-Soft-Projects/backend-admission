@@ -14,6 +14,9 @@ export const getDailyCallReports = async (req, res) => {
     }
 
     const { startDate, endDate, userId, division, department, group } = req.query;
+    const pageNum = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 500);
+    const offsetNum = (pageNum - 1) * limitNum;
 
     // Validate and parse dates
     let start, end;
@@ -101,10 +104,18 @@ export const getDailyCallReports = async (req, res) => {
             conditions.push(`sent_by IN (${filteredUserIds.map(() => '?').join(',')})`);
             params.push(...filteredUserIds);
           } else {
-            return successResponse(res, { reports: [], summary: [] }, 'No users found matching filters', 200);
+            return successResponse(res, {
+              reports: [],
+              summary: [],
+              pagination: { page: pageNum, limit: limitNum, total: 0, pages: 0 },
+            }, 'No users found matching filters', 200);
           }
         } else {
-          return successResponse(res, { reports: [], summary: [] }, 'No employees found matching filters', 200);
+          return successResponse(res, {
+            reports: [],
+            summary: [],
+            pagination: { page: pageNum, limit: limitNum, total: 0, pages: 0 },
+          }, 'No employees found matching filters', 200);
         }
       } catch (hrmsError) {
         console.error('HRMS filtering error in getDailyCallReports:', hrmsError);
@@ -113,7 +124,21 @@ export const getDailyCallReports = async (req, res) => {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    // Aggregate calls by user and date
+    const [totalGroupedRowsResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM (
+         SELECT sent_by, DATE(sent_at) as date
+         FROM communications
+         ${whereClause}
+         GROUP BY sent_by, DATE(sent_at)
+       ) grouped_calls`,
+      params
+    );
+    const totalGroupedRowsRaw = totalGroupedRowsResult?.[0]?.total ?? 0;
+    const totalGroupedRows = typeof totalGroupedRowsRaw === 'bigint'
+      ? Number(totalGroupedRowsRaw)
+      : Number(totalGroupedRowsRaw || 0);
+
+    // Aggregate calls by user and date (paginated)
     const [callReports] = await pool.execute(
       `SELECT 
         sent_by as user_id,
@@ -123,12 +148,29 @@ export const getDailyCallReports = async (req, res) => {
        FROM communications
        ${whereClause}
        GROUP BY sent_by, DATE(sent_at)
-       ORDER BY date DESC, sent_by ASC`,
+       ORDER BY date DESC, sent_by ASC
+       LIMIT ${limitNum} OFFSET ${offsetNum}`,
       params
     );
 
-    // Get user details
-    const userIds = [...new Set(callReports.map((r) => r.user_id).filter(Boolean))];
+    // Aggregate full-range summary (not paginated)
+    const [summaryRows] = await pool.execute(
+      `SELECT
+        sent_by as user_id,
+        COUNT(*) as total_calls,
+        SUM(COALESCE(duration_seconds, 0)) as total_duration,
+        COUNT(DISTINCT DATE(sent_at)) as days
+       FROM communications
+       ${whereClause}
+       GROUP BY sent_by`,
+      params
+    );
+
+    // Get user details for both paginated rows and full summary rows
+    const userIds = [...new Set([
+      ...callReports.map((r) => r.user_id),
+      ...summaryRows.map((r) => r.user_id),
+    ].filter(Boolean))];
     let userMap = {};
     if (userIds.length > 0) {
       const userPlaceholders = userIds.map(() => '?').join(',');
@@ -161,38 +203,35 @@ export const getDailyCallReports = async (req, res) => {
       };
     });
 
-    // Group by user for summary
-    const userSummary = {};
-    (formattedReports || []).forEach((report) => {
-      if (report && report.userId) {
-        if (!userSummary[report.userId]) {
-          userSummary[report.userId] = {
-            userId: report.userId,
-            userName: report.userName || 'Unknown',
-            userEmail: report.userEmail || '',
-            totalCalls: 0,
-            totalDuration: 0,
-            days: 0,
-          };
-        }
-        userSummary[report.userId].totalCalls += report.callCount || 0;
-        userSummary[report.userId].totalDuration += report.totalDuration || 0;
-        userSummary[report.userId].days += 1;
-      }
+    // Convert full-range summary to array and calculate averages
+    const userSummaryArray = (summaryRows || []).map((summary) => {
+      const userId = summary.user_id || 'unknown';
+      const totalCalls = Number(summary.total_calls || 0);
+      const totalDuration = Number(summary.total_duration || 0);
+      const days = Number(summary.days || 0);
+      return {
+        userId,
+        userName: userMap[userId]?.name || 'Unknown',
+        userEmail: userMap[userId]?.email || '',
+        totalCalls,
+        totalDuration,
+        days,
+        averageCallsPerDay: days > 0 ? parseFloat((totalCalls / days).toFixed(2)) : 0,
+        averageDuration: totalCalls > 0 ? Math.round(totalDuration / totalCalls) : 0,
+      };
     });
-
-    // Convert to array and calculate averages
-    const userSummaryArray = Object.values(userSummary).map((summary) => ({
-      ...summary,
-      averageCallsPerDay: summary.days > 0 ? parseFloat((summary.totalCalls / summary.days).toFixed(2)) : 0,
-      averageDuration: summary.totalCalls > 0 ? Math.round(summary.totalDuration / summary.totalCalls) : 0,
-    }));
 
     return successResponse(
       res,
       {
         reports: formattedReports || [],
         summary: userSummaryArray || [],
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: totalGroupedRows,
+          pages: Math.ceil(totalGroupedRows / limitNum),
+        },
         dateRange: {
           start: hasDates ? start.toISOString() : null,
           end: hasDates ? end.toISOString() : null,
