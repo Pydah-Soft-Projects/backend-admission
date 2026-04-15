@@ -73,6 +73,8 @@ export const assignLeads = async (req, res) => {
     const isProRole = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
 
     let leadIdsToAssign = [];
+    const skippedProAlreadyAssignedLeadIds = [];
+    const skippedProConcurrentLeadIds = [];
 
     // Single assignment mode: assign specific lead IDs
     if (leadIds && Array.isArray(leadIds) && leadIds.length > 0) {
@@ -86,7 +88,7 @@ export const assignLeads = async (req, res) => {
       // Check if leads exist
       const placeholders = validLeadIds.map(() => '?').join(',');
       const [existingLeads] = await pool.execute(
-        `SELECT id, assigned_to FROM leads WHERE id IN (${placeholders})`,
+        `SELECT id, assigned_to, assigned_to_pro FROM leads WHERE id IN (${placeholders})`,
         validLeadIds
       );
 
@@ -94,7 +96,20 @@ export const assignLeads = async (req, res) => {
         return errorResponse(res, 'No leads found with the provided IDs', 404);
       }
 
-      leadIdsToAssign = existingLeads.map((lead) => lead.id);
+      if (isProRole) {
+        const assignableLeads = [];
+        for (const lead of existingLeads) {
+          const currentProAssignee = lead.assigned_to_pro;
+          if (currentProAssignee && currentProAssignee !== userId) {
+            skippedProAlreadyAssignedLeadIds.push(lead.id);
+            continue;
+          }
+          assignableLeads.push(lead.id);
+        }
+        leadIdsToAssign = assignableLeads;
+      } else {
+        leadIdsToAssign = existingLeads.map((lead) => lead.id);
+      }
     } else {
       // Bulk assignment mode: assign based on filters and count
       if (!count || count <= 0) {
@@ -181,6 +196,41 @@ export const assignLeads = async (req, res) => {
       leadIdsToAssign = availableLeads.map((lead) => lead.id);
     }
 
+    if (leadIdsToAssign.length === 0) {
+      if (isProRole && skippedProAlreadyAssignedLeadIds.length > 0) {
+        return successResponse(
+          res,
+          {
+            assigned: 0,
+            requested: leadIds ? leadIds.length : parseInt(count),
+            skippedAlreadyAssignedToAnotherPro: skippedProAlreadyAssignedLeadIds.length,
+            skippedLeadIds: skippedProAlreadyAssignedLeadIds,
+            userId,
+            userName: user.name,
+            targetRole: user.role_name,
+            mode: leadIds ? 'single' : 'bulk',
+            message: 'All selected leads are already assigned to another PRO',
+          },
+          'No leads assigned because selected leads are already assigned to another PRO',
+          200
+        );
+      }
+      return successResponse(
+        res,
+        {
+          assigned: 0,
+          requested: leadIds ? leadIds.length : parseInt(count),
+          userId,
+          userName: user.name,
+          targetRole: user.role_name,
+          mode: leadIds ? 'single' : 'bulk',
+          message: 'No eligible leads found for assignment',
+        },
+        'No leads eligible for assignment',
+        200
+      );
+    }
+
     // Get leads before update to check status
     const placeholders = leadIdsToAssign.map(() => '?').join(',');
     const [leadsToAssign] = await pool.execute(
@@ -191,6 +241,7 @@ export const assignLeads = async (req, res) => {
     // Update leads and create activity logs
     const now = new Date();
     let modifiedCount = 0;
+    const successfullyAssignedLeadIds = [];
 
     for (const lead of leadsToAssign) {
       const oldStatus = lead.lead_status && String(lead.lead_status).trim() !== ''
@@ -210,18 +261,28 @@ export const assignLeads = async (req, res) => {
       if (isProRole) {
         updateQuery = `UPDATE leads SET 
           assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
-         WHERE id = ?`;
+         WHERE id = ? AND (assigned_to_pro IS NULL OR assigned_to_pro = ?)`;
       } else {
         updateQuery = `UPDATE leads SET 
           assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, call_status = 'Assigned', updated_at = NOW()
          WHERE id = ?`;
       }
 
-      updateParams = yearNum != null && !Number.isNaN(yearNum)
-        ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id]
-        : [userId, currentUserId, newStatus, targetDate || null, lead.id];
+      if (isProRole) {
+        updateParams = yearNum != null && !Number.isNaN(yearNum)
+          ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id, userId]
+          : [userId, currentUserId, newStatus, targetDate || null, lead.id, userId];
+      } else {
+        updateParams = yearNum != null && !Number.isNaN(yearNum)
+          ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id]
+          : [userId, currentUserId, newStatus, targetDate || null, lead.id];
+      }
 
-      await pool.execute(updateQuery, updateParams);
+      const [updateResult] = await pool.execute(updateQuery, updateParams);
+      if (isProRole && Number(updateResult?.affectedRows || 0) === 0) {
+        skippedProConcurrentLeadIds.push(lead.id);
+        continue;
+      }
 
       // Create activity log
       const activityLogId = uuidv4();
@@ -251,6 +312,7 @@ export const assignLeads = async (req, res) => {
       );
 
       modifiedCount++;
+      successfullyAssignedLeadIds.push(lead.id);
     }
 
     // Send notifications (async, don't wait for it)
@@ -259,10 +321,15 @@ export const assignLeads = async (req, res) => {
     // Get full lead details for notification AND response (limit to 50 for email display, but we want all for export?)
     // Verify: If we assign 1000 leads, returning 1000 objects is fine.
     const exportExtraFields = isProRole ? ', district, mandal, village, address' : '';
-    const [leadsDetails] = await pool.execute(
-      `SELECT id, name, phone, enquiry_number, notes${exportExtraFields} FROM leads WHERE id IN (${placeholders})`,
-      leadIdsToAssign
-    );
+    let leadsDetails = [];
+    if (successfullyAssignedLeadIds.length > 0) {
+      const successPlaceholders = successfullyAssignedLeadIds.map(() => '?').join(',');
+      const [rows] = await pool.execute(
+        `SELECT id, name, phone, enquiry_number, notes${exportExtraFields} FROM leads WHERE id IN (${successPlaceholders})`,
+        successfullyAssignedLeadIds
+      );
+      leadsDetails = rows;
+    }
 
     // Format for notification (limit to 50)
     const formattedLeadsNotification = leadsDetails.slice(0, 50).map(l => ({
@@ -305,6 +372,8 @@ export const assignLeads = async (req, res) => {
       {
         assigned: modifiedCount,
         requested: leadIds ? leadIds.length : parseInt(count),
+        skippedAlreadyAssignedToAnotherPro: skippedProAlreadyAssignedLeadIds.length,
+        skippedDueToConcurrentProAssignment: skippedProConcurrentLeadIds.length,
         userId,
         userName: user.name,
         targetRole: user.role_name,
@@ -312,6 +381,7 @@ export const assignLeads = async (req, res) => {
         district: district || 'All',
         state: state || 'All',
         mode: leadIds ? 'single' : 'bulk',
+        skippedLeadIds: [...skippedProAlreadyAssignedLeadIds, ...skippedProConcurrentLeadIds],
         assignedLeads: assignedLeadsForExport,
       },
       `Successfully assigned ${modifiedCount} lead${modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
