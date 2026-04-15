@@ -100,7 +100,7 @@ export const assignLeads = async (req, res) => {
         const assignableLeads = [];
         for (const lead of existingLeads) {
           const currentProAssignee = lead.assigned_to_pro;
-          if (currentProAssignee && currentProAssignee !== userId) {
+          if (currentProAssignee) {
             skippedProAlreadyAssignedLeadIds.push(lead.id);
             continue;
           }
@@ -261,7 +261,7 @@ export const assignLeads = async (req, res) => {
       if (isProRole) {
         updateQuery = `UPDATE leads SET 
           assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
-         WHERE id = ? AND (assigned_to_pro IS NULL OR assigned_to_pro = ?)`;
+         WHERE id = ? AND assigned_to_pro IS NULL`;
       } else {
         updateQuery = `UPDATE leads SET 
           assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, call_status = 'Assigned', updated_at = NOW()
@@ -270,8 +270,8 @@ export const assignLeads = async (req, res) => {
 
       if (isProRole) {
         updateParams = yearNum != null && !Number.isNaN(yearNum)
-          ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id, userId]
-          : [userId, currentUserId, newStatus, targetDate || null, lead.id, userId];
+          ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id]
+          : [userId, currentUserId, newStatus, targetDate || null, lead.id];
       } else {
         updateParams = yearNum != null && !Number.isNaN(yearNum)
           ? [userId, currentUserId, newStatus, targetDate || null, yearNum, lead.id]
