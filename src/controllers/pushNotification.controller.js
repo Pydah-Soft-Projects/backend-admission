@@ -272,8 +272,8 @@ export const sendTestNotificationsToAll = async (req, res) => {
                       
                       <p>You can use the buttons below to navigate to different sections:</p>
                       <div style="text-align: center; margin: 20px 0;">
-                        <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/superadmin/dashboard" class="button">📊 View Dashboard</a>
-                        <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/superadmin/leads" class="button">👥 View Leads</a>
+                        <a href="${process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in'}/superadmin/dashboard" class="button">📊 View Dashboard</a>
+                        <a href="${process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in'}/superadmin/leads" class="button">👥 View Leads</a>
                       </div>
                       
                       <p style="margin-top: 30px;">If you received this email, the email notification system is working correctly!</p>

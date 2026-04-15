@@ -46,13 +46,6 @@ const setCached = (key, value, ttlMs) => {
   });
 };
 
-const toLocalYmd = (date) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
-
 const getCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
   const key = `count:${scopeKey}:${sql}:${stableStringify(params)}`;
   const cached = getCached(key);
@@ -165,14 +158,14 @@ export const getLeads = async (req, res) => {
     const autoRescheduledFromYesterday = new Map();
 
     /**
-     * Auto-rollover missed scheduled calls:
-     * if a call was scheduled yesterday and no call communication was logged yesterday,
-     * move it to today so it appears in today's scheduled calls list.
+     * Auto-rollover missed scheduled calls (runs when `scheduledOn` is set — dashboards pass the viewer's local YYYY-MM-DD):
+     * If next_scheduled_call was on the calendar day *before* `scheduledOn` and there is no outgoing `call` communication
+     * on that same scheduled calendar day, bump next_scheduled_call by +1 day so the lead appears under `scheduledOn`.
+     * Anchors to the query param (not server local date) so browser "today" and rollover stay aligned when API runs in UTC.
      */
     if (req.query.scheduledOn) {
-      const todayYmd = toLocalYmd(new Date());
       const requestedYmd = String(req.query.scheduledOn).slice(0, 10);
-      if (requestedYmd === todayYmd) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(requestedYmd)) {
         const [missedRows] = await pool.execute(
           `SELECT l.id, l.next_scheduled_call
            FROM leads l

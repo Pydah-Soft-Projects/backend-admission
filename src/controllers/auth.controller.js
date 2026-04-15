@@ -458,7 +458,7 @@ export const resetPasswordDirectly = async (req, res) => {
     );
 
     // Send confirmation SMS with new password
-    const loginUrl = process.env.FRONTEND_URL || 'http://admissions.pydah.edu.in';
+    const loginUrl = process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in';
 
     try {
       await bulkSmsService.sendPasswordResetSuccess(

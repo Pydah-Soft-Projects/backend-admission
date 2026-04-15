@@ -307,7 +307,7 @@ export const shortenUtmUrl = async (req, res) => {
     const formattedUrl = formatShortUrl(shortUrl, clicks);
 
     // Get frontend URL from environment
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in';
     const shortUrlLink = `${frontendUrl}/s/${formattedUrl.shortCode}`;
 
     return successResponse(
@@ -378,7 +378,7 @@ export const getUrlAnalytics = async (req, res) => {
       referer: c.referer,
     }));
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in';
     const shortUrlLink = urlRecord.short_code
       ? `${frontendUrl}/s/${urlRecord.short_code}`
       : null;
@@ -626,7 +626,7 @@ export const getAllShortUrls = async (req, res) => {
       [userId]
     );
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in';
     const shortUrlsWithLinks = shortUrls.map((url) => {
       const formatted = formatShortUrl(url);
       return {

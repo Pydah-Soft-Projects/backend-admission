@@ -231,7 +231,7 @@ export const notifyLeadAssignment = async ({ userId, leadCount, leads = [], isBu
                       .join('')}</ul>`
                   : ''}
                 <p>Please log in to your dashboard to view and manage the assigned leads.</p>
-                <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/superadmin/leads" class="button">View Leads</a>
+                <a href="${process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in'}/superadmin/leads" class="button">View Leads</a>
                 <p style="margin-top: 30px;">Best regards,<br>CRM Admissions Team</p>
               </div>
               <div class="footer">
