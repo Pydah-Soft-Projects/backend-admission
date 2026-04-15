@@ -147,6 +147,36 @@ export const getUsers = async (req, res) => {
   }
 };
 
+// @desc    Get lightweight assignable users list
+// @route   GET /api/users/assignable
+// @access  Private (Super Admin)
+export const getAssignableUsers = async (req, res) => {
+  try {
+    const pool = getPool();
+    const [users] = await pool.execute(
+      `SELECT id, name, email, role_name, is_active
+       FROM users
+       WHERE is_active = 1
+         AND role_name IN ('Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO')
+       ORDER BY name ASC`
+    );
+
+    const payload = (users || []).map((u) => ({
+      id: u.id,
+      _id: u.id,
+      name: u.name,
+      email: u.email,
+      roleName: u.role_name,
+      isActive: u.is_active === 1 || u.is_active === true,
+    }));
+
+    return successResponse(res, payload, 'Assignable users retrieved successfully', 200);
+  } catch (error) {
+    console.error('Get assignable users error:', error);
+    return errorResponse(res, error.message || 'Failed to get assignable users', 500);
+  }
+};
+
 // @desc    Get single user
 // @route   GET /api/users/:id
 // @access  Private (Super Admin or Manager for their team members)

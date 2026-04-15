@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   getUsers,
+  getAssignableUsers,
   getUser,
   createUser,
   updateUser,
@@ -26,6 +27,7 @@ router.get('/me/login-logs', getMyLoginLogs);
 
 // Routes that require Super Admin only
 router.route('/').get(isSuperAdmin, getUsers).post(isSuperAdmin, createUser);
+router.get('/assignable', isSuperAdmin, getAssignableUsers);
 router.get('/all/login-logs', isSuperAdmin, getAllUserLoginLogs);
 router.get('/hrms/search', isSuperAdmin, searchHrmsEmployees);
 router.get('/hrms/:empNo', isSuperAdmin, getHrmsEmployeeByEmpNo);

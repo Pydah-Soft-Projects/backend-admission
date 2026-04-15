@@ -401,6 +401,7 @@ export const getAssignmentStats = async (req, res) => {
     const { mandal, district, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
     const pool = getPool();
     const includeBreakdowns = String(req.query.includeBreakdowns || 'true').toLowerCase() !== 'false';
+    const summaryOnly = String(req.query.summaryOnly || 'false').toLowerCase() === 'true';
     const geoBreakdown = req.query.geoBreakdown ? String(req.query.geoBreakdown).trim().toLowerCase() : '';
     const cacheKey = stableStringify({
       mandal,
@@ -413,6 +414,7 @@ export const getAssignmentStats = async (req, res) => {
       cycleNumber,
       targetRole: req.query.targetRole,
       includeBreakdowns,
+      summaryOnly,
       geoBreakdown,
     });
     const cached = getCachedAssignmentStats(cacheKey);
@@ -539,21 +541,21 @@ export const getAssignmentStats = async (req, res) => {
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
-    const [unassignedCountResult, totalLeadsResult, trulyUnassignedResult] = await Promise.all([
-      pool.execute(`SELECT COUNT(*) as total FROM leads ${whereClause}`, params),
-      pool.execute(`SELECT COUNT(*) as total FROM leads ${baseWhere}`, baseParams),
-      pool.execute(`SELECT COUNT(*) as total FROM leads ${trulyUnassignedWhere}`, params),
-    ]);
-    const unassignedCount = unassignedCountResult[0][0].total;
-    const totalLeads = totalLeadsResult[0][0].total;
-    const trulyUnassignedCount = trulyUnassignedResult[0][0].total;
-
-    // Get assigned leads count (in same scope)
-    const assignedCount = totalLeads - trulyUnassignedCount;
+    const [summaryRows] = await pool.execute(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN ${isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL'} THEN 1 ELSE 0 END) AS unassigned
+       FROM leads ${baseWhere}`,
+      baseParams
+    );
+    const totalLeads = Number(summaryRows?.[0]?.total || 0);
+    const trulyUnassignedCount = Number(summaryRows?.[0]?.unassigned || 0);
+    const unassignedCount = trulyUnassignedCount;
+    const assignedCount = Math.max(totalLeads - trulyUnassignedCount, 0);
 
     let mandalBreakdown = [];
     let stateBreakdown = [];
-    if (includeBreakdowns) {
+    if (includeBreakdowns && !summaryOnly) {
       const [mandalRows, stateRows] = await Promise.all([
         pool.execute(
           `SELECT mandal, COUNT(*) as count 
