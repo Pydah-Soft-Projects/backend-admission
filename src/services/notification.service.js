@@ -457,3 +457,88 @@ export const notifyLeadAssignedToCounsellor = async (lead, user) => {
   return results;
 };
 
+/**
+ * Notify Super Admin/Sub Super Admin about reclaimed leads by previous assignee.
+ * @param {Object} options
+ * @param {Array<{userId: string, userName: string, roleName?: string, count: number}>} options.reclaimedByUser
+ * @param {number} options.totalReclaimed
+ * @returns {Promise<void>}
+ */
+export const notifyLeadReclamationSummary = async ({ reclaimedByUser = [], totalReclaimed = 0 }) => {
+  try {
+    if (!Array.isArray(reclaimedByUser) || reclaimedByUser.length === 0 || totalReclaimed <= 0) {
+      return;
+    }
+
+    const pool = getPool();
+    const [admins] = await pool.execute(
+      `SELECT id, name
+       FROM users
+       WHERE role_name IN ('Super Admin', 'Sub Super Admin')
+         AND is_active = ?`,
+      [true]
+    );
+
+    if (!admins || admins.length === 0) return;
+
+    const sorted = [...reclaimedByUser]
+      .filter((x) => x && x.userId && Number(x.count) > 0)
+      .sort((a, b) => Number(b.count) - Number(a.count));
+    if (!sorted.length) return;
+
+    const topLines = sorted
+      .slice(0, 5)
+      .map((x) => `${x.userName || 'Unknown'}: ${x.count}`)
+      .join(', ');
+
+    const title = `Lead Reclamation Summary (${totalReclaimed})`;
+    const body = `Reclaimed ${totalReclaimed} lead${totalReclaimed !== 1 ? 's' : ''}. By user: ${topLines}${sorted.length > 5 ? ', ...' : ''}`;
+
+    const adminIds = admins.map((a) => a.id);
+    const pushResult = await sendPushNotificationToUsers(adminIds, {
+      title,
+      body,
+      url: '/superadmin/reports?tab=calls',
+      data: {
+        type: 'lead_reclamation',
+        totalReclaimed,
+        reclaimedByUser: sorted.slice(0, 20),
+        timestamp: Date.now(),
+      },
+    });
+
+    const saves = admins.map(async (admin) => {
+      try {
+        await pool.execute(
+          `INSERT INTO notifications (
+            id, user_id, type, title, message, data,
+            channel_push, channel_email, channel_sms,
+            action_url, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            uuidv4(),
+            admin.id,
+            'lead_reclamation',
+            title,
+            body,
+            JSON.stringify({
+              totalReclaimed,
+              reclaimedByUser: sorted,
+            }),
+            pushResult.sent > 0 ? 1 : 0,
+            0,
+            0,
+            '/superadmin/reports?tab=calls',
+          ]
+        );
+      } catch (error) {
+        console.error(`[Notification] Error saving reclamation notification for admin ${admin.id}:`, error);
+      }
+    });
+
+    await Promise.all(saves);
+  } catch (error) {
+    console.error('[Notification] Error in notifyLeadReclamationSummary:', error);
+  }
+};
+

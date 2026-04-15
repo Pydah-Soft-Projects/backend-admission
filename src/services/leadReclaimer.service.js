@@ -1,5 +1,6 @@
 import { getPool } from '../config-sql/database.js';
 import { v4 as uuidv4 } from 'uuid';
+import { notifyLeadReclamationSummary } from './notification.service.js';
 
 /**
  * Reclaims leads that have reached their target date and are marked as 'Not Interested'.
@@ -31,10 +32,12 @@ export const reclaimExpiredLeads = async () => {
     console.log(`[LeadReclaimer] Found ${leadsToReclaim.length} leads to reclaim.`);
 
     let reclaimedCount = 0;
+    const reclaimedByPreviousAssignee = new Map();
 
     for (const lead of leadsToReclaim) {
       const newCycle = (lead.cycle_number || 1) + 1;
       const oldStatus = lead.lead_status;
+      const previousAssignee = lead.assigned_to || lead.assigned_to_pro || null;
       
       // Update the lead record
       await pool.execute(`
@@ -71,13 +74,52 @@ export const reclaimExpiredLeads = async () => {
             reclamation: {
               previousCycle: lead.cycle_number || 1,
               newCycle: newCycle,
-              previousAssignee: lead.assigned_to || lead.assigned_to_pro
+              previousAssignee
             },
           }),
         ]
       );
 
       reclaimedCount++;
+      if (previousAssignee) {
+        reclaimedByPreviousAssignee.set(
+          previousAssignee,
+          (reclaimedByPreviousAssignee.get(previousAssignee) || 0) + 1
+        );
+      }
+    }
+
+    try {
+      const previousAssigneeIds = [...reclaimedByPreviousAssignee.keys()];
+      let userNameById = new Map();
+
+      if (previousAssigneeIds.length > 0) {
+        const placeholders = previousAssigneeIds.map(() => '?').join(',');
+        const [users] = await pool.execute(
+          `SELECT id, name, role_name FROM users WHERE id IN (${placeholders})`,
+          previousAssigneeIds
+        );
+        userNameById = new Map(
+          (users || []).map((u) => [u.id, { name: u.name, roleName: u.role_name }])
+        );
+      }
+
+      const reclaimedByUser = previousAssigneeIds.map((userId) => {
+        const meta = userNameById.get(userId);
+        return {
+          userId,
+          userName: meta?.name || 'Unknown User',
+          roleName: meta?.roleName || '',
+          count: reclaimedByPreviousAssignee.get(userId) || 0,
+        };
+      });
+
+      await notifyLeadReclamationSummary({
+        reclaimedByUser,
+        totalReclaimed: reclaimedCount,
+      });
+    } catch (notificationError) {
+      console.error('[LeadReclaimer] Error sending reclamation summary notification:', notificationError);
     }
 
     console.log(`[LeadReclaimer] Successfully reclaimed ${reclaimedCount} leads.`);
