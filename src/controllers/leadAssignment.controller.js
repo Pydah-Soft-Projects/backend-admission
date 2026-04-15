@@ -1816,6 +1816,7 @@ export const getUserAnalytics = async (req, res) => {
     let assignmentDateSummaryRows = [];
     let assignmentDateTargetRows = [];
     let assignmentDateStudentGroupRows = [];
+    let assignmentDateMandalRows = [];
     let reclaimedUniqueRows = [];
     if (shouldIncludeAssignmentDetails) {
       const assignmentDateConditions = [];
@@ -1943,6 +1944,29 @@ export const getUserAnalytics = async (req, res) => {
       assignmentParams
       );
 
+      const [assignmentMandalRows] = await pool.execute(
+      `SELECT
+        ae.assigned_to_user_id,
+        ae.assigned_date,
+        COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') as mandal,
+        COUNT(*) as count
+      FROM (
+        SELECT DISTINCT
+          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
+          DATE(a.created_at) as assigned_date,
+          a.lead_id
+        FROM activity_logs a
+        LEFT JOIN leads l ON l.id = a.lead_id
+        WHERE a.type = 'status_change'
+          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+          ${assignmentDateWhere}
+      ) ae
+      LEFT JOIN leads l ON l.id = ae.lead_id
+      GROUP BY ae.assigned_to_user_id, ae.assigned_date, COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown')
+      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, count DESC`,
+      assignmentParams
+      );
+
       const [reclaimedDistinctRows] = await pool.execute(
       `SELECT
         ae.assigned_to_user_id,
@@ -1966,6 +1990,7 @@ export const getUserAnalytics = async (req, res) => {
       assignmentDateSummaryRows = assignmentSummaryRows;
       assignmentDateTargetRows = assignmentTargetsRows;
       assignmentDateStudentGroupRows = assignmentStudentGroupRows;
+      assignmentDateMandalRows = assignmentMandalRows;
       reclaimedUniqueRows = reclaimedDistinctRows;
     }
 
@@ -2028,6 +2053,7 @@ export const getUserAnalytics = async (req, res) => {
           leadStatusCounts: {},
           currentlyUnassigned: 0,
           studentGroupCounts: {},
+          mandalCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2059,6 +2085,7 @@ export const getUserAnalytics = async (req, res) => {
           reclaimedCount: 0,
           targetDateCounts: {},
           studentGroupCounts: {},
+          mandalCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2109,6 +2136,7 @@ export const getUserAnalytics = async (req, res) => {
           reclaimedCount: 0,
           targetDateCounts: {},
           studentGroupCounts: {},
+          mandalCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2145,6 +2173,7 @@ export const getUserAnalytics = async (req, res) => {
           reclaimedCount: 0,
           targetDateCounts: {},
           studentGroupCounts: {},
+          mandalCounts: {},
         });
       }
       const bucket = perDate.get(dateKey);
@@ -2154,6 +2183,40 @@ export const getUserAnalytics = async (req, res) => {
       const groupLabel = String(row.student_group || 'Unknown');
       const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
       bucket.studentGroupCounts[groupLabel] = (bucket.studentGroupCounts[groupLabel] || 0) + count;
+    });
+
+    assignmentDateMandalRows.forEach((row) => {
+      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
+      if (!userKey) return;
+      if (!assignmentByDateMap.has(userKey)) {
+        assignmentByDateMap.set(userKey, new Map());
+      }
+      const perDate = assignmentByDateMap.get(userKey);
+      const dateKey = row.assigned_date instanceof Date
+        ? row.assigned_date.toISOString().slice(0, 10)
+        : String(row.assigned_date || '').slice(0, 10);
+      if (!dateKey) return;
+      if (!perDate.has(dateKey)) {
+        perDate.set(dateKey, {
+          date: dateKey,
+          totalAssigned: 0,
+          leadStatusCounts: {},
+          currentlyUnassigned: 0,
+          currentlyWithSameUser: 0,
+          movedToOtherUser: 0,
+          reclaimedCount: 0,
+          targetDateCounts: {},
+          studentGroupCounts: {},
+          mandalCounts: {},
+        });
+      }
+      const bucket = perDate.get(dateKey);
+      if (!bucket.mandalCounts || typeof bucket.mandalCounts !== 'object') {
+        bucket.mandalCounts = {};
+      }
+      const mandalLabel = String(row.mandal || 'Unknown');
+      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
+      bucket.mandalCounts[mandalLabel] = (bucket.mandalCounts[mandalLabel] || 0) + count;
     });
 
     const reclaimedUniqueMap = new Map();
