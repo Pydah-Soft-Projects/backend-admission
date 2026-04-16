@@ -370,22 +370,28 @@ export const getLeads = async (req, res) => {
       'leads-needs-update'
     );
 
-    // Get leads with pagination and user info
-    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
+    // Get leads with pagination and user info.
+    // Optimize by paginating lead IDs first, then joining users only for the page slice.
+    // This avoids expensive joins across the full filtered lead set.
+    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these.
     const query = `
       SELECT 
         l.*,
         u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
         u2.id as uploaded_by_id, u2.name as uploaded_by_name,
         u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
-      FROM leads l
+      FROM (
+        SELECT l.id
+        FROM leads l
+        ${whereClause}
+        ORDER BY l.created_at DESC, l.id ASC
+        LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+      ) page_ids
+      INNER JOIN leads l ON l.id = page_ids.id
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
       LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
-      ${whereClause}
-
       ORDER BY l.created_at DESC, l.id ASC
-      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `;
 
     const [leads] = await pool.execute(query, params);
