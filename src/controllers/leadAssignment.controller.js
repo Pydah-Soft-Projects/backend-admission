@@ -1009,66 +1009,85 @@ export const getUserLeadAnalytics = async (req, res) => {
     }
     const whereClause = conditions.join(' AND ');
 
-    // Get total leads assigned to user (with optional filters)
-    const [totalLeadsResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads WHERE ${whereClause}`,
-      params
-    );
-    const totalLeads = totalLeadsResult[0].total;
-
-    // Get grand total assigned to user (without filters)
-    const [overallTotalResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads WHERE ${assignmentCondition}`,
-      isProRole ? [userId, userId] : [userId]
-    );
-    const overallTotalLeads = overallTotalResult[0].total;
-
-    // Dashboard breakdown: PRO → visit_status, Student Counselor → call_status, others → lead_status
+    // Dashboard breakdown: PRO -> visit_status, Student Counselor -> call_status, others -> lead_status
     const statusGroupExpr = isProRole
       ? `COALESCE(NULLIF(TRIM(visit_status), ''), 'Not set')`
       : isStudentCounselor
         ? `COALESCE(NULLIF(TRIM(call_status), ''), 'Not set')`
         : 'lead_status';
 
-    const [statusBreakdown] = await pool.execute(
-      `SELECT ${statusGroupExpr} AS lead_status, COUNT(*) as count 
-       FROM leads 
-       WHERE ${whereClause}
-       GROUP BY ${statusGroupExpr}
-       ORDER BY count DESC`,
-      params
-    );
+    // Get recent activity (last 7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const recentThreshold = sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ');
 
-    // Get leads by mandal
-    const [mandalBreakdown] = await pool.execute(
-      `SELECT mandal, COUNT(*) as count 
-       FROM leads 
-       WHERE ${whereClause}
-       GROUP BY mandal 
-       ORDER BY count DESC 
-       LIMIT 10`,
-      params
-    );
+    // Run independent analytics queries in parallel to reduce API latency.
+    const [
+      totalLeadsResultWrap,
+      overallTotalResultWrap,
+      statusBreakdownWrap,
+      mandalBreakdownWrap,
+      stateBreakdownWrap,
+      studentGroupBreakdownWrap,
+      recentLeadsResultWrap,
+    ] = await Promise.all([
+      pool.execute(
+        `SELECT COUNT(*) as total FROM leads WHERE ${whereClause}`,
+        params
+      ),
+      pool.execute(
+        `SELECT COUNT(*) as total FROM leads WHERE ${assignmentCondition}`,
+        isProRole ? [userId, userId] : [userId]
+      ),
+      pool.execute(
+        `SELECT ${statusGroupExpr} AS lead_status, COUNT(*) as count 
+         FROM leads 
+         WHERE ${whereClause}
+         GROUP BY ${statusGroupExpr}
+         ORDER BY count DESC`,
+        params
+      ),
+      pool.execute(
+        `SELECT mandal, COUNT(*) as count 
+         FROM leads 
+         WHERE ${whereClause}
+         GROUP BY mandal 
+         ORDER BY count DESC 
+         LIMIT 10`,
+        params
+      ),
+      pool.execute(
+        `SELECT state, COUNT(*) as count 
+         FROM leads 
+         WHERE ${whereClause}
+         GROUP BY state 
+         ORDER BY count DESC`,
+        params
+      ),
+      pool.execute(
+        `SELECT student_group, COUNT(*) as count 
+         FROM leads 
+         WHERE ${whereClause}
+         GROUP BY student_group 
+         ORDER BY count DESC`,
+        params
+      ),
+      pool.execute(
+        `SELECT COUNT(*) as total FROM leads WHERE ${whereClause} AND updated_at >= ?`,
+        [...params, recentThreshold]
+      ),
+    ]);
 
-    // Get leads by state
-    const [stateBreakdown] = await pool.execute(
-      `SELECT state, COUNT(*) as count 
-       FROM leads 
-       WHERE ${whereClause}
-       GROUP BY state 
-       ORDER BY count DESC`,
-      params
-    );
+    const totalLeadsResult = totalLeadsResultWrap[0];
+    const overallTotalResult = overallTotalResultWrap[0];
+    const statusBreakdown = statusBreakdownWrap[0];
+    const mandalBreakdown = mandalBreakdownWrap[0];
+    const stateBreakdown = stateBreakdownWrap[0];
+    const studentGroupBreakdown = studentGroupBreakdownWrap[0];
+    const recentLeadsResult = recentLeadsResultWrap[0];
 
-    // Get leads by student group
-    const [studentGroupBreakdown] = await pool.execute(
-      `SELECT student_group, COUNT(*) as count 
-       FROM leads 
-       WHERE ${whereClause}
-       GROUP BY student_group 
-       ORDER BY count DESC`,
-      params
-    );
+    const totalLeads = totalLeadsResult[0].total;
+    const overallTotalLeads = overallTotalResult[0].total;
 
     // Convert status breakdown to object (keys are call/visit/pipeline values per role)
     const statusCounts = {};
@@ -1083,14 +1102,6 @@ export const getUserLeadAnalytics = async (req, res) => {
       statusCounts[label] = item.count;
     });
 
-    // Get recent activity (last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recentParams = [...params, sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ')];
-    const [recentLeadsResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM leads WHERE ${whereClause} AND updated_at >= ?`,
-      recentParams
-    );
     const recentLeads = recentLeadsResult[0].total;
 
     return successResponse(

@@ -39,6 +39,16 @@ const INDEXES = [
     name: 'idx_leads_academic_student_created',
     ddl: 'CREATE INDEX idx_leads_academic_student_created ON leads (academic_year, student_group, created_at DESC, id ASC)',
   },
+  {
+    table: 'leads',
+    name: 'idx_leads_assign_year_group_created_id',
+    ddl: 'CREATE INDEX idx_leads_assign_year_group_created_id ON leads (assigned_to, academic_year, student_group, created_at DESC, id ASC)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_assignpro_year_group_created_id',
+    ddl: 'CREATE INDEX idx_leads_assignpro_year_group_created_id ON leads (assigned_to_pro, academic_year, student_group, created_at DESC, id ASC)',
+  },
 ];
 
 const run = async () => {
