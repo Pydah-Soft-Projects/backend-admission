@@ -518,10 +518,14 @@ export const notifyLeadReclamationSummary = async ({ reclaimedByUser = [], total
           [
             uuidv4(),
             admin.id,
-            'lead_reclamation',
+            // DB CHECK constraint for notifications.type allows only:
+            // lead_assignment, lead_created, call_reminder, status_update, system
+            // Keep detailed event discriminator in data payload.
+            'system',
             title,
             body,
             JSON.stringify({
+              type: 'lead_reclamation',
               totalReclaimed,
               reclaimedByUser: sorted,
             }),
