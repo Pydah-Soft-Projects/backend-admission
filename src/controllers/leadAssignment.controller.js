@@ -679,20 +679,29 @@ export const getAssignmentStats = async (req, res) => {
     // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
     if (forBreakdown === 'school' || forBreakdown === 'college') {
       const table = forBreakdown === 'school' ? 'schools' : 'colleges';
+      const institutionNameExpr = `LOWER(TRIM(COALESCE(
+        JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')),
+        JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')),
+        ''
+      )))`;
+      const institutionJoinExpr = `LOWER(TRIM(i.name))`;
+      const leadAggConditions = [
+        ...baseConditions,
+        isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL',
+      ];
+      const leadAggWhere = leadAggConditions.length > 0 ? `WHERE ${leadAggConditions.join(' AND ')}` : '';
+
       const [institutionRows] = await pool.execute(
-          `SELECT i.id, i.name, COUNT(l.id) as count
+          `SELECT i.id, i.name, la.count
          FROM ${table} i
-         LEFT JOIN leads l
-           ON LOWER(TRIM(COALESCE(
-             JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.school_or_college_name')),
-             JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.schoolOrCollegeName')),
-             ''
-           ))) = LOWER(TRIM(i.name))
-           ${baseConditions.length > 0 ? `AND ${baseConditions.join(' AND ')}` : ''}
-           AND ${isProTarget ? 'l.assigned_to_pro IS NULL' : 'l.assigned_to IS NULL'}
+         INNER JOIN (
+           SELECT ${institutionNameExpr} AS institution_key, COUNT(*) AS count
+           FROM leads
+           ${leadAggWhere}
+           GROUP BY institution_key
+         ) la
+           ON la.institution_key = ${institutionJoinExpr}
          WHERE i.is_active = 1
-         GROUP BY i.id, i.name
-         HAVING count > 0
          ORDER BY i.name ASC`,
         [...baseParams]
       );
