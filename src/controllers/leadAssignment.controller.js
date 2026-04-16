@@ -1281,7 +1281,7 @@ export const getOverviewAnalytics = async (req, res) => {
     const leadWhereAnd = (suffix) =>
       leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')} AND ${suffix}` : `WHERE ${suffix}`;
 
-    // Get basic counts and lead status breakdown in a single query
+    // Get basic counts, funnel metrics, and lead status breakdown in a single query
     const [countsResult] = await pool.execute(
       `SELECT 
         COUNT(*) as totalLeads,
@@ -1290,19 +1290,31 @@ export const getOverviewAnalytics = async (req, res) => {
         SUM(CASE WHEN assigned_to IS NOT NULL OR assigned_to_pro IS NOT NULL THEN 1 ELSE 0 END) as assignedLeadsTotal,
         SUM(CASE WHEN assigned_to IS NOT NULL THEN 1 ELSE 0 END) as assignedLeadsToCounselor,
         SUM(CASE WHEN assigned_to_pro IS NOT NULL THEN 1 ELSE 0 END) as assignedLeadsToPro,
-        SUM(CASE WHEN assigned_to IS NULL AND assigned_to_pro IS NULL THEN 1 ELSE 0 END) as unassignedLeads
+        SUM(CASE WHEN assigned_to IS NULL AND assigned_to_pro IS NULL THEN 1 ELSE 0 END) as unassignedLeads,
+        SUM(CASE WHEN 
+          (assigned_to IS NOT NULL AND call_status IS NOT NULL AND TRIM(call_status) <> '' AND UPPER(TRIM(call_status)) <> 'ASSIGNED')
+          OR (assigned_to_pro IS NOT NULL AND visit_status IS NOT NULL AND TRIM(visit_status) <> '' AND UPPER(TRIM(visit_status)) <> 'ASSIGNED')
+        THEN 1 ELSE 0 END) as callOrVisitDone,
+        SUM(CASE WHEN lead_status IN ('Interested', 'CET Applied') THEN 1 ELSE 0 END) as interestedLeads
       FROM leads ${leadWhere}`,
       leadParams
     );
-    const {
-      totalLeads,
-      confirmedLeads,
-      admittedLeads,
-      assignedLeadsTotal,
-      assignedLeadsToCounselor,
-      assignedLeadsToPro,
-      unassignedLeads,
-    } = countsResult[0];
+    const countRow = countsResult[0];
+    const toCount = (v) => {
+      if (v == null) return 0;
+      if (typeof v === 'bigint') return Number(v);
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const totalLeads = toCount(countRow.totalLeads);
+    const confirmedLeads = toCount(countRow.confirmedLeads);
+    const admittedLeads = toCount(countRow.admittedLeads);
+    const assignedLeadsTotal = toCount(countRow.assignedLeadsTotal);
+    const assignedLeadsToCounselor = toCount(countRow.assignedLeadsToCounselor);
+    const assignedLeadsToPro = toCount(countRow.assignedLeadsToPro);
+    const unassignedLeads = toCount(countRow.unassignedLeads);
+    const callOrVisitDone = toCount(countRow.callOrVisitDone);
+    const interestedLeads = toCount(countRow.interestedLeads);
 
     // Get user role counts
     const [userRoleCountsAgg] = await pool.execute(
@@ -1537,6 +1549,8 @@ export const getOverviewAnalytics = async (req, res) => {
         assignedLeadsToCounselor,
         assignedLeadsToPro,
         unassignedLeads,
+        callOrVisitDone,
+        interestedLeads,
         joinings: {
           draft: joiningStatusBreakdown.draft || 0,
           pendingApproval: joiningStatusBreakdown.pending_approval || 0,
