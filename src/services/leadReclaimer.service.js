@@ -3,8 +3,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { notifyLeadReclamationSummary } from './notification.service.js';
 
 /**
- * Reclaims leads that have reached their target date and are marked as 'Not Interested'.
- * These leads are moved back to the unassigned pool and their cycle count is incremented.
+ * Reclaims leads that have reached their target date and are still assigned.
+ *
+ * Rules:
+ * - Not Interested / Wrong Data -> reclaim and increment cycle
+ * - Assigned -> reclaim but keep same cycle
  */
 export const reclaimExpiredLeads = async () => {
   let pool;
@@ -12,15 +15,15 @@ export const reclaimExpiredLeads = async () => {
     pool = getPool();
     console.log('[LeadReclaimer] Starting automated lead reclamation...');
 
-    // 1. Find leads to reclaim: 
-    // - status is 'Not Interested'
+    // 1. Find leads to reclaim:
+    // - status is 'Not Interested' OR 'Wrong Data' OR still 'Assigned'
     // - target_date is today or earlier
     // - currently assigned to someone
     const [leadsToReclaim] = await pool.execute(`
       SELECT id, lead_status, assigned_to, assigned_to_pro, cycle_number 
       FROM leads 
       WHERE (target_date <= CURRENT_DATE) 
-        AND (lead_status = 'Not Interested')
+        AND (lead_status IN ('Not Interested', 'Wrong Data', 'Assigned'))
         AND (assigned_to IS NOT NULL OR assigned_to_pro IS NOT NULL)
     `);
 
@@ -35,8 +38,10 @@ export const reclaimExpiredLeads = async () => {
     const reclaimedByPreviousAssignee = new Map();
 
     for (const lead of leadsToReclaim) {
-      const newCycle = (lead.cycle_number || 1) + 1;
-      const oldStatus = lead.lead_status;
+      const currentCycle = lead.cycle_number || 1;
+      const oldStatus = String(lead.lead_status || '').trim();
+      const shouldIncrementCycle = oldStatus === 'Not Interested' || oldStatus === 'Wrong Data';
+      const newCycle = shouldIncrementCycle ? currentCycle + 1 : currentCycle;
       const previousAssignee = lead.assigned_to || lead.assigned_to_pro || null;
       
       // Update the lead record
@@ -68,13 +73,17 @@ export const reclaimExpiredLeads = async () => {
           'status_change',
           oldStatus,
           'New',
-          `Automated Reassignment: Cycle ${newCycle}. Reclaimed from counselor due to 'Not Interested' status and target date reached.`,
+          shouldIncrementCycle
+            ? `Automated Reassignment: Cycle ${newCycle}. Reclaimed due to '${oldStatus}' status and target date reached.`
+            : `Automated Reassignment: Cycle ${newCycle} unchanged. Reclaimed due to 'Assigned' status at target date.`,
           '00000000-0000-0000-0000-000000000000', // Special identifier for automated tasks
           JSON.stringify({
             reclamation: {
-              previousCycle: lead.cycle_number || 1,
+              previousCycle: currentCycle,
               newCycle: newCycle,
-              previousAssignee
+              previousAssignee,
+              oldStatus,
+              cycleIncremented: shouldIncrementCycle,
             },
           }),
         ]
