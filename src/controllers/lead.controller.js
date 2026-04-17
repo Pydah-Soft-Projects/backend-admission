@@ -1924,6 +1924,7 @@ export const getFilterOptions = async (req, res) => {
     const stateCondition = [...conditions, 'state IS NOT NULL AND state != ""'];
     const quotaCondition = [...conditions, 'quota IS NOT NULL AND quota != ""'];
     const leadStatusCondition = [...conditions, 'lead_status IS NOT NULL AND lead_status != ""'];
+    const sourceCondition = [...conditions, 'source IS NOT NULL AND TRIM(source) != ""'];
     const callStatusCondition = [...conditions, 'call_status IS NOT NULL AND TRIM(call_status) != ""'];
     const visitStatusCondition = [...conditions, 'visit_status IS NOT NULL AND TRIM(visit_status) != ""'];
     const appStatusCondition = [...conditions, 'application_status IS NOT NULL AND application_status != ""'];
@@ -1935,7 +1936,7 @@ export const getFilterOptions = async (req, res) => {
 
     const districtFilter = (req.query.district && String(req.query.district).trim()) || '';
     const mandalFilter = (req.query.mandal && String(req.query.mandal).trim()) || '';
-    const privateCacheKey = `filter-options:private:${stableStringify({
+    const privateCacheKey = `filter-options:private:v2-sources:${stableStringify({
       roleName: req.user.roleName,
       userId: adminLike ? 'admin-like' : userId,
       districtFilter,
@@ -1992,6 +1993,10 @@ export const getFilterOptions = async (req, res) => {
       `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
       params
     );
+    const [sources] = await pool.execute(
+      `SELECT DISTINCT source FROM leads ${whereClause(sourceCondition)} ORDER BY source ASC`,
+      params
+    );
     const [callStatuses] = await pool.execute(
       `SELECT DISTINCT call_status FROM leads ${whereClause(callStatusCondition)} ORDER BY call_status ASC`,
       params
@@ -2033,6 +2038,7 @@ export const getFilterOptions = async (req, res) => {
       states: states.map(r => r.state),
       quotas: quotas.map(r => r.quota),
       leadStatuses: leadStatuses.map(r => r.lead_status),
+      sources: sources.map(r => r.source),
       callStatuses: callStatuses.map(r => r.call_status),
       visitStatuses: visitStatuses.map(r => r.visit_status),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
