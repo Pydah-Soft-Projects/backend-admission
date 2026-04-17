@@ -1297,6 +1297,17 @@ export const getOverviewAnalytics = async (req, res) => {
       leadFilters.push('student_group = ?');
       leadParams.push(req.query.studentGroup);
     }
+    if (req.query.source && String(req.query.source).trim()) {
+      leadFilters.push('source = ?');
+      leadParams.push(String(req.query.source).trim());
+    }
+    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
+      const cycleNum = Number(req.query.cycleNumber);
+      if (!Number.isNaN(cycleNum)) {
+        leadFilters.push('cycle_number = ?');
+        leadParams.push(cycleNum);
+      }
+    }
     const leadWhere = leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')}` : '';
     const leadWhereAnd = (suffix) =>
       leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')} AND ${suffix}` : `WHERE ${suffix}`;
