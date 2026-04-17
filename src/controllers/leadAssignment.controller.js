@@ -1030,6 +1030,7 @@ export const getUserLeadAnalytics = async (req, res) => {
       stateBreakdownWrap,
       studentGroupBreakdownWrap,
       recentLeadsResultWrap,
+      upcomingTargetDatesWrap,
     ] = await Promise.all([
       pool.execute(
         `SELECT COUNT(*) as total FROM leads WHERE ${whereClause}`,
@@ -1076,6 +1077,17 @@ export const getUserLeadAnalytics = async (req, res) => {
         `SELECT COUNT(*) as total FROM leads WHERE ${whereClause} AND updated_at >= ?`,
         [...params, recentThreshold]
       ),
+      pool.execute(
+        `SELECT DATE(target_date) as target_date, COUNT(*) as count
+         FROM leads
+         WHERE ${whereClause}
+           AND target_date IS NOT NULL
+           AND DATE(target_date) >= CURDATE()
+         GROUP BY DATE(target_date)
+         ORDER BY DATE(target_date) ASC
+         LIMIT 60`,
+        params
+      ),
     ]);
 
     const totalLeadsResult = totalLeadsResultWrap[0];
@@ -1085,6 +1097,7 @@ export const getUserLeadAnalytics = async (req, res) => {
     const stateBreakdown = stateBreakdownWrap[0];
     const studentGroupBreakdown = studentGroupBreakdownWrap[0];
     const recentLeadsResult = recentLeadsResultWrap[0];
+    const upcomingTargetDates = upcomingTargetDatesWrap[0];
 
     const totalLeads = totalLeadsResult[0].total;
     const overallTotalLeads = overallTotalResult[0].total;
@@ -1121,6 +1134,12 @@ export const getUserLeadAnalytics = async (req, res) => {
         studentGroupBreakdown: studentGroupBreakdown.map((item) => ({
           group: item.student_group || 'Unknown',
           count: item.count,
+        })),
+        upcomingTargetDates: upcomingTargetDates.map((item) => ({
+          date: item.target_date instanceof Date
+            ? item.target_date.toISOString().slice(0, 10)
+            : String(item.target_date || '').slice(0, 10),
+          count: typeof item.count === 'bigint' ? Number(item.count) : Number(item.count || 0),
         })),
         recentActivity: {
           leadsUpdatedLast7Days: recentLeads,
