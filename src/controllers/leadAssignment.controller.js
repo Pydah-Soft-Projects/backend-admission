@@ -2117,7 +2117,17 @@ export const getUserAnalytics = async (req, res) => {
       `SELECT
         ae.assigned_to_user_id,
         ae.assigned_date,
-        COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') as mandal,
+        CASE
+          WHEN NULLIF(TRIM(l.mandal), '') IS NULL THEN 'Unknown'
+          WHEN COALESCE(l.needs_manual_update, 0) IN (1, 2) THEN 'Others'
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM mandals mm
+            WHERE mm.is_active = 1
+              AND LOWER(TRIM(mm.name)) = LOWER(TRIM(l.mandal))
+          ) THEN 'Others'
+          ELSE TRIM(l.mandal)
+        END as mandal,
         COUNT(*) as count
       FROM (
         SELECT DISTINCT
@@ -2131,7 +2141,20 @@ export const getUserAnalytics = async (req, res) => {
           ${assignmentDateWhere}
       ) ae
       LEFT JOIN leads l ON l.id = ae.lead_id
-      GROUP BY ae.assigned_to_user_id, ae.assigned_date, COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown')
+      GROUP BY
+        ae.assigned_to_user_id,
+        ae.assigned_date,
+        CASE
+          WHEN NULLIF(TRIM(l.mandal), '') IS NULL THEN 'Unknown'
+          WHEN COALESCE(l.needs_manual_update, 0) IN (1, 2) THEN 'Others'
+          WHEN NOT EXISTS (
+            SELECT 1
+            FROM mandals mm
+            WHERE mm.is_active = 1
+              AND LOWER(TRIM(mm.name)) = LOWER(TRIM(l.mandal))
+          ) THEN 'Others'
+          ELSE TRIM(l.mandal)
+        END
       ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, count DESC`,
       assignmentParams
       );
