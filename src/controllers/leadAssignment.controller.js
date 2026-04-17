@@ -1973,14 +1973,54 @@ export const getUserAnalytics = async (req, res) => {
       `SELECT
         JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
         DATE(a.created_at) as assigned_date,
-        COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown') as lead_status,
+        COALESCE(
+          NULLIF(TRIM(reclaim_status.old_status_before_reclaim), ''),
+          NULLIF(TRIM(l.lead_status), ''),
+          'Unknown'
+        ) as lead_status,
         COUNT(DISTINCT a.lead_id) as count
       FROM activity_logs a
       LEFT JOIN leads l ON l.id = a.lead_id
+      LEFT JOIN (
+        SELECT
+          ranked.lead_id,
+          ranked.previous_assignee,
+          COALESCE(
+            NULLIF(TRIM(ranked.old_status_meta), ''),
+            NULLIF(TRIM(ranked.old_status), ''),
+            'Unknown'
+          ) AS old_status_before_reclaim
+        FROM (
+          SELECT
+            ar.lead_id,
+            JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee')) AS previous_assignee,
+            JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.oldStatus')) AS old_status_meta,
+            ar.old_status,
+            ROW_NUMBER() OVER (
+              PARTITION BY
+                ar.lead_id,
+                JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee'))
+              ORDER BY ar.created_at DESC
+            ) AS rn
+          FROM activity_logs ar
+          WHERE ar.type = 'status_change'
+            AND JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee') IS NOT NULL
+        ) ranked
+        WHERE ranked.rn = 1
+      ) reclaim_status
+        ON reclaim_status.lead_id = a.lead_id
+       AND reclaim_status.previous_assignee = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo'))
       WHERE a.type = 'status_change'
         AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
         ${assignmentDateWhere}
-      GROUP BY assigned_to_user_id, DATE(a.created_at), COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
+      GROUP BY
+        assigned_to_user_id,
+        DATE(a.created_at),
+        COALESCE(
+          NULLIF(TRIM(reclaim_status.old_status_before_reclaim), ''),
+          NULLIF(TRIM(l.lead_status), ''),
+          'Unknown'
+        )
       ORDER BY assigned_to_user_id, assigned_date DESC, count DESC`,
       assignmentParams
       );
@@ -1996,7 +2036,19 @@ export const getUserAnalytics = async (req, res) => {
           WHEN (l.assigned_to IS NOT NULL OR l.assigned_to_pro IS NOT NULL)
             AND NOT (l.assigned_to = ae.assigned_to_user_id OR l.assigned_to_pro = ae.assigned_to_user_id)
           THEN 1 ELSE 0 END) as moved_to_other_user_count,
-        SUM(CASE WHEN COALESCE(l.cycle_number, 1) > 1 THEN 1 ELSE 0 END) as reclaimed_cycle_count
+        SUM(
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM activity_logs ar
+              WHERE ar.lead_id = ae.lead_id
+                AND ar.type = 'status_change'
+                AND JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee') IS NOT NULL
+                AND JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee')) = ae.assigned_to_user_id
+            ) THEN 1
+            ELSE 0
+          END
+        ) as reclaimed_event_count
       FROM (
         SELECT DISTINCT
           JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
@@ -2168,6 +2220,7 @@ export const getUserAnalytics = async (req, res) => {
           date: dateKey,
           totalAssigned: 0,
           leadStatusCounts: {},
+          statusBeforeReclaimCounts: {},
           currentlyUnassigned: 0,
           studentGroupCounts: {},
           mandalCounts: {},
@@ -2177,6 +2230,7 @@ export const getUserAnalytics = async (req, res) => {
       const statusLabel = row.lead_status || 'Unknown';
       const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
       bucket.leadStatusCounts[statusLabel] = (bucket.leadStatusCounts[statusLabel] || 0) + count;
+      bucket.statusBeforeReclaimCounts[statusLabel] = (bucket.statusBeforeReclaimCounts[statusLabel] || 0) + count;
       bucket.totalAssigned += count;
     });
 
@@ -2196,6 +2250,7 @@ export const getUserAnalytics = async (req, res) => {
           date: dateKey,
           totalAssigned: 0,
           leadStatusCounts: {},
+          statusBeforeReclaimCounts: {},
           currentlyUnassigned: 0,
           currentlyWithSameUser: 0,
           movedToOtherUser: 0,
@@ -2215,9 +2270,9 @@ export const getUserAnalytics = async (req, res) => {
       const movedToOtherUserCount = typeof row.moved_to_other_user_count === 'bigint'
         ? Number(row.moved_to_other_user_count)
         : Number(row.moved_to_other_user_count || 0);
-      const reclaimedCount = typeof row.reclaimed_cycle_count === 'bigint'
-        ? Number(row.reclaimed_cycle_count)
-        : Number(row.reclaimed_cycle_count || 0);
+      const reclaimedCount = typeof row.reclaimed_event_count === 'bigint'
+        ? Number(row.reclaimed_event_count)
+        : Number(row.reclaimed_event_count || 0);
       const totalAssignedOnDate = typeof row.total_assigned_on_date === 'bigint'
         ? Number(row.total_assigned_on_date)
         : Number(row.total_assigned_on_date || 0);
@@ -2247,6 +2302,7 @@ export const getUserAnalytics = async (req, res) => {
           date: dateKey,
           totalAssigned: 0,
           leadStatusCounts: {},
+          statusBeforeReclaimCounts: {},
           currentlyUnassigned: 0,
           currentlyWithSameUser: 0,
           movedToOtherUser: 0,
@@ -2284,6 +2340,7 @@ export const getUserAnalytics = async (req, res) => {
           date: dateKey,
           totalAssigned: 0,
           leadStatusCounts: {},
+          statusBeforeReclaimCounts: {},
           currentlyUnassigned: 0,
           currentlyWithSameUser: 0,
           movedToOtherUser: 0,
@@ -2318,6 +2375,7 @@ export const getUserAnalytics = async (req, res) => {
           date: dateKey,
           totalAssigned: 0,
           leadStatusCounts: {},
+          statusBeforeReclaimCounts: {},
           currentlyUnassigned: 0,
           currentlyWithSameUser: 0,
           movedToOtherUser: 0,

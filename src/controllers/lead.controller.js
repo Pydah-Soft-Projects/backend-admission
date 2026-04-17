@@ -146,6 +146,38 @@ const formatUser = (userData) => {
   };
 };
 
+/** Raw row from leads + user joins (same shape as getLeads main SELECT). */
+function buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday) {
+  const assignedToUser = lead.assigned_to_id ? {
+    id: lead.assigned_to_id,
+    _id: lead.assigned_to_id,
+    name: lead.assigned_to_name,
+    email: lead.assigned_to_email,
+  } : null;
+
+  const uploadedByUser = lead.uploaded_by_id ? {
+    id: lead.uploaded_by_id,
+    _id: lead.uploaded_by_id,
+    name: lead.uploaded_by_name,
+  } : null;
+
+  const assignedToProUser = lead.assigned_to_pro_id ? {
+    id: lead.assigned_to_pro_id,
+    _id: lead.assigned_to_pro_id,
+    name: lead.assigned_to_pro_name,
+    email: lead.assigned_to_pro_email,
+  } : null;
+
+  const formattedLead = formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
+    viewerRoleName: req.user.roleName,
+  });
+  if (autoRescheduledFromYesterday.has(lead.id)) {
+    formattedLead.isYesterdayMissedCall = true;
+    formattedLead.missedScheduledDate = autoRescheduledFromYesterday.get(lead.id);
+  }
+  return formattedLead;
+}
+
 // @desc    Get all leads with pagination
 // @route   GET /api/leads
 // @access  Private
@@ -397,36 +429,74 @@ export const getLeads = async (req, res) => {
     const [leads] = await pool.execute(query, params);
 
     // Format leads
-    const formattedLeads = leads.map(lead => {
-      const assignedToUser = lead.assigned_to_id ? {
-        id: lead.assigned_to_id,
-        _id: lead.assigned_to_id,
-        name: lead.assigned_to_name,
-        email: lead.assigned_to_email,
-      } : null;
+    let formattedLeads = leads.map((lead) => buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday));
 
-      const uploadedByUser = lead.uploaded_by_id ? {
-        id: lead.uploaded_by_id,
-        _id: lead.uploaded_by_id,
-        name: lead.uploaded_by_name,
-      } : null;
-
-      const assignedToProUser = lead.assigned_to_pro_id ? {
-        id: lead.assigned_to_pro_id,
-        _id: lead.assigned_to_pro_id,
-        name: lead.assigned_to_pro_name,
-        email: lead.assigned_to_pro_email,
-      } : null;
-
-      const formattedLead = formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
-        viewerRoleName: req.user.roleName,
-      });
-      if (autoRescheduledFromYesterday.has(lead.id)) {
-        formattedLead.isYesterdayMissedCall = true;
-        formattedLead.missedScheduledDate = autoRescheduledFromYesterday.get(lead.id);
+    /**
+     * After the first dashboard hit, missed calls are already bumped to `scheduledOn`, so
+     * `isYesterdayMissedCall` would never be set from `autoRescheduledFromYesterday` alone.
+     * Re-apply the same "likely rolled" heuristic as count-missed-call-auto-reschedule.js (--mode=likely)
+     * so "Yesterday Missed" stays populated (heuristic may include same-day edits unrelated to rollover).
+     */
+    if (req.query.scheduledOn) {
+      const requestedYmd = String(req.query.scheduledOn).slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(requestedYmd)) {
+        const rolledExtra = [
+          'DATE(l.updated_at) = ?',
+          `NOT EXISTS (
+            SELECT 1 FROM communications c
+            WHERE c.lead_id = l.id AND c.type = 'call'
+              AND DATE(c.sent_at) = DATE_SUB(DATE(l.next_scheduled_call), INTERVAL 1 DAY)
+          )`,
+        ];
+        const rolledWhereClause =
+          conditions.length > 0
+            ? `WHERE ${conditions.join(' AND ')} AND ${rolledExtra.join(' AND ')}`
+            : `WHERE ${rolledExtra.join(' AND ')}`;
+        const rolledParams = [...params, requestedYmd];
+        const rolledQuery = `
+          SELECT
+            l.*,
+            DATE_FORMAT(DATE_SUB(DATE(l.next_scheduled_call), INTERVAL 1 DAY), '%Y-%m-%d') AS missed_schedule_prev_day,
+            u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
+            u2.id as uploaded_by_id, u2.name as uploaded_by_name,
+            u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
+          FROM leads l
+          LEFT JOIN users u1 ON l.assigned_to = u1.id
+          LEFT JOIN users u2 ON l.uploaded_by = u2.id
+          LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
+          ${rolledWhereClause}
+          ORDER BY l.updated_at DESC
+          LIMIT 500
+        `;
+        const [rolledRows] = await pool.execute(rolledQuery, rolledParams);
+        const rolledFormatted = rolledRows.map((lead) => {
+          const fl = buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday);
+          if (!autoRescheduledFromYesterday.has(lead.id)) {
+            fl.isYesterdayMissedCall = true;
+            fl.missedScheduledDate = lead.missed_schedule_prev_day || null;
+          }
+          return fl;
+        });
+        const rolledById = new Map(rolledFormatted.map((r) => [String(r._id || r.id), r]));
+        const mainIds = new Set(formattedLeads.map((f) => String(f._id || f.id)));
+        formattedLeads = formattedLeads.map((fl) => {
+          const id = String(fl._id || fl.id);
+          const rolled = rolledById.get(id);
+          if (rolled && !autoRescheduledFromYesterday.has(id)) {
+            return {
+              ...fl,
+              isYesterdayMissedCall: true,
+              missedScheduledDate: rolled.missedScheduledDate ?? fl.missedScheduledDate,
+            };
+          }
+          return fl;
+        });
+        for (const rf of rolledFormatted) {
+          const id = String(rf._id || rf.id);
+          if (!mainIds.has(id)) formattedLeads.push(rf);
+        }
       }
-      return formattedLead;
-    });
+    }
 
     return successResponse(res, {
       leads: formattedLeads,
