@@ -342,3 +342,31 @@ export const deleteTemplate = async (req, res) => {
   }
 };
 
+export const hardDeleteTemplate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+
+    // Check if template exists
+    const [templates] = await pool.execute(
+      'SELECT * FROM message_templates WHERE id = ?',
+      [id]
+    );
+
+    if (templates.length === 0) {
+      return errorResponse(res, 'Template not found', 404);
+    }
+
+    // Hard delete from database
+    await pool.execute(
+      'DELETE FROM message_templates WHERE id = ?',
+      [id]
+    );
+
+    return successResponse(res, null, 'Template permanently deleted');
+  } catch (error) {
+    console.error('Error hard deleting template:', error);
+    return errorResponse(res, error.message || 'Failed to hard delete template', 500);
+  }
+};
+

@@ -11,6 +11,7 @@ import {
   createTemplate,
   updateTemplate,
   deleteTemplate,
+  hardDeleteTemplate,
 } from '../controllers/template.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -24,6 +25,7 @@ router.get('/templates', isSuperAdmin, getTemplates);
 router.post('/templates', isSuperAdmin, createTemplate);
 router.put('/templates/:id', isSuperAdmin, updateTemplate);
 router.delete('/templates/:id', isSuperAdmin, deleteTemplate);
+router.delete('/templates/:id/hard', isSuperAdmin, hardDeleteTemplate);
 
 // Lead communications
 router.post('/lead/:leadId/call', logCallCommunication);
