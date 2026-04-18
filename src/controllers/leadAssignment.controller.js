@@ -9,6 +9,9 @@ import { connectHRMS } from '../config-mongo/hrms.js';
 const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
 
+const analyticsCache = new Map();
+const ANALYTICS_CACHE_MS = Number(process.env.ANALYTICS_CACHE_MS || 60000);
+
 const stableStringify = (value) => {
   if (value === null || value === undefined) return String(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
@@ -1655,7 +1658,28 @@ export const getUserAnalytics = async (req, res) => {
       division,
       department,
       group,
+      bypassCache,
     } = req.query;
+
+    const cacheKey = stableStringify({
+      startDate,
+      endDate,
+      userId,
+      academicYear,
+      includeAssignmentDetails,
+      division,
+      department,
+      group,
+      managedBy: isManager && !isAdmin ? currentUserId : null,
+    });
+
+    if (String(bypassCache).toLowerCase() !== 'true') {
+      const cached = analyticsCache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        return successResponse(res, cached.data, 'User analytics retrieved from cache', 200);
+      }
+    }
+
     const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
     const shouldIncludeAssignmentDetails =
@@ -1845,65 +1869,52 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'No users found', 200);
     }
     const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
-    const assignmentBridgeSql = `
-      SELECT
-        assigned_to as user_id,
-        id as lead_id,
-        lead_status
-      FROM leads
-      WHERE assigned_to IS NOT NULL
-      ${useAcademicYear ? 'AND academic_year = ?' : ''}
-      UNION ALL
-      SELECT
-        assigned_to_pro as user_id,
-        id as lead_id,
-        lead_status
-      FROM leads
-      WHERE assigned_to_pro IS NOT NULL
-      ${useAcademicYear ? 'AND academic_year = ?' : ''}
-      AND (assigned_to IS NULL OR assigned_to <> assigned_to_pro)
-    `;
-    const assignmentBridgeParams = useAcademicYear ? [yearNum, yearNum] : [];
 
-    const [leadCounts] = await pool.execute(
-      `SELECT
-        u.id as user_id_combined,
-        COUNT(DISTINCT al.lead_id) as total_assigned,
-        COUNT(DISTINCT CASE WHEN al.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN al.lead_id END) as active_leads
-      FROM users u
-      LEFT JOIN (${assignmentBridgeSql}) al
-        ON al.user_id = u.id
-      WHERE u.id IN (${selectedUserPlaceholders})
-      GROUP BY u.id`,
-      [...assignmentBridgeParams, ...selectedUserIds]
+    // OPTIMIZATION: Combine Lead Counts, Status counts and Conversion counts into fewer queries
+    // We use conditional aggregation to avoid multiple subquery joins
+    const [combinedCounts] = await pool.execute(
+      `
+      WITH user_leads AS (
+        SELECT assigned_to as user_userId, id as lead_id, lead_status, academic_year FROM leads WHERE assigned_to IN (${userIdPlaceholders})
+        UNION ALL
+        SELECT assigned_to_pro as user_userId, id as lead_id, lead_status, academic_year FROM leads 
+        WHERE assigned_to_pro IN (${userIdPlaceholders})
+          AND (assigned_to IS NULL OR assigned_to <> assigned_to_pro)
+      )
+      SELECT 
+        ul.user_userId,
+        COUNT(DISTINCT ul.lead_id) as total_assigned,
+        COUNT(DISTINCT CASE WHEN ul.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN ul.lead_id END) as active_leads,
+        COUNT(DISTINCT a.lead_id) as total_converted,
+        ul.lead_status,
+        COUNT(DISTINCT ul.lead_id) as status_count
+      FROM user_leads ul
+      LEFT JOIN admissions a ON a.lead_id = ul.lead_id
+      WHERE 1=1
+      ${useAcademicYear ? 'AND ul.academic_year = ?' : ''}
+      GROUP BY ul.user_userId, ul.lead_status
+      `,
+      useAcademicYear 
+        ? [...filteredUserIds, ...filteredUserIds, yearNum]
+        : [...filteredUserIds, ...filteredUserIds]
     );
 
-    const [statusCounts] = await pool.execute(
-      `SELECT
-        u.id as user_id_combined,
-        al.lead_status,
-        COUNT(DISTINCT al.lead_id) as count
-      FROM users u
-      LEFT JOIN (${assignmentBridgeSql}) al
-        ON al.user_id = u.id
-      WHERE u.id IN (${selectedUserPlaceholders})
-        AND al.lead_id IS NOT NULL
-      GROUP BY u.id, al.lead_status`,
-      [...assignmentBridgeParams, ...selectedUserIds]
-    );
-
-    const [conversionCounts] = await pool.execute(
-      `SELECT
-        u.id as user_id_combined,
-        COUNT(DISTINCT a.lead_id) as total_converted
-      FROM users u
-      LEFT JOIN (${assignmentBridgeSql}) al
-        ON al.user_id = u.id
-      LEFT JOIN admissions a ON a.lead_id = al.lead_id
-      WHERE u.id IN (${selectedUserPlaceholders})
-      GROUP BY u.id`,
-      [...assignmentBridgeParams, ...selectedUserIds]
-    );
+    // Group the combined results in Node.js to hydrate the user objects
+    const statsByUserId = new Map();
+    combinedCounts.forEach(row => {
+      if (!statsByUserId.has(row.user_userId)) {
+        statsByUserId.set(row.user_userId, {
+          total_assigned: row.total_assigned,
+          active_leads: row.active_leads, 
+          total_converted: row.total_converted,
+          statusBreakdown: {}
+        });
+      }
+      const uStats = statsByUserId.get(row.user_userId);
+      if (row.lead_status) {
+        uStats.statusBreakdown[row.lead_status] = row.status_count;
+      }
+    });
 
     const [commCounts] = await pool.execute(
       `SELECT 
@@ -2206,18 +2217,8 @@ export const getUserAnalytics = async (req, res) => {
     }
 
 
-    // Maps for fast lookup
-    const leadMap = new Map();
-    leadCounts.forEach(c => leadMap.set(c.user_id_combined, c));
-
-    const statusMapByUserId = new Map();
-    statusCounts.forEach(c => {
-      if (!statusMapByUserId.has(c.user_id_combined)) statusMapByUserId.set(c.user_id_combined, {});
-      statusMapByUserId.get(c.user_id_combined)[c.lead_status || 'Unknown'] = c.count;
-    });
-
-    const conversionMap = new Map();
-    conversionCounts.forEach(c => conversionMap.set(c.user_id_combined, c.total_converted));
+    // OPTIMIZATION: Use the Map we built earlier during the optimized combined query
+    const leadMap = statsByUserId;
 
     const commMap = new Map();
     commCounts.forEach(c => {
@@ -2448,15 +2449,13 @@ export const getUserAnalytics = async (req, res) => {
 
     // Compile analytics for each user
     const userAnalytics = users.map((user) => {
-      const leads = leadMap.get(user.id) || { total_assigned: 0, active_leads: 0 };
-      const statusBreakdown = statusMapByUserId.get(user.id) || {};
-      const convertedLeads = conversionMap.get(user.id) || 0;
+      const stats = statsByUserId.get(user.id) || { total_assigned: 0, active_leads: 0, total_converted: 0, statusBreakdown: {} };
       const comms = commMap.get(user.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
       const logs = logsMap.get(user.id) || { total_logs: 0, status_changes: 0 };
       const callsOnCurrentPortfolio = currentPortfolioCallsMap.get(user.id) || 0;
       const reclaimedUniqueLeads = reclaimedUniqueMap.get(String(user.id || '').trim().toLowerCase()) || 0;
 
-      const totalAssigned = leads.total_assigned;
+      const totalAssigned = stats.total_assigned;
 
       return {
         userId: user.id,
@@ -2470,12 +2469,12 @@ export const getUserAnalytics = async (req, res) => {
         group: user.group || '-',
         isActive: user.is_active === 1 || user.is_active === true,
         totalAssigned,
-        activeLeads: leads.active_leads,
-        convertedLeads,
-        interested: statusBreakdown['Interested'] || 0,
-        admittedLeads: statusBreakdown['Admitted'] || 0,
-        conversionRate: totalAssigned > 0 ? parseFloat(((convertedLeads / totalAssigned) * 100).toFixed(2)) : 0,
-        statusBreakdown,
+        activeLeads: stats.active_leads,
+        convertedLeads: stats.total_converted,
+        interested: stats.statusBreakdown['Interested'] || 0,
+        admittedLeads: stats.statusBreakdown['Admitted'] || 0,
+        conversionRate: totalAssigned > 0 ? parseFloat(((stats.total_converted / totalAssigned) * 100).toFixed(2)) : 0,
+        statusBreakdown: stats.statusBreakdown,
         activityLogsCount: logs.total_logs,
         calls: {
           total: comms.calls.unique, // Following UI expectation of unique leads called

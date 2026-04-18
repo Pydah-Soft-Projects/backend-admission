@@ -78,7 +78,7 @@ export const bulkUpdateLeadGroups = async (req, res) => {
       headerRowNumber = 0;
 
       for await (const row of worksheetReader) {
-        if (!enquiryIdx || !nameIdx || !villageIdx || !mandalIdx) {
+        if (!nameIdx || !villageIdx || !mandalIdx) {
           row.eachCell((cell, colNumber) => {
             const h = normHeader(cell.value);
             if (isEnquiryColumn(h)) enquiryIdx = colNumber;
@@ -86,12 +86,12 @@ export const bulkUpdateLeadGroups = async (req, res) => {
             if (isVillageColumn(h)) villageIdx = colNumber;
             if (isMandalColumn(h)) mandalIdx = colNumber;
           });
-          if (enquiryIdx && nameIdx && villageIdx && mandalIdx) {
+          if (nameIdx && villageIdx && mandalIdx) {
             headerRowNumber = row.number;
           }
-          if (row.number > 20 && (!enquiryIdx || !nameIdx || !villageIdx || !mandalIdx)) {
+          if (row.number > 20 && (!nameIdx || !villageIdx || !mandalIdx)) {
             throw new Error(
-              'Could not find required columns in the first 20 rows. Add headers: Enquiry Number, Name, village, mandal.'
+              'Could not find required columns in the first 20 rows. Add headers: Name, village, mandal. (Enquiry Number is optional but recommended).'
             );
           }
           continue;
@@ -101,13 +101,13 @@ export const bulkUpdateLeadGroups = async (req, res) => {
           continue;
         }
 
-        const enquiry = cellStr(row.getCell(enquiryIdx).value);
+        const enquiry = enquiryIdx > 0 ? cellStr(row.getCell(enquiryIdx).value) : '';
         const name = cellStr(row.getCell(nameIdx).value);
         const village = cellStr(row.getCell(villageIdx).value);
         const mandal = cellStr(row.getCell(mandalIdx).value);
 
         if (!enquiry && !name && !village && !mandal) continue;
-        if (!enquiry || !name) continue;
+        if (!name) continue; // Enquiry is now optional
 
         batch.push([enquiry, name, village || null, mandal || null]);
         count++;

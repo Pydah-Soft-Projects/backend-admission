@@ -341,8 +341,12 @@ SELECT
   r.lead_state
 FROM stg
 LEFT JOIN ranked r
-  ON r.enq = TRIM(stg.enquiry_number)
-  AND r.nm = TRIM(stg.name)
+  ON r.nm = TRIM(stg.name)
+  AND (
+    (stg.enquiry_number IS NOT NULL AND stg.enquiry_number <> '' AND r.enq = TRIM(stg.enquiry_number))
+    OR
+    (stg.enquiry_number IS NULL OR TRIM(stg.enquiry_number) = '')
+  )
   AND r.rn = 1
 ORDER BY stg.staging_id
 `;

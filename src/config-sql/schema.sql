@@ -994,7 +994,7 @@ CREATE TABLE IF NOT EXISTS form_builder_fields (
 -- ============================================
 CREATE TABLE IF NOT EXISTS lead_location_staging (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    enquiry_number VARCHAR(64) NOT NULL,
+    enquiry_number VARCHAR(64) NULL,
     name VARCHAR(255) NOT NULL,
     village VARCHAR(512) NULL,
     mandal VARCHAR(512) NULL,

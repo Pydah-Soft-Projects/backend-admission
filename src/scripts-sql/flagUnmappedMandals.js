@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { getPool, closeDB } from '../config-sql/database.js';
 import { findBestMatch, similarity } from '../utils/fuzzyMatch.util.js';
+import pLimit from 'p-limit';
 
 dotenv.config();
 
@@ -46,6 +47,7 @@ const flagUnmappedMandals = async () => {
 
         const [districtsRows] = await pool.execute('SELECT id, state_id, name FROM districts WHERE is_active = 1');
         const districtsByStateId = new Map();
+        const districtNameById = new Map(); // Cache for cross-district matching
         districtsRows.forEach(r => {
             const sId = String(r.state_id);
             if (!districtsByStateId.has(sId)) districtsByStateId.set(sId, new Map());
@@ -54,6 +56,7 @@ const flagUnmappedMandals = async () => {
             const sName = stripDistrictSuffix(nName) || nName;
             dMap.set(nName, { id: String(r.id), name: r.name });
             if (sName !== nName) dMap.set(sName, { id: String(r.id), name: r.name });
+            districtNameById.set(String(r.id), r.name);
         });
 
         const [mandalsRows] = await pool.execute('SELECT id, district_id, name FROM mandals WHERE is_active = 1');
@@ -99,8 +102,18 @@ const flagUnmappedMandals = async () => {
         
         const clearedByDistrict = new Map();
         const flaggedByDistrict = new Map();
+        
+        const limit = pLimit(20); // Process up to 20 updates concurrently
+        let processedCount = 0;
+        const totalLeads = leads.length;
+        const updatePromises = [];
 
         for (const lead of leads) {
+            processedCount++;
+            if (processedCount % 500 === 0 || processedCount === totalLeads) {
+                console.log(`Processing progress: ${processedCount}/${totalLeads} leads analyzed...`);
+            }
+
             let finalState = lead.state || 'Andhra Pradesh';
             let finalDistrict = lead.district || '';
             let finalMandal = lead.mandal || '';
@@ -163,11 +176,11 @@ const flagUnmappedMandals = async () => {
                             let potentialMatch = mP.get(nMandal) || mP.get(sMandal);
                             
                             if (potentialMatch) {
-                                // Find district name for this mandal
-                                const [dRows] = await pool.execute('SELECT name FROM districts WHERE id = ?', [potentialMatch.district_id]);
-                                if (dRows.length > 0) {
+                                // Find district name from cache instead of DB query
+                                const dName = districtNameById.get(String(potentialMatch.district_id));
+                                if (dName) {
                                     mMatch = potentialMatch;
-                                    finalDistrict = dRows[0].name;
+                                    finalDistrict = dName;
                                     finalMandal = mMatch.name;
                                     break;
                                 }
@@ -189,17 +202,19 @@ const flagUnmappedMandals = async () => {
             
             if (casingChanged || statusChanged) {
                 if (!isDryRun) {
-                    if (isMapped) {
-                        await pool.execute(
-                            'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
-                            [finalDistrict, finalMandal, lead.id]
-                        );
-                    } else {
-                        await pool.execute(
-                            'UPDATE leads SET needs_manual_update = 2 WHERE id = ?',
-                            [lead.id]
-                        );
-                    }
+                    updatePromises.push(limit(async () => {
+                        if (isMapped) {
+                            await pool.execute(
+                                'UPDATE leads SET district = ?, mandal = ?, needs_manual_update = 0 WHERE id = ?',
+                                [finalDistrict, finalMandal, lead.id]
+                            );
+                        } else {
+                            await pool.execute(
+                                'UPDATE leads SET needs_manual_update = 2 WHERE id = ?',
+                                [lead.id]
+                            );
+                        }
+                    }));
                 }
                 
                 const prefix = isDryRun ? '[DRY RUN] ' : '✅ ';
@@ -221,6 +236,13 @@ const flagUnmappedMandals = async () => {
             } else {
                 skipCount++;
             }
+        }
+
+        // Wait for all non-dry-run updates to complete
+        if (updatePromises.length > 0) {
+            console.log(`Waiting for ${updatePromises.length} database updates to complete...`);
+            await Promise.all(updatePromises);
+            console.log('All database updates finished.');
         }
 
         console.log(`\n--- Final Summary ${isDryRun ? '(DRY RUN)' : ''} ---`);
