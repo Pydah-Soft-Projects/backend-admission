@@ -79,9 +79,20 @@ const allowedOrigins = [
 app.use(cors({
   origin: (origin, callback) => {
     // Allow non-browser tools (no origin) or any origin explicitly whitelisted above
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) {
       return callback(null, true);
     }
+    
+    // Check if the origin matches our whitelist or is a subdomain of pydah.edu.in
+    const isPydahDomain = /https?:\/\/(.*?\.)?pydah\.edu\.in($|:)/.test(origin);
+    const isLocalhost = /http:\/\/localhost:/.test(origin);
+    const isWhitelisted = allowedOrigins.includes(origin);
+
+    if (isWhitelisted || isPydahDomain || isLocalhost) {
+      return callback(null, true);
+    }
+
+    console.error(`Blocked by CORS: ${origin}`);
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
