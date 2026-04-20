@@ -13,6 +13,7 @@ on:
 
 env:
   NODE_VERSION: '20'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   build-and-test:
@@ -69,8 +70,17 @@ jobs:
           BRANCH: ${{ github.ref == 'refs/heads/main' && 'main' || 'master' }}
         run: |
           DP="${DEPLOY_PATH:-/opt/backend-admission}"
-          PM2="${PM2_APP_NAME:-backend-api}"
-          ssh "$SSH_USER@$SSH_HOST" "set -e; cd $DP && git fetch origin && git reset --hard origin/$BRANCH && npm ci --omit=dev && (pm2 restart $PM2 || (pm2 start src/server.js --name $PM2 && pm2 save)) && pm2 save && echo 'Deploy complete.'"
+          PM2="${PM2_APP_NAME:-backend-admission}"
+          ssh "$SSH_USER@$SSH_HOST" "set -e; \
+            cd $DP && \
+            git fetch origin && \
+            git reset --hard origin/$BRANCH && \
+            npm install --omit=dev && \
+            sudo fuser -k 5000/tcp || true && \
+            (pm2 restart $PM2 || (pm2 start src/server.js --name $PM2 && pm2 save)) && \
+            sudo systemctl reload nginx && \
+            pm2 save && \
+            echo 'Backend Deploy complete.'"
 
       - name: Verify deployment (health check)
         env:

@@ -122,7 +122,7 @@ app.use('/api/visitors', visitorRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  res.json({ status: 'OK', message: 'Server is runningggg' });
 });
 
 // Error handling middleware
