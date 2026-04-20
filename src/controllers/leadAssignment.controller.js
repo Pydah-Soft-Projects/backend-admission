@@ -1872,48 +1872,140 @@ export const getUserAnalytics = async (req, res) => {
 
     // OPTIMIZATION: Combine Lead Counts, Status counts and Conversion counts into fewer queries
     // We use conditional aggregation to avoid multiple subquery joins
-    const [combinedCounts] = await pool.execute(
-      `
-      WITH user_leads AS (
-        SELECT assigned_to as user_userId, id as lead_id, lead_status, academic_year FROM leads WHERE assigned_to IN (${userIdPlaceholders})
-        UNION ALL
-        SELECT assigned_to_pro as user_userId, id as lead_id, lead_status, academic_year FROM leads 
-        WHERE assigned_to_pro IN (${userIdPlaceholders})
-          AND (assigned_to IS NULL OR assigned_to <> assigned_to_pro)
-      )
-      SELECT 
-        ul.user_userId,
-        COUNT(DISTINCT ul.lead_id) as total_assigned,
-        COUNT(DISTINCT CASE WHEN ul.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled') THEN ul.lead_id END) as active_leads,
-        COUNT(DISTINCT a.lead_id) as total_converted,
-        ul.lead_status,
-        COUNT(DISTINCT ul.lead_id) as status_count
-      FROM user_leads ul
-      LEFT JOIN admissions a ON a.lead_id = ul.lead_id
-      WHERE 1=1
-      ${useAcademicYear ? 'AND ul.academic_year = ?' : ''}
-      GROUP BY ul.user_userId, ul.lead_status
-      `,
+    // OPTIMIZATION: Use historical logs to get cumulative performance
+    const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
+
+    // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
+    const [portfolioCounts] = await pool.execute(
+      `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
+         -- Leads newly assigned within the period
+         SELECT JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id, a.lead_id
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         WHERE a.type = 'status_change' AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+           ${logDateClause}
+           AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         
+         UNION
+         
+         -- Leads where user performed ANY recorded action in period (proves they handled it)
+         SELECT a.performed_by as user_id, a.lead_id
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         WHERE a.type = 'status_change'
+           ${logDateClause}
+           AND a.performed_by IN (${userIdPlaceholders})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+
+         UNION
+
+         -- Leads where user made a call/sms in period
+         SELECT c.sent_by as user_id, c.lead_id
+         FROM communications c
+         JOIN leads l ON c.lead_id = l.id
+         WHERE c.sent_by IN (${userIdPlaceholders}) 
+           ${activityDateClause}
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+       ) as full_portfolio
+       GROUP BY user_id`,
       useAcademicYear 
-        ? [...filteredUserIds, ...filteredUserIds, yearNum]
-        : [...filteredUserIds, ...filteredUserIds]
+        ? [...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum]
+        : [...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds]
     );
 
-    // Group the combined results in Node.js to hydrate the user objects
+    // 2. Get Cumulative Status Actions (every time user moved a lead to a status in period)
+    const [actionCounts] = await pool.execute(
+      `SELECT 
+        a.performed_by as user_id,
+        a.new_status as lead_status,
+        COUNT(DISTINCT a.lead_id) as status_count
+       FROM activity_logs a
+       JOIN leads l ON a.lead_id = l.id
+       WHERE a.type = 'status_change'
+         ${logDateClause.replace('a.created_at', 'a.created_at')}
+         AND a.performed_by IN (${userIdPlaceholders})
+         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+       GROUP BY a.performed_by, a.new_status`,
+      useAcademicYear 
+        ? [...activityDateParams, ...filteredUserIds, yearNum]
+        : [...activityDateParams, ...filteredUserIds]
+    );
+
+    // 3. Get Cumulative Conversions (leads assigned to user that converted in period)
+    // We check if lead has an admission AND was assigned to user during or before the admission
+    const [conversionCounts] = await pool.execute(
+      `SELECT 
+        JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id,
+        COUNT(DISTINCT adm.lead_id) as converted_count
+       FROM activity_logs a
+       JOIN leads l ON a.lead_id = l.id
+       JOIN admissions adm ON adm.lead_id = a.lead_id
+       WHERE a.type = 'status_change'
+         AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+         ${logDateClause}
+         AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
+         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         AND adm.created_at >= a.created_at
+       GROUP BY user_id`,
+       useAcademicYear 
+        ? [...activityDateParams, ...filteredUserIds, yearNum]
+        : [...activityDateParams, ...filteredUserIds]
+    );
+
+    // 4. Current Active Portfolio (subset of ever-assigned leads that are currently active)
+    const [activePortfolioCounts] = await pool.execute(
+      `SELECT 
+        JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id,
+        COUNT(DISTINCT a.lead_id) as active_leads
+       FROM activity_logs a
+       JOIN leads l ON a.lead_id = l.id
+       WHERE a.type = 'status_change'
+         AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+         ${logDateClause}
+         AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
+         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
+         AND (l.assigned_to = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) 
+              OR l.assigned_to_pro = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')))
+       GROUP BY user_id`,
+       useAcademicYear 
+        ? [...activityDateParams, ...filteredUserIds, yearNum]
+        : [...activityDateParams, ...filteredUserIds]
+    );
+
+    // Initialize statsByUserId Map with all filtered users
     const statsByUserId = new Map();
-    combinedCounts.forEach(row => {
-      if (!statsByUserId.has(row.user_userId)) {
-        statsByUserId.set(row.user_userId, {
-          total_assigned: row.total_assigned,
-          active_leads: row.active_leads, 
-          total_converted: row.total_converted,
-          statusBreakdown: {}
-        });
+    filteredUserIds.forEach(uid => {
+      statsByUserId.set(uid, {
+        total_assigned: 0,
+        active_leads: 0, 
+        total_converted: 0,
+        statusBreakdown: {}
+      });
+    });
+
+    // Hydrate from query results
+    portfolioCounts.forEach(row => {
+      const stats = statsByUserId.get(row.user_id);
+      if (stats) stats.total_assigned = row.total_handled;
+    });
+
+    actionCounts.forEach(row => {
+      const stats = statsByUserId.get(row.user_id);
+      if (stats && row.lead_status) {
+        stats.statusBreakdown[row.lead_status] = (stats.statusBreakdown[row.lead_status] || 0) + row.status_count;
       }
-      const uStats = statsByUserId.get(row.user_userId);
-      if (row.lead_status) {
-        uStats.statusBreakdown[row.lead_status] = row.status_count;
-      }
+    });
+
+    conversionCounts.forEach(row => {
+      const stats = statsByUserId.get(row.user_id);
+      if (stats) stats.total_converted = row.converted_count;
+    });
+
+    activePortfolioCounts.forEach(row => {
+      const stats = statsByUserId.get(row.user_id);
+      if (stats) stats.active_leads = row.active_leads;
     });
 
     const [commCounts] = await pool.execute(
@@ -2304,25 +2396,13 @@ export const getUserAnalytics = async (req, res) => {
         });
       }
       const bucket = perDate.get(dateKey);
-      const unassignedCount = typeof row.currently_unassigned_count === 'bigint'
-        ? Number(row.currently_unassigned_count)
-        : Number(row.currently_unassigned_count || 0);
-      const withSameUserCount = typeof row.currently_with_same_user_count === 'bigint'
-        ? Number(row.currently_with_same_user_count)
-        : Number(row.currently_with_same_user_count || 0);
-      const movedToOtherUserCount = typeof row.moved_to_other_user_count === 'bigint'
-        ? Number(row.moved_to_other_user_count)
-        : Number(row.moved_to_other_user_count || 0);
-      const reclaimedCount = typeof row.reclaimed_event_count === 'bigint'
-        ? Number(row.reclaimed_event_count)
-        : Number(row.reclaimed_event_count || 0);
-      const totalAssignedOnDate = typeof row.total_assigned_on_date === 'bigint'
-        ? Number(row.total_assigned_on_date)
-        : Number(row.total_assigned_on_date || 0);
+      const unassignedCount = Number(row.currently_unassigned_count || 0);
+      const withSameUserCount = Number(row.currently_with_same_user_count || 0);
+      const movedToOtherUserCount = Number(row.moved_to_other_user_count || 0);
+      const reclaimedCount = Number(row.reclaimed_event_count || 0);
+      const totalAllottedOnDate = Number(row.total_assigned_on_date || 0);
 
-      if (totalAssignedOnDate > 0) {
-        bucket.totalAssigned = totalAssignedOnDate;
-      }
+      bucket.totalAssigned = Math.max(bucket.totalAssigned, totalAllottedOnDate);
       bucket.currentlyUnassigned = unassignedCount;
       bucket.currentlyWithSameUser = withSameUserCount;
       bucket.movedToOtherUser = movedToOtherUserCount;
