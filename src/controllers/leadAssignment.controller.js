@@ -2090,7 +2090,8 @@ export const getUserAnalytics = async (req, res) => {
 
       const [
         [rawAssignments],
-        [reclamations]
+        [reclamations],
+        [validMandalsRows]
       ] = await Promise.all([
         pool.execute(
           `SELECT 
@@ -2123,8 +2124,13 @@ export const getUserAnalytics = async (req, res) => {
           WHERE type = 'status_change' AND source_user_id IN (${userIdPlaceholders})
           ORDER BY created_at DESC`,
           [...filteredUserIds]
+        ),
+        pool.execute(
+          `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
         )
       ]);
+
+      const validMandalsSet = new Set(validMandalsRows.map(m => String(m.name || '').trim().toLowerCase()));
 
       // Latest reclamation metadata per (lead, user)
       const latestReclaimMap = new Map();
@@ -2205,7 +2211,13 @@ export const getUserAnalytics = async (req, res) => {
 
         // 5. Mandal breakdown
         let mandal = (row.mandal || 'Unknown').trim() || 'Unknown';
-        if (row.needs_manual_update === 1 || row.needs_manual_update === 2) mandal = 'Others';
+        const mandalLow = mandal.toLowerCase();
+        
+        if (mandal === 'Unknown') {
+          // Stay as Unknown
+        } else if (row.needs_manual_update === 1 || row.needs_manual_update === 2 || !validMandalsSet.has(mandalLow)) {
+          mandal = 'Others';
+        }
         bucket.mandalCounts[mandal] = (bucket.mandalCounts[mandal] || 0) + 1;
       });
 
@@ -2257,6 +2269,7 @@ export const getUserAnalytics = async (req, res) => {
       const totalAssigned = stats.total_assigned;
 
       return {
+        id: user.id,
         userId: user.id,
         userName: user.name,
         name: user.name,
