@@ -668,6 +668,7 @@ CREATE TABLE IF NOT EXISTS communications (
     INDEX idx_communications_status (status),
     INDEX idx_communications_sent_by (sent_by),
     INDEX idx_communications_sent_at (sent_at DESC),
+    INDEX idx_communications_sent_by_at (sent_by, sent_at DESC),
     INDEX idx_communications_lead_sent_at (lead_id, sent_at DESC),
     INDEX idx_communications_lead_contact_type (lead_id, contact_number, type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -708,6 +709,8 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     new_status VARCHAR(50),
     comment TEXT,
     performed_by CHAR(36) NOT NULL,
+    target_user_id CHAR(36) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.assignment.assignedTo'))) VIRTUAL,
+    source_user_id CHAR(36) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.reclamation.previousAssignee'))) VIRTUAL,
     metadata JSON DEFAULT (JSON_OBJECT()),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -716,6 +719,8 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     INDEX idx_activity_logs_lead_id (lead_id),
     INDEX idx_activity_logs_type (type),
     INDEX idx_activity_logs_performed_by (performed_by),
+    INDEX idx_activity_logs_target_user_id (target_user_id),
+    INDEX idx_activity_logs_source_user_id (source_user_id),
     INDEX idx_activity_logs_lead_created_at (lead_id, created_at DESC),
     INDEX idx_activity_logs_type_created_at (type, created_at DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

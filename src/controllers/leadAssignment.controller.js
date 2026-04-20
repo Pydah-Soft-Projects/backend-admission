@@ -1715,10 +1715,13 @@ export const getUserAnalytics = async (req, res) => {
       userParams.push(currentUserId);
     }
 
-    // If userId is provided, filter to that specific user
+    // If userId is provided, filter to those specific users
     if (userId) {
-      userConditions = ['id = ?'];
-      userParams = [userId];
+      const ids = String(userId).split(',').map(id => id.trim()).filter(Boolean);
+      if (ids.length > 0) {
+        userConditions = [`id IN (${ids.map(() => '?').join(',')})` ];
+        userParams = ids;
+      }
     } else if (hasOrgFilters) {
       // Filter by HRMS organizational units
       try {
@@ -1875,104 +1878,111 @@ export const getUserAnalytics = async (req, res) => {
     // OPTIMIZATION: Use historical logs to get cumulative performance
     const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
 
-    // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
-    const [portfolioCounts] = await pool.execute(
-      `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
-         -- Leads newly assigned within the period
-         SELECT JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id, a.lead_id
-         FROM activity_logs a
-         JOIN leads l ON a.lead_id = l.id
-         WHERE a.type = 'status_change' AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-           ${logDateClause}
-           AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-         
-         UNION
-         
-         -- Leads where user performed ANY recorded action in period (proves they handled it)
-         SELECT a.performed_by as user_id, a.lead_id
+    // 1. Get Summary Stats in Parallel
+    const [
+      [portfolioCounts],
+      [actionCounts],
+      [conversionCounts],
+      [activePortfolioCounts]
+    ] = await Promise.all([
+      // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
+      pool.execute(
+        `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
+           -- Leads newly assigned within the period
+           SELECT a.target_user_id as user_id, a.lead_id
+           FROM activity_logs a
+           JOIN leads l ON a.lead_id = l.id
+           WHERE a.type = 'status_change' AND a.target_user_id IS NOT NULL
+             ${logDateClause}
+             AND a.target_user_id IN (${userIdPlaceholders})
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           
+           UNION
+           
+           -- Leads where user performed ANY recorded action in period (proves they handled it)
+           SELECT a.performed_by as user_id, a.lead_id
+           FROM activity_logs a
+           JOIN leads l ON a.lead_id = l.id
+           WHERE a.type = 'status_change'
+             ${logDateClause}
+             AND a.performed_by IN (${userIdPlaceholders})
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+  
+           UNION
+  
+           -- Leads where user made a call/sms in period
+           SELECT c.sent_by as user_id, c.lead_id
+           FROM communications c
+           JOIN leads l ON c.lead_id = l.id
+           WHERE c.sent_by IN (${userIdPlaceholders}) 
+             ${activityDateClause}
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         ) as full_portfolio
+         GROUP BY user_id`,
+        useAcademicYear 
+          ? [...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum]
+          : [...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds]
+      ),
+
+      // 2. Get Cumulative Status Actions (every time user moved a lead to a status in period)
+      pool.execute(
+        `SELECT 
+          a.performed_by as user_id,
+          a.new_status as lead_status,
+          COUNT(DISTINCT a.lead_id) as status_count
          FROM activity_logs a
          JOIN leads l ON a.lead_id = l.id
          WHERE a.type = 'status_change'
-           ${logDateClause}
+           ${logDateClause.replace('a.created_at', 'a.created_at')}
            AND a.performed_by IN (${userIdPlaceholders})
            ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         GROUP BY a.performed_by, a.new_status`,
+        useAcademicYear 
+          ? [...activityDateParams, ...filteredUserIds, yearNum]
+          : [...activityDateParams, ...filteredUserIds]
+      ),
 
-         UNION
-
-         -- Leads where user made a call/sms in period
-         SELECT c.sent_by as user_id, c.lead_id
-         FROM communications c
-         JOIN leads l ON c.lead_id = l.id
-         WHERE c.sent_by IN (${userIdPlaceholders}) 
-           ${activityDateClause}
+      // 3. Get Cumulative Conversions (leads assigned to user that converted in period)
+      pool.execute(
+        `SELECT 
+          a.target_user_id as user_id,
+          COUNT(DISTINCT adm.lead_id) as converted_count
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         JOIN admissions adm ON adm.lead_id = a.lead_id
+         WHERE a.type = 'status_change'
+           AND a.target_user_id IS NOT NULL
+           ${logDateClause}
+           AND a.target_user_id IN (${userIdPlaceholders})
            ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-       ) as full_portfolio
-       GROUP BY user_id`,
-      useAcademicYear 
-        ? [...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum]
-        : [...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds]
-    );
+           AND adm.created_at >= a.created_at
+         GROUP BY user_id`,
+         useAcademicYear 
+          ? [...activityDateParams, ...filteredUserIds, yearNum]
+          : [...activityDateParams, ...filteredUserIds]
+      ),
 
-    // 2. Get Cumulative Status Actions (every time user moved a lead to a status in period)
-    const [actionCounts] = await pool.execute(
-      `SELECT 
-        a.performed_by as user_id,
-        a.new_status as lead_status,
-        COUNT(DISTINCT a.lead_id) as status_count
-       FROM activity_logs a
-       JOIN leads l ON a.lead_id = l.id
-       WHERE a.type = 'status_change'
-         ${logDateClause.replace('a.created_at', 'a.created_at')}
-         AND a.performed_by IN (${userIdPlaceholders})
-         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-       GROUP BY a.performed_by, a.new_status`,
-      useAcademicYear 
-        ? [...activityDateParams, ...filteredUserIds, yearNum]
-        : [...activityDateParams, ...filteredUserIds]
-    );
-
-    // 3. Get Cumulative Conversions (leads assigned to user that converted in period)
-    // We check if lead has an admission AND was assigned to user during or before the admission
-    const [conversionCounts] = await pool.execute(
-      `SELECT 
-        JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id,
-        COUNT(DISTINCT adm.lead_id) as converted_count
-       FROM activity_logs a
-       JOIN leads l ON a.lead_id = l.id
-       JOIN admissions adm ON adm.lead_id = a.lead_id
-       WHERE a.type = 'status_change'
-         AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-         ${logDateClause}
-         AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
-         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-         AND adm.created_at >= a.created_at
-       GROUP BY user_id`,
-       useAcademicYear 
-        ? [...activityDateParams, ...filteredUserIds, yearNum]
-        : [...activityDateParams, ...filteredUserIds]
-    );
-
-    // 4. Current Active Portfolio (subset of ever-assigned leads that are currently active)
-    const [activePortfolioCounts] = await pool.execute(
-      `SELECT 
-        JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as user_id,
-        COUNT(DISTINCT a.lead_id) as active_leads
-       FROM activity_logs a
-       JOIN leads l ON a.lead_id = l.id
-       WHERE a.type = 'status_change'
-         AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-         ${logDateClause}
-         AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) IN (${userIdPlaceholders})
-         ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-         AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
-         AND (l.assigned_to = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) 
-              OR l.assigned_to_pro = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')))
-       GROUP BY user_id`,
-       useAcademicYear 
-        ? [...activityDateParams, ...filteredUserIds, yearNum]
-        : [...activityDateParams, ...filteredUserIds]
-    );
+      // 4. Current Active Portfolio (subset of ever-assigned leads that are currently active)
+      pool.execute(
+        `SELECT 
+          a.target_user_id as user_id,
+          COUNT(DISTINCT a.lead_id) as active_leads
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         WHERE a.type = 'status_change'
+           AND a.target_user_id IS NOT NULL
+           ${logDateClause}
+           AND a.target_user_id IN (${userIdPlaceholders})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
+           AND (l.assigned_to = a.target_user_id 
+                OR l.assigned_to_pro = a.target_user_id)
+         GROUP BY user_id`,
+         useAcademicYear 
+          ? [...activityDateParams, ...filteredUserIds, yearNum]
+          : [...activityDateParams, ...filteredUserIds]
+      )
+    ]);
 
     // Initialize statsByUserId Map with all filtered users
     const statsByUserId = new Map();
@@ -2008,55 +2018,53 @@ export const getUserAnalytics = async (req, res) => {
       if (stats) stats.active_leads = row.active_leads;
     });
 
-    const [commCounts] = await pool.execute(
-      `SELECT 
-        sent_by as user_id, 
-        type, 
-        COUNT(*) as count,
-        SUM(CASE WHEN type = 'call' THEN duration_seconds ELSE 0 END) as total_duration,
-        COUNT(DISTINCT lead_id) as unique_leads
-      FROM communications 
-      WHERE sent_by IN (${selectedUserPlaceholders}) ${activityDateClause}
-      GROUP BY sent_by, type`,
-      [...selectedUserIds, ...activityDateParams]
-    );
+    const [
+      [commCounts],
+      [currentPortfolioCallCounts],
+      [actLogsCountResult]
+    ] = await Promise.all([
+      pool.execute(
+        `SELECT 
+          sent_by as user_id, 
+          type, 
+          COUNT(*) as count,
+          SUM(CASE WHEN type = 'call' THEN duration_seconds ELSE 0 END) as total_duration,
+          COUNT(DISTINCT lead_id) as unique_leads
+        FROM communications 
+        WHERE sent_by IN (${selectedUserPlaceholders}) ${activityDateClause}
+        GROUP BY sent_by, type`,
+        [...selectedUserIds, ...activityDateParams]
+      ),
+      pool.execute(
+        `SELECT
+          c.sent_by as user_id,
+          COUNT(DISTINCT c.lead_id) as unique_current_leads_called
+        FROM communications c
+        INNER JOIN leads l ON l.id = c.lead_id
+        WHERE c.type = 'call'
+          AND c.sent_by IN (${selectedUserPlaceholders})
+          ${activityDateClause}
+          AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
+          ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+        GROUP BY c.sent_by`,
+        useAcademicYear
+          ? [...selectedUserIds, ...activityDateParams, yearNum]
+          : [...selectedUserIds, ...activityDateParams]
+      ),
+      pool.execute(
+        `SELECT 
+          performed_by as user_id, 
+          COUNT(*) as total_logs,
+          SUM(CASE WHEN type = 'status_change' THEN 1 ELSE 0 END) as status_changes
+        FROM activity_logs 
+        WHERE performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.split('sent_at').join('created_at')}
+        GROUP BY performed_by`,
+        [...selectedUserIds, ...activityDateParams]
+      )
+    ]);    // Date-wise assignment details aggregation - Directly populate the map
+    const assignmentByDateMap = new Map();
+    const reclaimedUniqueMap = new Map();
 
-    // Calls done only on leads that are CURRENTLY with same user (for pending/balance metric)
-    const [currentPortfolioCallCounts] = await pool.execute(
-      `SELECT
-        c.sent_by as user_id,
-        COUNT(DISTINCT c.lead_id) as unique_current_leads_called
-      FROM communications c
-      INNER JOIN leads l ON l.id = c.lead_id
-      WHERE c.type = 'call'
-        AND c.sent_by IN (${selectedUserPlaceholders})
-        ${activityDateClause}
-        AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
-        ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-      GROUP BY c.sent_by`,
-      useAcademicYear
-        ? [...selectedUserIds, ...activityDateParams, yearNum]
-        : [...selectedUserIds, ...activityDateParams]
-    );
-
-    const [actLogsCountResult] = await pool.execute(
-      `SELECT 
-        performed_by as user_id, 
-        COUNT(*) as total_logs,
-        SUM(CASE WHEN type = 'status_change' THEN 1 ELSE 0 END) as status_changes
-      FROM activity_logs 
-      WHERE performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.split('sent_at').join('created_at')}
-      GROUP BY performed_by`,
-      [...selectedUserIds, ...activityDateParams]
-    );
-
-    // Date-wise assignment details are expensive; fetch only when explicitly requested
-    let assignmentDateRows = [];
-    let assignmentDateSummaryRows = [];
-    let assignmentDateTargetRows = [];
-    let assignmentDateStudentGroupRows = [];
-    let assignmentDateMandalRows = [];
-    let reclaimedUniqueRows = [];
     if (shouldIncludeAssignmentDetails) {
       const assignmentDateConditions = [];
       const assignmentDateParams = [];
@@ -2076,238 +2084,138 @@ export const getUserAnalytics = async (req, res) => {
         assignmentDateConditions.push('l.academic_year = ?');
         assignmentDateParams.push(yearNum);
       }
-      const assignmentParams = [...assignmentDateParams];
-
-      // Keep this filter only for explicit single-user drilldown.
-      // For full reports, filtering by a large IN-list can miss rows in some environments
-      // due to type/collation differences on JSON-unquoted values.
-      if (userId) {
-        assignmentDateConditions.push(
-          `JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) = ?`
-        );
-        assignmentParams.push(userId);
-      }
       const assignmentDateWhere = assignmentDateConditions.length > 0
         ? `AND ${assignmentDateConditions.join(' AND ')}`
         : '';
 
-      const [assignmentRows] = await pool.execute(
-      `SELECT
-        JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-        DATE(a.created_at) as assigned_date,
-        COALESCE(
-          NULLIF(TRIM(reclaim_status.old_status_before_reclaim), ''),
-          NULLIF(TRIM(l.lead_status), ''),
-          'Unknown'
-        ) as lead_status,
-        COUNT(DISTINCT a.lead_id) as count
-      FROM activity_logs a
-      LEFT JOIN leads l ON l.id = a.lead_id
-      LEFT JOIN (
-        SELECT
-          ranked.lead_id,
-          ranked.previous_assignee,
-          COALESCE(
-            NULLIF(TRIM(ranked.old_status_meta), ''),
-            NULLIF(TRIM(ranked.old_status), ''),
-            'Unknown'
-          ) AS old_status_before_reclaim
-        FROM (
-          SELECT
-            ar.lead_id,
-            JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee')) AS previous_assignee,
-            JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.oldStatus')) AS old_status_meta,
-            ar.old_status,
-            ROW_NUMBER() OVER (
-              PARTITION BY
-                ar.lead_id,
-                JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee'))
-              ORDER BY ar.created_at DESC
-            ) AS rn
-          FROM activity_logs ar
-          WHERE ar.type = 'status_change'
-            AND JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee') IS NOT NULL
-        ) ranked
-        WHERE ranked.rn = 1
-      ) reclaim_status
-        ON reclaim_status.lead_id = a.lead_id
-       AND reclaim_status.previous_assignee = JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo'))
-      WHERE a.type = 'status_change'
-        AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-        ${assignmentDateWhere}
-      GROUP BY
-        assigned_to_user_id,
-        DATE(a.created_at),
-        COALESCE(
-          NULLIF(TRIM(reclaim_status.old_status_before_reclaim), ''),
-          NULLIF(TRIM(l.lead_status), ''),
-          'Unknown'
+      const [
+        [rawAssignments],
+        [reclamations]
+      ] = await Promise.all([
+        pool.execute(
+          `SELECT 
+            a.target_user_id as user_id, 
+            DATE(a.created_at) as assigned_date, 
+            a.lead_id,
+            l.lead_status,
+            l.student_group,
+            l.mandal,
+            l.target_date,
+            l.cycle_number,
+            l.assigned_to,
+            l.assigned_to_pro,
+            l.needs_manual_update
+          FROM activity_logs a
+          JOIN leads l ON l.id = a.lead_id
+          WHERE a.type = 'status_change' 
+            AND a.target_user_id IN (${userIdPlaceholders})
+            ${assignmentDateWhere}`,
+          [...filteredUserIds, ...assignmentDateParams]
+        ),
+        pool.execute(
+          `SELECT 
+            lead_id, 
+            source_user_id as previous_assignee, 
+            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.reclamation.oldStatus')) as old_status_meta,
+            old_status,
+            created_at
+          FROM activity_logs
+          WHERE type = 'status_change' AND source_user_id IN (${userIdPlaceholders})
+          ORDER BY created_at DESC`,
+          [...filteredUserIds]
         )
-      ORDER BY assigned_to_user_id, assigned_date DESC, count DESC`,
-      assignmentParams
-      );
+      ]);
 
-      const [assignmentSummaryRows] = await pool.execute(
-      `SELECT
-        ae.assigned_to_user_id,
-        ae.assigned_date,
-        COUNT(*) as total_assigned_on_date,
-        SUM(CASE WHEN l.assigned_to IS NULL AND l.assigned_to_pro IS NULL THEN 1 ELSE 0 END) as currently_unassigned_count,
-        SUM(CASE WHEN (l.assigned_to = ae.assigned_to_user_id OR l.assigned_to_pro = ae.assigned_to_user_id) THEN 1 ELSE 0 END) as currently_with_same_user_count,
-        SUM(CASE 
-          WHEN (l.assigned_to IS NOT NULL OR l.assigned_to_pro IS NOT NULL)
-            AND NOT (l.assigned_to = ae.assigned_to_user_id OR l.assigned_to_pro = ae.assigned_to_user_id)
-          THEN 1 ELSE 0 END) as moved_to_other_user_count,
-        SUM(
-          CASE
-            WHEN EXISTS (
-              SELECT 1
-              FROM activity_logs ar
-              WHERE ar.lead_id = ae.lead_id
-                AND ar.type = 'status_change'
-                AND JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee') IS NOT NULL
-                AND JSON_UNQUOTE(JSON_EXTRACT(ar.metadata, '$.reclamation.previousAssignee')) = ae.assigned_to_user_id
-            ) THEN 1
-            ELSE 0
-          END
-        ) as reclaimed_event_count
-      FROM (
-        SELECT DISTINCT
-          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-          DATE(a.created_at) as assigned_date,
-          a.lead_id
-        FROM activity_logs a
-        LEFT JOIN leads l ON l.id = a.lead_id
-        WHERE a.type = 'status_change'
-          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-          ${assignmentDateWhere}
-      ) ae
-      LEFT JOIN leads l ON l.id = ae.lead_id
-      GROUP BY ae.assigned_to_user_id, ae.assigned_date
-      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC`,
-      assignmentParams
-      );
+      // Latest reclamation metadata per (lead, user)
+      const latestReclaimMap = new Map();
+      reclamations.forEach(r => {
+        const key = `${r.lead_id}-${r.previous_assignee}`;
+        if (!latestReclaimMap.has(key)) latestReclaimMap.set(key, r);
+      });
 
-      const [assignmentTargetsRows] = await pool.execute(
-      `SELECT
-        ae.assigned_to_user_id,
-        ae.assigned_date,
-        DATE(l.target_date) as target_date,
-        COUNT(*) as count
-      FROM (
-        SELECT DISTINCT
-          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-          DATE(a.created_at) as assigned_date,
-          a.lead_id
-        FROM activity_logs a
-        LEFT JOIN leads l ON l.id = a.lead_id
-        WHERE a.type = 'status_change'
-          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-          ${assignmentDateWhere}
-      ) ae
-      LEFT JOIN leads l ON l.id = ae.lead_id
-      WHERE l.target_date IS NOT NULL
-      GROUP BY ae.assigned_to_user_id, ae.assigned_date, DATE(l.target_date)
-      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, target_date ASC`,
-      assignmentParams
-      );
+      rawAssignments.forEach(row => {
+        const userKey = String(row.user_id).trim().toLowerCase();
+        if (!userKey) return;
+        
+        let perDate = assignmentByDateMap.get(userKey);
+        if (!perDate) {
+          perDate = new Map();
+          assignmentByDateMap.set(userKey, perDate);
+        }
 
-      const [assignmentStudentGroupRows] = await pool.execute(
-      `SELECT
-        ae.assigned_to_user_id,
-        ae.assigned_date,
-        COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') as student_group,
-        COUNT(*) as count
-      FROM (
-        SELECT DISTINCT
-          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-          DATE(a.created_at) as assigned_date,
-          a.lead_id
-        FROM activity_logs a
-        LEFT JOIN leads l ON l.id = a.lead_id
-        WHERE a.type = 'status_change'
-          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-          ${assignmentDateWhere}
-      ) ae
-      LEFT JOIN leads l ON l.id = ae.lead_id
-      GROUP BY ae.assigned_to_user_id, ae.assigned_date, COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
-      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, count DESC`,
-      assignmentParams
-      );
+        const dateKey = row.assigned_date instanceof Date
+          ? row.assigned_date.toISOString().slice(0, 10)
+          : String(row.assigned_date || '').slice(0, 10);
+        
+        if (!dateKey || dateKey === 'null') return;
 
-      const [assignmentMandalRows] = await pool.execute(
-      `SELECT
-        ae.assigned_to_user_id,
-        ae.assigned_date,
-        CASE
-          WHEN NULLIF(TRIM(l.mandal), '') IS NULL THEN 'Unknown'
-          WHEN COALESCE(l.needs_manual_update, 0) IN (1, 2) THEN 'Others'
-          WHEN NOT EXISTS (
-            SELECT 1
-            FROM mandals mm
-            WHERE mm.is_active = 1
-              AND LOWER(TRIM(mm.name)) = LOWER(TRIM(l.mandal))
-          ) THEN 'Others'
-          ELSE TRIM(l.mandal)
-        END as mandal,
-        COUNT(*) as count
-      FROM (
-        SELECT DISTINCT
-          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-          DATE(a.created_at) as assigned_date,
-          a.lead_id
-        FROM activity_logs a
-        LEFT JOIN leads l ON l.id = a.lead_id
-        WHERE a.type = 'status_change'
-          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-          ${assignmentDateWhere}
-      ) ae
-      LEFT JOIN leads l ON l.id = ae.lead_id
-      GROUP BY
-        ae.assigned_to_user_id,
-        ae.assigned_date,
-        CASE
-          WHEN NULLIF(TRIM(l.mandal), '') IS NULL THEN 'Unknown'
-          WHEN COALESCE(l.needs_manual_update, 0) IN (1, 2) THEN 'Others'
-          WHEN NOT EXISTS (
-            SELECT 1
-            FROM mandals mm
-            WHERE mm.is_active = 1
-              AND LOWER(TRIM(mm.name)) = LOWER(TRIM(l.mandal))
-          ) THEN 'Others'
-          ELSE TRIM(l.mandal)
-        END
-      ORDER BY ae.assigned_to_user_id, ae.assigned_date DESC, count DESC`,
-      assignmentParams
-      );
+        if (!perDate.has(dateKey)) {
+          perDate.set(dateKey, {
+            date: dateKey,
+            totalAssigned: 0,
+            leadStatusCounts: {},
+            statusBeforeReclaimCounts: {}, // For backward compatibility if needed
+            currentlyUnassigned: 0,
+            currentlyWithSameUser: 0,
+            movedToOtherUser: 0,
+            reclaimedCount: 0,
+            targetDateCounts: {},
+            studentGroupCounts: {},
+            mandalCounts: {},
+          });
+        }
+        
+        const bucket = perDate.get(dateKey);
+        bucket.totalAssigned++;
+        
+        // 1. Current Engagement status (for Balance/Pending calculations)
+        if (row.assigned_to === null && row.assigned_to_pro === null) {
+          bucket.currentlyUnassigned++;
+        } else if (row.assigned_to === row.user_id || row.assigned_to_pro === row.user_id) {
+          bucket.currentlyWithSameUser++;
+        } else {
+          bucket.movedToOtherUser++;
+        }
+        
+        // 2. Lead Status / Reclamation check
+        const rKey = `${row.lead_id}-${row.user_id}`;
+        const reclaimMeta = latestReclaimMap.get(rKey);
+        if (reclaimMeta) {
+            bucket.reclaimedCount++;
+            const status = (reclaimMeta.old_status_meta || reclaimMeta.old_status || 'Unknown').trim() || 'Unknown';
+            bucket.leadStatusCounts[status] = (bucket.leadStatusCounts[status] || 0) + 1;
+        } else {
+            const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
+            bucket.leadStatusCounts[status] = (bucket.leadStatusCounts[status] || 0) + 1;
+        }
 
-      const [reclaimedDistinctRows] = await pool.execute(
-      `SELECT
-        ae.assigned_to_user_id,
-        COUNT(DISTINCT ae.lead_id) as reclaimed_unique_count
-      FROM (
-        SELECT DISTINCT
-          JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.assignedTo')) as assigned_to_user_id,
-          a.lead_id
-        FROM activity_logs a
-        LEFT JOIN leads l ON l.id = a.lead_id
-        WHERE a.type = 'status_change'
-          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
-          ${assignmentDateWhere}
-          AND COALESCE(l.cycle_number, 1) > 1
-      ) ae
-      GROUP BY ae.assigned_to_user_id`,
-      assignmentParams
-      );
+        // 3. Target Date breakdown
+        if (row.target_date) {
+          const tDate = row.target_date instanceof Date 
+            ? row.target_date.toISOString().slice(0, 10) 
+            : String(row.target_date).slice(0, 10);
+          if (tDate && tDate !== 'null') {
+            bucket.targetDateCounts[tDate] = (bucket.targetDateCounts[tDate] || 0) + 1;
+          }
+        }
 
-      assignmentDateRows = assignmentRows;
-      assignmentDateSummaryRows = assignmentSummaryRows;
-      assignmentDateTargetRows = assignmentTargetsRows;
-      assignmentDateStudentGroupRows = assignmentStudentGroupRows;
-      assignmentDateMandalRows = assignmentMandalRows;
-      reclaimedUniqueRows = reclaimedDistinctRows;
+        // 4. Student Group breakdown
+        const sGroup = (row.student_group || 'Unknown').trim() || 'Unknown';
+        bucket.studentGroupCounts[sGroup] = (bucket.studentGroupCounts[sGroup] || 0) + 1;
+
+        // 5. Mandal breakdown
+        let mandal = (row.mandal || 'Unknown').trim() || 'Unknown';
+        if (row.needs_manual_update === 1 || row.needs_manual_update === 2) mandal = 'Others';
+        bucket.mandalCounts[mandal] = (bucket.mandalCounts[mandal] || 0) + 1;
+      });
+
+      // Populate reclaimedUniqueMap
+      assignmentByDateMap.forEach((perDate, userKey) => {
+        let totalReclaimed = 0;
+        perDate.forEach(d => { if (d.reclaimedCount > 0) totalReclaimed++; }); 
+        reclaimedUniqueMap.set(userKey, totalReclaimed);
+      });
     }
-
 
     // OPTIMIZATION: Use the Map we built earlier during the optimized combined query
     const leadMap = statsByUserId;
@@ -2336,195 +2244,6 @@ export const getUserAnalytics = async (req, res) => {
           ? Number(c.unique_current_leads_called)
           : Number(c.unique_current_leads_called || 0)
       );
-    });
-
-    const assignmentByDateMap = new Map();
-    assignmentDateRows.forEach((row) => {
-      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!userKey) return;
-      if (!assignmentByDateMap.has(userKey)) {
-        assignmentByDateMap.set(userKey, new Map());
-      }
-      const perDate = assignmentByDateMap.get(userKey);
-      const dateKey = row.assigned_date instanceof Date
-        ? row.assigned_date.toISOString().slice(0, 10)
-        : String(row.assigned_date || '').slice(0, 10);
-      if (!dateKey) return;
-      if (!perDate.has(dateKey)) {
-        perDate.set(dateKey, {
-          date: dateKey,
-          totalAssigned: 0,
-          leadStatusCounts: {},
-          statusBeforeReclaimCounts: {},
-          currentlyUnassigned: 0,
-          studentGroupCounts: {},
-          mandalCounts: {},
-        });
-      }
-      const bucket = perDate.get(dateKey);
-      const statusLabel = row.lead_status || 'Unknown';
-      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
-      bucket.leadStatusCounts[statusLabel] = (bucket.leadStatusCounts[statusLabel] || 0) + count;
-      bucket.statusBeforeReclaimCounts[statusLabel] = (bucket.statusBeforeReclaimCounts[statusLabel] || 0) + count;
-      bucket.totalAssigned += count;
-    });
-
-    assignmentDateSummaryRows.forEach((row) => {
-      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!userKey) return;
-      if (!assignmentByDateMap.has(userKey)) {
-        assignmentByDateMap.set(userKey, new Map());
-      }
-      const perDate = assignmentByDateMap.get(userKey);
-      const dateKey = row.assigned_date instanceof Date
-        ? row.assigned_date.toISOString().slice(0, 10)
-        : String(row.assigned_date || '').slice(0, 10);
-      if (!dateKey) return;
-      if (!perDate.has(dateKey)) {
-        perDate.set(dateKey, {
-          date: dateKey,
-          totalAssigned: 0,
-          leadStatusCounts: {},
-          statusBeforeReclaimCounts: {},
-          currentlyUnassigned: 0,
-          currentlyWithSameUser: 0,
-          movedToOtherUser: 0,
-          reclaimedCount: 0,
-          targetDateCounts: {},
-          studentGroupCounts: {},
-          mandalCounts: {},
-        });
-      }
-      const bucket = perDate.get(dateKey);
-      const unassignedCount = Number(row.currently_unassigned_count || 0);
-      const withSameUserCount = Number(row.currently_with_same_user_count || 0);
-      const movedToOtherUserCount = Number(row.moved_to_other_user_count || 0);
-      const reclaimedCount = Number(row.reclaimed_event_count || 0);
-      const totalAllottedOnDate = Number(row.total_assigned_on_date || 0);
-
-      bucket.totalAssigned = Math.max(bucket.totalAssigned, totalAllottedOnDate);
-      bucket.currentlyUnassigned = unassignedCount;
-      bucket.currentlyWithSameUser = withSameUserCount;
-      bucket.movedToOtherUser = movedToOtherUserCount;
-      bucket.reclaimedCount = reclaimedCount;
-    });
-
-    assignmentDateTargetRows.forEach((row) => {
-      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!userKey) return;
-      if (!assignmentByDateMap.has(userKey)) {
-        assignmentByDateMap.set(userKey, new Map());
-      }
-      const perDate = assignmentByDateMap.get(userKey);
-      const dateKey = row.assigned_date instanceof Date
-        ? row.assigned_date.toISOString().slice(0, 10)
-        : String(row.assigned_date || '').slice(0, 10);
-      if (!dateKey) return;
-      if (!perDate.has(dateKey)) {
-        perDate.set(dateKey, {
-          date: dateKey,
-          totalAssigned: 0,
-          leadStatusCounts: {},
-          statusBeforeReclaimCounts: {},
-          currentlyUnassigned: 0,
-          currentlyWithSameUser: 0,
-          movedToOtherUser: 0,
-          reclaimedCount: 0,
-          targetDateCounts: {},
-          studentGroupCounts: {},
-          mandalCounts: {},
-        });
-      }
-      const bucket = perDate.get(dateKey);
-      const targetDateKey = row.target_date instanceof Date
-        ? row.target_date.toISOString().slice(0, 10)
-        : String(row.target_date || '').slice(0, 10);
-      if (!targetDateKey) return;
-      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
-      if (!bucket.targetDateCounts || typeof bucket.targetDateCounts !== 'object') {
-        bucket.targetDateCounts = {};
-      }
-      bucket.targetDateCounts[targetDateKey] = (bucket.targetDateCounts[targetDateKey] || 0) + count;
-    });
-
-    assignmentDateStudentGroupRows.forEach((row) => {
-      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!userKey) return;
-      if (!assignmentByDateMap.has(userKey)) {
-        assignmentByDateMap.set(userKey, new Map());
-      }
-      const perDate = assignmentByDateMap.get(userKey);
-      const dateKey = row.assigned_date instanceof Date
-        ? row.assigned_date.toISOString().slice(0, 10)
-        : String(row.assigned_date || '').slice(0, 10);
-      if (!dateKey) return;
-      if (!perDate.has(dateKey)) {
-        perDate.set(dateKey, {
-          date: dateKey,
-          totalAssigned: 0,
-          leadStatusCounts: {},
-          statusBeforeReclaimCounts: {},
-          currentlyUnassigned: 0,
-          currentlyWithSameUser: 0,
-          movedToOtherUser: 0,
-          reclaimedCount: 0,
-          targetDateCounts: {},
-          studentGroupCounts: {},
-          mandalCounts: {},
-        });
-      }
-      const bucket = perDate.get(dateKey);
-      if (!bucket.studentGroupCounts || typeof bucket.studentGroupCounts !== 'object') {
-        bucket.studentGroupCounts = {};
-      }
-      const groupLabel = String(row.student_group || 'Unknown');
-      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
-      bucket.studentGroupCounts[groupLabel] = (bucket.studentGroupCounts[groupLabel] || 0) + count;
-    });
-
-    assignmentDateMandalRows.forEach((row) => {
-      const userKey = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!userKey) return;
-      if (!assignmentByDateMap.has(userKey)) {
-        assignmentByDateMap.set(userKey, new Map());
-      }
-      const perDate = assignmentByDateMap.get(userKey);
-      const dateKey = row.assigned_date instanceof Date
-        ? row.assigned_date.toISOString().slice(0, 10)
-        : String(row.assigned_date || '').slice(0, 10);
-      if (!dateKey) return;
-      if (!perDate.has(dateKey)) {
-        perDate.set(dateKey, {
-          date: dateKey,
-          totalAssigned: 0,
-          leadStatusCounts: {},
-          statusBeforeReclaimCounts: {},
-          currentlyUnassigned: 0,
-          currentlyWithSameUser: 0,
-          movedToOtherUser: 0,
-          reclaimedCount: 0,
-          targetDateCounts: {},
-          studentGroupCounts: {},
-          mandalCounts: {},
-        });
-      }
-      const bucket = perDate.get(dateKey);
-      if (!bucket.mandalCounts || typeof bucket.mandalCounts !== 'object') {
-        bucket.mandalCounts = {};
-      }
-      const mandalLabel = String(row.mandal || 'Unknown');
-      const count = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
-      bucket.mandalCounts[mandalLabel] = (bucket.mandalCounts[mandalLabel] || 0) + count;
-    });
-
-    const reclaimedUniqueMap = new Map();
-    reclaimedUniqueRows.forEach((row) => {
-      const key = String(row.assigned_to_user_id || '').trim().toLowerCase();
-      if (!key) return;
-      const count = typeof row.reclaimed_unique_count === 'bigint'
-        ? Number(row.reclaimed_unique_count)
-        : Number(row.reclaimed_unique_count || 0);
-      reclaimedUniqueMap.set(key, count);
     });
 
     // Compile analytics for each user
