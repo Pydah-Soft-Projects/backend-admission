@@ -68,6 +68,8 @@ const allowedOrigins = [
   'https://frontend-admission.vercel.app',
   'https://pydah-admissions.vercel.app',
   'https://admissions.pydah.edu.in',
+  'https://pydah.edu.in',
+  'https://www.pydah.edu.in',
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5000',
