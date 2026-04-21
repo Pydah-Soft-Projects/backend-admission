@@ -73,7 +73,10 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5000',
-  'https://admission.raviburaga.shop'
+  'https://admission.raviburaga.shop',
+  'https://pydahgroup.com',
+  'https://www.pydahgroup.com',
+  'https://editor.wix.com'
 ].filter(Boolean);
 
 app.use(cors({
@@ -83,12 +86,13 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Check if the origin matches our whitelist or is a subdomain of pydah.edu.in
-    const isPydahDomain = /https?:\/\/(.*?\.)?pydah\.edu\.in($|:)/.test(origin);
+    // Check if the origin matches our whitelist or is a subdomain of pydah.edu.in or pydahgroup.com
+    const isPydahDomain = /https?:\/\/(.*?\.)?(pydah\.edu\.in|pydahgroup\.com)($|:)/.test(origin);
+    const isWixSubdomain = /https?:\/\/.*?\.wixsite\.com($|:)/.test(origin);
     const isLocalhost = /http:\/\/localhost:/.test(origin);
     const isWhitelisted = allowedOrigins.includes(origin);
 
-    if (isWhitelisted || isPydahDomain || isLocalhost) {
+    if (isWhitelisted || isPydahDomain || isWixSubdomain || isLocalhost) {
       return callback(null, true);
     }
 
