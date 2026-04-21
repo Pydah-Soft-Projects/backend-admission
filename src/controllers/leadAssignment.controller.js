@@ -38,6 +38,17 @@ const setCachedAssignmentStats = (key, value) => {
   });
 };
 
+/**
+ * Normalized institution name key for a lead row (JOIN / GROUP BY / WHERE).
+ * Prefer `inter_college` (bulk upload and manual entry); then JSON dynamic_fields used by forms/API.
+ */
+const LEAD_INSTITUTION_KEY_SQL = `LOWER(TRIM(COALESCE(
+  NULLIF(TRIM(COALESCE(inter_college, '')), ''),
+  NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), '')), ''),
+  NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), '')), ''),
+  ''
+)))`;
+
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
 // @access  Private (Super Admin only)
@@ -165,12 +176,10 @@ export const assignLeads = async (req, res) => {
         }
       }
 
-      // Add school/college (institution) filter if provided – match lead's dynamic_fields school_or_college_name
+      // Add school/college (institution) filter: inter_college first, then JSON dynamic_fields
       if (institutionName && typeof institutionName === 'string' && institutionName.trim()) {
         const instParam = institutionName.trim();
-        conditions.push(
-          "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
-        );
+        conditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
         params.push(instParam);
       }
 
@@ -292,6 +301,17 @@ export const assignLeads = async (req, res) => {
       const assigneeLabel = isProRole
         ? `PRO ${user.name}`
         : `${user.role_name === 'Sub Super Admin' ? 'sub-admin' : 'counsellor'} ${user.name}`;
+      const assignmentMeta = {
+        assignedTo: userId,
+        assignedBy: currentUserId,
+        targetRole: isProRole ? 'PRO' : 'counsellor',
+      };
+      if (targetDate && String(targetDate).trim()) {
+        const td = String(targetDate).trim().slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(td)) {
+          assignmentMeta.targetDate = td;
+        }
+      }
       await pool.execute(
         `INSERT INTO activity_logs (
           id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
@@ -305,11 +325,7 @@ export const assignLeads = async (req, res) => {
           `Assigned to ${assigneeLabel}`,
           currentUserId,
           JSON.stringify({
-            assignment: {
-              assignedTo: userId,
-              assignedBy: currentUserId,
-              targetRole: isProRole ? 'PRO' : 'counsellor',
-            },
+            assignment: assignmentMeta,
           }),
         ]
       );
@@ -485,9 +501,7 @@ export const getAssignmentStats = async (req, res) => {
     // Add school/college (institution) filter if provided
     if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
       const instParam = String(institutionName).trim();
-      conditions.push(
-        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
-      );
+      conditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
       params.push(instParam);
     }
 
@@ -537,9 +551,7 @@ export const getAssignmentStats = async (req, res) => {
     }
     if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
       const instBase = String(institutionName).trim();
-      baseConditions.push(
-        "LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), ''))) = LOWER(?)"
-      );
+      baseConditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
       baseParams.push(instBase);
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
@@ -682,11 +694,7 @@ export const getAssignmentStats = async (req, res) => {
     // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
     if (forBreakdown === 'school' || forBreakdown === 'college') {
       const table = forBreakdown === 'school' ? 'schools' : 'colleges';
-      const institutionNameExpr = `LOWER(TRIM(COALESCE(
-        JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')),
-        JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')),
-        ''
-      )))`;
+      const institutionNameExpr = LEAD_INSTITUTION_KEY_SQL;
       const institutionJoinExpr = `LOWER(TRIM(i.name))`;
       const leadAggConditions = [
         ...baseConditions,
@@ -694,17 +702,19 @@ export const getAssignmentStats = async (req, res) => {
       ];
       const leadAggWhere = leadAggConditions.length > 0 ? `WHERE ${leadAggConditions.join(' AND ')}` : '';
 
+      // Start from grouped leads (often far fewer keys than all master rows), then join catalog names.
       const [institutionRows] = await pool.execute(
-          `SELECT i.id, i.name, la.count
-         FROM ${table} i
-         INNER JOIN (
+        `SELECT i.id, i.name, la.count
+         FROM (
            SELECT ${institutionNameExpr} AS institution_key, COUNT(*) AS count
            FROM leads
            ${leadAggWhere}
            GROUP BY institution_key
+           HAVING institution_key IS NOT NULL AND institution_key <> ''
          ) la
+         INNER JOIN ${table} i
            ON la.institution_key = ${institutionJoinExpr}
-         WHERE i.is_active = 1
+           AND i.is_active = 1
          ORDER BY i.name ASC`,
         [...baseParams]
       );
@@ -2102,6 +2112,7 @@ export const getUserAnalytics = async (req, res) => {
             l.student_group,
             l.mandal,
             l.target_date,
+            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), '') AS log_assignment_target_date,
             l.cycle_number,
             l.assigned_to,
             l.assigned_to_pro,
@@ -2132,6 +2143,14 @@ export const getUserAnalytics = async (req, res) => {
 
       const validMandalsSet = new Set(validMandalsRows.map(m => String(m.name || '').trim().toLowerCase()));
 
+      const sliceAssignmentYmd = (v) => {
+        if (v == null || v === '') return null;
+        const s = v instanceof Date ? v.toISOString().slice(0, 10) : String(v).trim();
+        if (!s || s === 'null' || s === 'Invalid Date') return null;
+        const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+        return m ? m[1] : s.slice(0, 10);
+      };
+
       // Latest reclamation metadata per (lead, user)
       const latestReclaimMap = new Map();
       reclamations.forEach(r => {
@@ -2155,16 +2174,14 @@ export const getUserAnalytics = async (req, res) => {
         
         if (!dateKey || dateKey === 'null') return;
 
+        // Prefer target date stored on the assignment log (at assign time); else current lead.target_date.
+        const effectiveYmd =
+          sliceAssignmentYmd(row.log_assignment_target_date) || sliceAssignmentYmd(row.target_date);
         let tDateSegment = '__NULL__';
-        if (row.target_date) {
-          const td = row.target_date instanceof Date
-            ? row.target_date.toISOString().slice(0, 10)
-            : String(row.target_date).slice(0, 10);
-          if (td && td !== 'null') {
-            tDateSegment = td;
-          }
+        if (effectiveYmd) {
+          tDateSegment = effectiveYmd;
         }
-        // One row per (allotted calendar day, current target_date) — same SQL/fetch; split only in memory.
+        // One row per (allotted calendar day, effective target date) — same SQL/fetch; split only in memory.
         const bucketKey = `${dateKey}\t${tDateSegment}`;
 
         if (!perDate.has(bucketKey)) {
@@ -2209,14 +2226,9 @@ export const getUserAnalytics = async (req, res) => {
             bucket.leadStatusCounts[status] = (bucket.leadStatusCounts[status] || 0) + 1;
         }
 
-        // 3. Target Date breakdown
-        if (row.target_date) {
-          const tDate = row.target_date instanceof Date 
-            ? row.target_date.toISOString().slice(0, 10) 
-            : String(row.target_date).slice(0, 10);
-          if (tDate && tDate !== 'null') {
-            bucket.targetDateCounts[tDate] = (bucket.targetDateCounts[tDate] || 0) + 1;
-          }
+        // 3. Target Date breakdown (same effective date as bucket)
+        if (effectiveYmd) {
+          bucket.targetDateCounts[effectiveYmd] = (bucket.targetDateCounts[effectiveYmd] || 0) + 1;
         }
 
         // 4. Student Group breakdown
