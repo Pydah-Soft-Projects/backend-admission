@@ -2155,9 +2155,23 @@ export const getUserAnalytics = async (req, res) => {
         
         if (!dateKey || dateKey === 'null') return;
 
-        if (!perDate.has(dateKey)) {
-          perDate.set(dateKey, {
+        let tDateSegment = '__NULL__';
+        if (row.target_date) {
+          const td = row.target_date instanceof Date
+            ? row.target_date.toISOString().slice(0, 10)
+            : String(row.target_date).slice(0, 10);
+          if (td && td !== 'null') {
+            tDateSegment = td;
+          }
+        }
+        // One row per (allotted calendar day, current target_date) — same SQL/fetch; split only in memory.
+        const bucketKey = `${dateKey}\t${tDateSegment}`;
+
+        if (!perDate.has(bucketKey)) {
+          perDate.set(bucketKey, {
             date: dateKey,
+            targetDateSortKey: tDateSegment,
+            detailRowKey: bucketKey,
             totalAssigned: 0,
             leadStatusCounts: {},
             statusBeforeReclaimCounts: {}, // For backward compatibility if needed
@@ -2171,7 +2185,7 @@ export const getUserAnalytics = async (req, res) => {
           });
         }
         
-        const bucket = perDate.get(dateKey);
+        const bucket = perDate.get(bucketKey);
         bucket.totalAssigned++;
         
         // 1. Current Engagement status (for Balance/Pending calculations)
@@ -2306,7 +2320,15 @@ export const getUserAnalytics = async (req, res) => {
           const perDateMap = assignmentByDateMap.get(String(user.id || '').trim().toLowerCase());
           if (!perDateMap) return [];
           return Array.from(perDateMap.values())
-            .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+            .sort((a, b) => {
+              const byDate = String(b.date).localeCompare(String(a.date));
+              if (byDate !== 0) return byDate;
+              const aSk = a.targetDateSortKey || '__NULL__';
+              const bSk = b.targetDateSortKey || '__NULL__';
+              if (aSk === '__NULL__' && bSk !== '__NULL__') return 1;
+              if (bSk === '__NULL__' && aSk !== '__NULL__') return -1;
+              return String(aSk).localeCompare(String(bSk));
+            });
         })(),
       };
     });
