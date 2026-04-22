@@ -1855,6 +1855,30 @@ export const getUserAnalytics = async (req, res) => {
     const assignmentDateWhere =
       assignmentDateConditions.length > 0 ? `AND ${assignmentDateConditions.join(' AND ')}` : '';
 
+    /** Reclamation rows aligned with report filters (assignment previously had no date filter → “Reclaimed” looked inflated vs future target dates). */
+    const reclaimLogConditions = [];
+    const reclaimLogParamsSuffix = [];
+    if (startDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      reclaimLogConditions.push('created_at >= ?');
+      reclaimLogParamsSuffix.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      reclaimLogConditions.push('created_at <= ?');
+      reclaimLogParamsSuffix.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (useAcademicYear) {
+      reclaimLogConditions.push(
+        'EXISTS (SELECT 1 FROM leads l_r WHERE l_r.id = activity_logs.lead_id AND l_r.academic_year = ?)'
+      );
+      reclaimLogParamsSuffix.push(yearNum);
+    }
+    const reclaimLogWhere =
+      reclaimLogConditions.length > 0 ? `AND ${reclaimLogConditions.join(' AND ')}` : '';
+
     // Build user filter
     let userConditions = ["role_name NOT IN ('Super Admin', 'Sub Super Admin')"];
     let userParams = [];
@@ -2110,6 +2134,7 @@ export const getUserAnalytics = async (req, res) => {
     };
 
     /** Cohort = leads with assignment to user in period; Calls/Visits Done = outcome calls only on that cohort (counsellor reporting). */
+    const cohortAnalyticUserKey = (id) => String(id ?? '').trim().toLowerCase();
     const allottedDistinctMap = new Map();
     const allottedByCallStatusByUser = new Map();
     const callsAmongAllottedMap = new Map();
@@ -2169,7 +2194,7 @@ export const getUserAnalytics = async (req, res) => {
     const emptyExec = [[], []];
     const cohortPromise =
       filteredUserIds.length === 0
-        ? Promise.resolve([emptyExec, emptyExec, emptyExec])
+        ? Promise.resolve([emptyExec, emptyExec, emptyExec, emptyExec])
         : Promise.all([
             pool.execute(
               `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
@@ -2211,6 +2236,27 @@ export const getUserAnalytics = async (req, res) => {
                GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
               cohortCommParams
             ),
+            pool.execute(
+              `SELECT agg.user_id, SUM(agg.cnt) AS bucket_sum
+               FROM (
+                 SELECT
+                   a.target_user_id AS user_id,
+                   DATE(a.created_at) AS assigned_day,
+                   COALESCE(
+                     NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
+                     IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d'))
+                   ) AS eff_target,
+                   COUNT(DISTINCT a.lead_id) AS cnt
+                 FROM activity_logs a
+                 INNER JOIN leads l ON l.id = a.lead_id
+                 WHERE a.type = 'status_change'
+                   AND a.target_user_id IN (${userIdPlaceholders})
+                   ${assignmentDateWhere}
+                 GROUP BY a.target_user_id, DATE(a.created_at), eff_target
+               ) agg
+               GROUP BY agg.user_id`,
+              assignJoinParams
+            ),
           ]);
 
     const [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
@@ -2219,13 +2265,20 @@ export const getUserAnalytics = async (req, res) => {
     const allottedDistinctRows = cohortTriple[0][0];
     const allottedStatusRows = cohortTriple[1][0];
     const cohortOutcomeRows = cohortTriple[2][0];
+    const allottedBucketSumRows = cohortTriple[3][0];
+
+    /** Sum of date-wise “Total Allotted” cells (same lead may appear in multiple buckets). */
+    const allottedBucketSumMap = new Map();
+    allottedBucketSumRows.forEach((row) => {
+      allottedBucketSumMap.set(cohortAnalyticUserKey(row.user_id), numAgg(row.bucket_sum));
+    });
 
     allottedDistinctRows.forEach((row) => {
-      allottedDistinctMap.set(String(row.user_id), numAgg(row.cnt));
+      allottedDistinctMap.set(cohortAnalyticUserKey(row.user_id), numAgg(row.cnt));
     });
 
     allottedStatusRows.forEach((row) => {
-      const uid = String(row.user_id ?? '');
+      const uid = cohortAnalyticUserKey(row.user_id);
       const key = canonicalCounselorCallStatusForReports(row.bucket);
       if (!allottedByCallStatusByUser.has(uid)) allottedByCallStatusByUser.set(uid, {});
       const bag = allottedByCallStatusByUser.get(uid);
@@ -2233,7 +2286,7 @@ export const getUserAnalytics = async (req, res) => {
     });
 
     cohortOutcomeRows.forEach((row) => {
-      const uid = String(row.user_id ?? '');
+      const uid = cohortAnalyticUserKey(row.user_id);
       const key = canonicalCounselorCallStatusForReports(row.bucket);
       if (!callsAmongAllottedByCallStatusByUser.has(uid)) callsAmongAllottedByCallStatusByUser.set(uid, {});
       const bag = callsAmongAllottedByCallStatusByUser.get(uid);
@@ -2250,8 +2303,6 @@ export const getUserAnalytics = async (req, res) => {
 
     const assignmentByDateMap = new Map();
     const reclaimedUniqueMap = new Map();
-    /** Student Counselor expanded balance: max(0, allotted − portfolio outcome calls), aligned with pendingBalance rule. */
-    let periodBalanceByPortfolioRuleMap = new Map();
 
     if (shouldIncludeAssignmentDetails) {
       const [
@@ -2291,8 +2342,9 @@ export const getUserAnalytics = async (req, res) => {
             created_at
           FROM activity_logs
           WHERE type = 'status_change' AND source_user_id IN (${userIdPlaceholders})
+          ${reclaimLogWhere}
           ORDER BY created_at DESC`,
-          [...filteredUserIds]
+          [...filteredUserIds, ...reclaimLogParamsSuffix]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
@@ -2315,9 +2367,6 @@ export const getUserAnalytics = async (req, res) => {
         const key = `${r.lead_id}-${r.previous_assignee}`;
         if (!latestReclaimMap.has(key)) latestReclaimMap.set(key, r);
       });
-
-      /** Distinct leads with an assignment log to the user in the assignment window (same cohort as allotted totals). */
-      const allottedPeriodLeadIdsByUser = new Map();
 
       rawAssignments.forEach(row => {
         const userKey = String(row.user_id).trim().toLowerCase();
@@ -2382,9 +2431,6 @@ export const getUserAnalytics = async (req, res) => {
         if (!lid) return;
         bucket._allLeadIds.add(lid);
 
-        if (!allottedPeriodLeadIdsByUser.has(userKey)) allottedPeriodLeadIdsByUser.set(userKey, new Set());
-        allottedPeriodLeadIdsByUser.get(userKey).add(lid);
-
         // 1. Current Engagement status (distinct students)
         if (row.assigned_to === null && row.assigned_to_pro === null) {
           bucket._unassignedLeadIds.add(lid);
@@ -2445,38 +2491,6 @@ export const getUserAnalytics = async (req, res) => {
         bucket._mandalLeadSets[mandal].add(lid);
       });
 
-      const portfolioOutcomeLeadsByUser = new Map();
-      const portfolioOutcomeParams = useAcademicYear
-        ? [...filteredUserIds, ...activityDateParams, yearNum]
-        : [...filteredUserIds, ...activityDateParams];
-      const [portfolioOutcomeRows] = await pool.execute(
-        `SELECT DISTINCT c.sent_by AS user_id, c.lead_id AS lead_id
-         FROM communications c
-         INNER JOIN leads l ON l.id = c.lead_id
-         WHERE c.type = 'call'
-           AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
-           AND c.sent_by IN (${userIdPlaceholders})
-           ${activityDateClause}
-           AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}`,
-        portfolioOutcomeParams
-      );
-      portfolioOutcomeRows.forEach((row) => {
-        const uk = String(row.user_id ?? '').trim().toLowerCase();
-        if (!portfolioOutcomeLeadsByUser.has(uk)) portfolioOutcomeLeadsByUser.set(uk, new Set());
-        portfolioOutcomeLeadsByUser.get(uk).add(String(row.lead_id ?? ''));
-      });
-
-      periodBalanceByPortfolioRuleMap = new Map();
-      allottedPeriodLeadIdsByUser.forEach((leadSet, uk) => {
-        const outcomeSet = portfolioOutcomeLeadsByUser.get(uk) || new Set();
-        let withOutcome = 0;
-        leadSet.forEach((lid) => {
-          if (outcomeSet.has(lid)) withOutcome++;
-        });
-        periodBalanceByPortfolioRuleMap.set(uk, Math.max(0, leadSet.size - withOutcome));
-      });
-
       const setRecordToCounts = (rec) => {
         const out = {};
         if (!rec || typeof rec !== 'object') return out;
@@ -2486,17 +2500,19 @@ export const getUserAnalytics = async (req, res) => {
         return out;
       };
 
-      assignmentByDateMap.forEach((perDate, userKey) => {
-        const outcomeSet = portfolioOutcomeLeadsByUser.get(userKey) || new Set();
+      assignmentByDateMap.forEach((perDate) => {
         perDate.forEach((bucket) => {
-          let withOutcomeInBucket = 0;
-          if (bucket._allLeadIds) {
-            bucket._allLeadIds.forEach((lid) => {
-              if (outcomeSet.has(String(lid))) withOutcomeInBucket++;
+          let assignedBalance = 0;
+          const css = bucket._callStatusLeadSets;
+          if (css && typeof css === 'object') {
+            Object.entries(css).forEach(([k, set]) => {
+              if (canonicalCounselorCallStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
+                assignedBalance += set.size;
+              }
             });
           }
           const nTot = bucket._allLeadIds ? bucket._allLeadIds.size : 0;
-          bucket.balanceByPortfolioRule = Math.max(0, nTot - withOutcomeInBucket);
+          bucket.balanceByPortfolioRule = assignedBalance;
           bucket.totalAssigned = nTot;
           bucket.callStatusCounts = setRecordToCounts(bucket._callStatusLeadSets);
           bucket.visitStatusCounts = setRecordToCounts(bucket._visitStatusLeadSets);
@@ -2569,13 +2585,14 @@ export const getUserAnalytics = async (req, res) => {
       const reclaimedUniqueLeads = reclaimedUniqueMap.get(String(user.id || '').trim().toLowerCase()) || 0;
 
       const totalAssigned = stats.total_assigned;
-      const uidForCohort = String(user.id ?? '');
+      const uidForCohort = cohortAnalyticUserKey(user.id);
       const isStudentCounselor = user.role_name === 'Student Counselor';
       const cohortCallsDoneAmongAllotted = numAgg(callsAmongAllottedMap.get(uidForCohort) ?? 0);
       /** Table Calls/Visits Done = allotted-period footer sum without Assigned column (aligned with expanded table). */
-      const allottedCallsVisitsDoneDisplay = sumCounselorCallStatusBucketsExcludingAssigned(
-        allottedByCallStatusByUser.get(uidForCohort)
-      );
+      const allottedCallStatusBag = allottedByCallStatusByUser.get(uidForCohort);
+      const allottedCallsVisitsDoneDisplay =
+        sumCounselorCallStatusBucketsExcludingAssigned(allottedCallStatusBag);
+      const counsellorBucketSum = isStudentCounselor ? numAgg(allottedBucketSumMap.get(uidForCohort) ?? 0) : 0;
 
       return {
         id: user.id,
@@ -2590,6 +2607,8 @@ export const getUserAnalytics = async (req, res) => {
         group: user.group || '-',
         isActive: user.is_active === 1 || user.is_active === true,
         totalAssigned,
+        /** Student Counselor: sum of expanded table “Total Allotted” (bucket rows); portfolio “total handled” stays in totalAssigned for other uses. */
+        allottedBucketSumTotal: isStudentCounselor ? counsellorBucketSum : undefined,
         activeLeads: stats.active_leads,
         convertedLeads: stats.total_converted,
         interested: stats.statusBreakdown['Interested'] || 0,
@@ -2606,7 +2625,9 @@ export const getUserAnalytics = async (req, res) => {
           averageDuration: comms.calls.total > 0 ? Math.round(comms.calls.duration / comms.calls.total) : 0,
         },
         callsOnCurrentPortfolio,
-        pendingBalance: Math.max(Number(totalAssigned || 0) - Number(callsOnCurrentPortfolio || 0), 0),
+        pendingBalance: isStudentCounselor
+          ? Math.max(0, counsellorBucketSum - allottedCallsVisitsDoneDisplay)
+          : Math.max(Number(totalAssigned || 0) - Number(callsOnCurrentPortfolio || 0), 0),
         reclaimedUniqueLeads,
         sms: {
           total: comms.sms,
@@ -2619,13 +2640,13 @@ export const getUserAnalytics = async (req, res) => {
             ? {
                 performanceCohort: {
                   allottedDistinctLeads: numAgg(allottedDistinctMap.get(uidForCohort) ?? 0),
-                  allottedByCallStatus: allottedByCallStatusByUser.get(uidForCohort) || {},
+                  allottedByCallStatus: allottedCallStatusBag || {},
                   callsDoneAmongAllotted: cohortCallsDoneAmongAllotted,
                   callsDoneAmongAllottedByCallStatus:
                     callsAmongAllottedByCallStatusByUser.get(uidForCohort) || {},
-                  /** max(0, distinct allotted leads in period − leads with outcome call while still assigned to counsellor); matches main pendingBalance logic scoped to allotment period. */
+                  /** Footer Balance column: same as main-row pendingBalance — bucket-sum allotted − Calls/Visits Done (non‑Assigned status sum). Per-row Balance cells stay Assigned-based. */
                   periodBalanceByPortfolioRule: numAgg(
-                    periodBalanceByPortfolioRuleMap.get(String(uidForCohort || '').trim().toLowerCase()) ?? 0
+                    Math.max(0, counsellorBucketSum - allottedCallsVisitsDoneDisplay)
                   ),
                 },
               }
