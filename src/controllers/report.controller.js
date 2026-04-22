@@ -50,8 +50,8 @@ export const getDailyCallReports = async (req, res) => {
 
     const pool = getPool();
 
-    // Build WHERE conditions
-    const conditions = ['type = ?'];
+    // Build WHERE conditions — only count calls that record an outcome (same path that updates call_status for counsellors)
+    const conditions = ['type = ?', 'call_outcome IS NOT NULL', "TRIM(call_outcome) <> ''"];
     const params = ['call'];
 
     if (hasDates) {

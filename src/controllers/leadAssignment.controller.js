@@ -21,6 +21,26 @@ const stableStringify = (value) => {
   return JSON.stringify(value);
 };
 
+/** Same labels as Super Admin reports `COUNSELLOR_CALL_STATUS_COLUMNS` — merge DB variants into one bucket. */
+const COUNSELLOR_CALL_STATUS_CANONICAL = [
+  'Assigned',
+  'Interested',
+  'Not Interested',
+  'Not Answered',
+  'Wrong Data',
+  'Call Back',
+  'Confirmed',
+  'CET Applied',
+];
+
+const canonicalCounselorCallStatusForReports = (label) => {
+  const t = String(label ?? '').trim();
+  if (!t || /^not\s*set$/i.test(t)) return 'Not set';
+  const lower = t.toLowerCase();
+  const hit = COUNSELLOR_CALL_STATUS_CANONICAL.find((s) => s.toLowerCase() === lower);
+  return hit || t;
+};
+
 const getCachedAssignmentStats = (key) => {
   const hit = assignmentStatsCache.get(key);
   if (!hit) return null;
@@ -1218,12 +1238,16 @@ export const getMyCallAnalytics = async (req, res) => {
       `SELECT c.*, l.id as lead_id, l.name as lead_name, l.phone as lead_phone, l.enquiry_number
        FROM communications c
        LEFT JOIN leads l ON c.lead_id = l.id
-       WHERE c.sent_by = ? AND c.type = 'call' ${callDateClause}
+       WHERE c.sent_by = ? AND c.type = 'call'
+         AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
+         ${callDateClause}
        ORDER BY c.sent_at DESC`,
       [userId, ...activityDateParams]
     ).catch(() => [[]]);
 
-    const totalCalls = calls.length;
+    const distinctLeadIds = new Set((calls || []).map((row) => row.lead_id).filter(Boolean));
+    const totalCallsDistinctLeads = distinctLeadIds.size;
+    const totalCallAttempts = calls.length;
     const totalCallDuration = calls.reduce((sum, call) => sum + (call.duration_seconds || 0), 0);
     const dailyCallActivityMap = {};
     calls.forEach((call) => {
@@ -1249,11 +1273,17 @@ export const getMyCallAnalytics = async (req, res) => {
     });
     const dailyCallActivity = Object.keys(dailyCallActivityMap)
       .sort()
-      .map((date) => ({
-        date: dailyCallActivityMap[date].date,
-        callCount: dailyCallActivityMap[date].callCount,
-        leads: Object.values(dailyCallActivityMap[date].leads),
-      }));
+      .map((date) => {
+        const bucket = dailyCallActivityMap[date];
+        const leadsArr = Object.values(bucket.leads);
+        return {
+          date: bucket.date,
+          distinctLeads: leadsArr.length,
+          attempts: bucket.callCount,
+          callCount: leadsArr.length,
+          leads: leadsArr,
+        };
+      });
 
     const [smsMessages] = await pool.execute(
       `SELECT c.* FROM communications c
@@ -1274,8 +1304,9 @@ export const getMyCallAnalytics = async (req, res) => {
     const report = {
       totalAssigned,
       calls: {
-        total: totalCalls,
-        averageDuration: totalCalls > 0 ? Math.round(totalCallDuration / totalCalls) : 0,
+        total: totalCallsDistinctLeads,
+        totalAttempts: totalCallAttempts,
+        averageDuration: totalCallAttempts > 0 ? Math.round(totalCallDuration / totalCallAttempts) : 0,
         dailyCallActivity,
       },
       sms: { total: totalSMS },
@@ -1683,10 +1714,13 @@ export const getUserAnalytics = async (req, res) => {
       managedBy: isManager && !isAdmin ? currentUserId : null,
     });
 
-    if (String(bypassCache).toLowerCase() !== 'true') {
+    if (String(bypassCache || '').toLowerCase() !== 'true') {
       const cached = analyticsCache.get(cacheKey);
-      if (cached && Date.now() < cached.expiresAt) {
-        return successResponse(res, cached.data, 'User analytics retrieved from cache', 200);
+      if (cached) {
+        if (Date.now() < cached.expiresAt) {
+          return successResponse(res, cached.data, 'User analytics retrieved from cache', 200);
+        }
+        analyticsCache.delete(cacheKey);
       }
     }
 
@@ -1714,6 +1748,28 @@ export const getUserAnalytics = async (req, res) => {
     const activityDateClause = activityDateConditions.length > 0
       ? `AND ${activityDateConditions.map((c, i) => `sent_at ${c}`).join(' AND ')}`
       : '';
+
+    /** Assignment logs in the selected period (same window as date-wise expanded rows). */
+    let assignmentDateConditions = [];
+    let assignmentDateParams = [];
+    if (startDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      assignmentDateConditions.push('a.created_at >= ?');
+      assignmentDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      assignmentDateConditions.push('a.created_at <= ?');
+      assignmentDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
+    }
+    if (useAcademicYear) {
+      assignmentDateConditions.push('l.academic_year = ?');
+      assignmentDateParams.push(yearNum);
+    }
+    const assignmentDateWhere =
+      assignmentDateConditions.length > 0 ? `AND ${assignmentDateConditions.join(' AND ')}` : '';
 
     // Build user filter
     let userConditions = ["role_name NOT IN ('Super Admin', 'Sub Super Admin')"];
@@ -2042,6 +2098,10 @@ export const getUserAnalytics = async (req, res) => {
           COUNT(DISTINCT lead_id) as unique_leads
         FROM communications 
         WHERE sent_by IN (${selectedUserPlaceholders}) ${activityDateClause}
+          AND (
+            type <> 'call'
+            OR (call_outcome IS NOT NULL AND TRIM(call_outcome) <> '')
+          )
         GROUP BY sent_by, type`,
         [...selectedUserIds, ...activityDateParams]
       ),
@@ -2052,6 +2112,7 @@ export const getUserAnalytics = async (req, res) => {
         FROM communications c
         INNER JOIN leads l ON l.id = c.lead_id
         WHERE c.type = 'call'
+          AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
           AND c.sent_by IN (${selectedUserPlaceholders})
           ${activityDateClause}
           AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
@@ -2072,32 +2133,111 @@ export const getUserAnalytics = async (req, res) => {
         [...selectedUserIds, ...activityDateParams]
       )
     ]);    // Date-wise assignment details aggregation - Directly populate the map
+
+    const numAgg = (v) => {
+      const n = typeof v === 'bigint' ? Number(v) : Number(v || 0);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    /** Sum call_status bucket counts excluding Assigned — same arithmetic as footer row (Interested + … + Other). */
+    const sumCounselorCallStatusBucketsExcludingAssigned = (bag) => {
+      if (!bag || typeof bag !== 'object') return 0;
+      let s = 0;
+      Object.entries(bag).forEach(([key, v]) => {
+        if (canonicalCounselorCallStatusForReports(key) === 'Assigned') return;
+        s += numAgg(v);
+      });
+      return s;
+    };
+
+    /** Cohort = leads with assignment to user in period; Calls/Visits Done = outcome calls only on that cohort (counsellor reporting). */
+    const allottedDistinctMap = new Map();
+    const allottedByCallStatusByUser = new Map();
+    const callsAmongAllottedMap = new Map();
+    const callsAmongAllottedByCallStatusByUser = new Map();
+
+    if (filteredUserIds.length > 0) {
+      const assignJoinParams = [...filteredUserIds, ...assignmentDateParams];
+
+      const [allottedDistinctRows] = await pool.execute(
+        `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
+         FROM activity_logs a
+         INNER JOIN leads l ON l.id = a.lead_id
+         WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+         ${assignmentDateWhere}`,
+        assignJoinParams
+      );
+      allottedDistinctRows.forEach((row) => {
+        allottedDistinctMap.set(String(row.user_id), numAgg(row.cnt));
+      });
+
+      const [allottedStatusRows] = await pool.execute(
+        `SELECT a.target_user_id AS user_id,
+          CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+          COUNT(DISTINCT a.lead_id) AS cnt
+         FROM activity_logs a
+         INNER JOIN leads l ON l.id = a.lead_id
+         WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+         ${assignmentDateWhere}
+         GROUP BY a.target_user_id, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+        assignJoinParams
+      );
+      allottedStatusRows.forEach((row) => {
+        const uid = String(row.user_id ?? '');
+        const key = canonicalCounselorCallStatusForReports(row.bucket);
+        if (!allottedByCallStatusByUser.has(uid)) allottedByCallStatusByUser.set(uid, {});
+        const bag = allottedByCallStatusByUser.get(uid);
+        bag[key] = (bag[key] || 0) + numAgg(row.cnt);
+      });
+
+      const assignmentExistsWhere = assignmentDateWhere.replace(/\bl\./g, 'la.');
+      const cohortCommParams = [...filteredUserIds, ...activityDateParams, ...assignmentDateParams];
+
+      const [cohortOutcomeRows] = await pool.execute(
+        `SELECT c.sent_by AS user_id,
+          CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+          COUNT(DISTINCT c.lead_id) AS cnt
+         FROM communications c
+         INNER JOIN leads l ON l.id = c.lead_id
+         WHERE c.sent_by IN (${userIdPlaceholders})
+           AND c.type = 'call'
+           AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
+           ${activityDateClause}
+           AND EXISTS (
+             SELECT 1 FROM activity_logs a
+             INNER JOIN leads la ON la.id = a.lead_id
+             WHERE a.type = 'status_change'
+               AND a.target_user_id = c.sent_by
+               AND a.lead_id = c.lead_id
+               ${assignmentExistsWhere}
+           )
+         GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+        cohortCommParams
+      );
+
+      cohortOutcomeRows.forEach((row) => {
+        const uid = String(row.user_id ?? '');
+        const key = canonicalCounselorCallStatusForReports(row.bucket);
+        if (!callsAmongAllottedByCallStatusByUser.has(uid)) callsAmongAllottedByCallStatusByUser.set(uid, {});
+        const bag = callsAmongAllottedByCallStatusByUser.get(uid);
+        bag[key] = (bag[key] || 0) + numAgg(row.cnt);
+      });
+
+      callsAmongAllottedByCallStatusByUser.forEach((bag, uid) => {
+        let s = 0;
+        Object.values(bag).forEach((v) => {
+          s += Number(v) || 0;
+        });
+        callsAmongAllottedMap.set(uid, s);
+      });
+    }
+
     const assignmentByDateMap = new Map();
     const reclaimedUniqueMap = new Map();
+    /** Student Counselor expanded balance: max(0, allotted − portfolio outcome calls), aligned with pendingBalance rule. */
+    let periodBalanceByPortfolioRuleMap = new Map();
 
     if (shouldIncludeAssignmentDetails) {
-      const assignmentDateConditions = [];
-      const assignmentDateParams = [];
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        assignmentDateConditions.push('a.created_at >= ?');
-        assignmentDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        assignmentDateConditions.push('a.created_at <= ?');
-        assignmentDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
-      }
-      if (useAcademicYear) {
-        assignmentDateConditions.push('l.academic_year = ?');
-        assignmentDateParams.push(yearNum);
-      }
-      const assignmentDateWhere = assignmentDateConditions.length > 0
-        ? `AND ${assignmentDateConditions.join(' AND ')}`
-        : '';
-
       const [
         [rawAssignments],
         [reclamations],
@@ -2109,6 +2249,8 @@ export const getUserAnalytics = async (req, res) => {
             DATE(a.created_at) as assigned_date, 
             a.lead_id,
             l.lead_status,
+            l.call_status,
+            l.visit_status,
             l.student_group,
             l.mandal,
             l.target_date,
@@ -2158,6 +2300,9 @@ export const getUserAnalytics = async (req, res) => {
         if (!latestReclaimMap.has(key)) latestReclaimMap.set(key, r);
       });
 
+      /** Distinct leads with an assignment log to the user in the assignment window (same cohort as allotted totals). */
+      const allottedPeriodLeadIdsByUser = new Map();
+
       rawAssignments.forEach(row => {
         const userKey = String(row.user_id).trim().toLowerCase();
         if (!userKey) return;
@@ -2199,52 +2344,166 @@ export const getUserAnalytics = async (req, res) => {
             targetDateCounts: {},
             studentGroupCounts: {},
             mandalCounts: {},
+            callStatusCounts: {},
+            visitStatusCounts: {},
+            /** Distinct students (lead_id) — materialized after rawAssignments loop */
+            _allLeadIds: new Set(),
+            _callStatusLeadSets: {},
+            _visitStatusLeadSets: {},
+            _leadStatusLeadSets: {},
+            _mandalLeadSets: {},
+            _studentGroupLeadSets: {},
+            _targetDateLeadSets: {},
+            _reclaimedLeadIds: new Set(),
+            _unassignedLeadIds: new Set(),
+            _sameUserLeadIds: new Set(),
+            _otherUserLeadIds: new Set(),
           });
         }
-        
+
         const bucket = perDate.get(bucketKey);
-        bucket.totalAssigned++;
-        
-        // 1. Current Engagement status (for Balance/Pending calculations)
+        const lid = String(row.lead_id ?? '');
+        if (!lid) return;
+        bucket._allLeadIds.add(lid);
+
+        if (!allottedPeriodLeadIdsByUser.has(userKey)) allottedPeriodLeadIdsByUser.set(userKey, new Set());
+        allottedPeriodLeadIdsByUser.get(userKey).add(lid);
+
+        // 1. Current Engagement status (distinct students)
         if (row.assigned_to === null && row.assigned_to_pro === null) {
-          bucket.currentlyUnassigned++;
+          bucket._unassignedLeadIds.add(lid);
         } else if (row.assigned_to === row.user_id || row.assigned_to_pro === row.user_id) {
-          bucket.currentlyWithSameUser++;
+          bucket._sameUserLeadIds.add(lid);
         } else {
-          bucket.movedToOtherUser++;
+          bucket._otherUserLeadIds.add(lid);
         }
-        
-        // 2. Lead Status / Reclamation check
+
+        // 2. Lead Status / Reclamation check (distinct students per bucket label)
         const rKey = `${row.lead_id}-${row.user_id}`;
         const reclaimMeta = latestReclaimMap.get(rKey);
         if (reclaimMeta) {
-            bucket.reclaimedCount++;
-            const status = (reclaimMeta.old_status_meta || reclaimMeta.old_status || 'Unknown').trim() || 'Unknown';
-            bucket.leadStatusCounts[status] = (bucket.leadStatusCounts[status] || 0) + 1;
+          bucket._reclaimedLeadIds.add(lid);
+          const status = (reclaimMeta.old_status_meta || reclaimMeta.old_status || 'Unknown').trim() || 'Unknown';
+          if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
+          bucket._leadStatusLeadSets[status].add(lid);
         } else {
-            const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
-            bucket.leadStatusCounts[status] = (bucket.leadStatusCounts[status] || 0) + 1;
+          const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
+          if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
+          bucket._leadStatusLeadSets[status].add(lid);
         }
 
-        // 3. Target Date breakdown (same effective date as bucket)
+        const callS =
+          row.call_status != null && String(row.call_status).trim() !== ''
+            ? String(row.call_status).trim()
+            : 'Not set';
+        if (!bucket._callStatusLeadSets[callS]) bucket._callStatusLeadSets[callS] = new Set();
+        bucket._callStatusLeadSets[callS].add(lid);
+        const visitS =
+          row.visit_status != null && String(row.visit_status).trim() !== ''
+            ? String(row.visit_status).trim()
+            : 'Not set';
+        if (!bucket._visitStatusLeadSets[visitS]) bucket._visitStatusLeadSets[visitS] = new Set();
+        bucket._visitStatusLeadSets[visitS].add(lid);
+
+        // 3. Target Date breakdown (distinct students per target date key)
         if (effectiveYmd) {
-          bucket.targetDateCounts[effectiveYmd] = (bucket.targetDateCounts[effectiveYmd] || 0) + 1;
+          if (!bucket._targetDateLeadSets[effectiveYmd]) bucket._targetDateLeadSets[effectiveYmd] = new Set();
+          bucket._targetDateLeadSets[effectiveYmd].add(lid);
         }
 
-        // 4. Student Group breakdown
+        // 4. Student Group breakdown (distinct students per group)
         const sGroup = (row.student_group || 'Unknown').trim() || 'Unknown';
-        bucket.studentGroupCounts[sGroup] = (bucket.studentGroupCounts[sGroup] || 0) + 1;
+        if (!bucket._studentGroupLeadSets[sGroup]) bucket._studentGroupLeadSets[sGroup] = new Set();
+        bucket._studentGroupLeadSets[sGroup].add(lid);
 
-        // 5. Mandal breakdown
+        // 5. Mandal breakdown (distinct students per mandal label)
         let mandal = (row.mandal || 'Unknown').trim() || 'Unknown';
         const mandalLow = mandal.toLowerCase();
-        
+
         if (mandal === 'Unknown') {
           // Stay as Unknown
         } else if (row.needs_manual_update === 1 || row.needs_manual_update === 2 || !validMandalsSet.has(mandalLow)) {
           mandal = 'Others';
         }
-        bucket.mandalCounts[mandal] = (bucket.mandalCounts[mandal] || 0) + 1;
+        if (!bucket._mandalLeadSets[mandal]) bucket._mandalLeadSets[mandal] = new Set();
+        bucket._mandalLeadSets[mandal].add(lid);
+      });
+
+      const portfolioOutcomeLeadsByUser = new Map();
+      const portfolioOutcomeParams = useAcademicYear
+        ? [...filteredUserIds, ...activityDateParams, yearNum]
+        : [...filteredUserIds, ...activityDateParams];
+      const [portfolioOutcomeRows] = await pool.execute(
+        `SELECT DISTINCT c.sent_by AS user_id, c.lead_id AS lead_id
+         FROM communications c
+         INNER JOIN leads l ON l.id = c.lead_id
+         WHERE c.type = 'call'
+           AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
+           AND c.sent_by IN (${userIdPlaceholders})
+           ${activityDateClause}
+           AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}`,
+        portfolioOutcomeParams
+      );
+      portfolioOutcomeRows.forEach((row) => {
+        const uk = String(row.user_id ?? '').trim().toLowerCase();
+        if (!portfolioOutcomeLeadsByUser.has(uk)) portfolioOutcomeLeadsByUser.set(uk, new Set());
+        portfolioOutcomeLeadsByUser.get(uk).add(String(row.lead_id ?? ''));
+      });
+
+      periodBalanceByPortfolioRuleMap = new Map();
+      allottedPeriodLeadIdsByUser.forEach((leadSet, uk) => {
+        const outcomeSet = portfolioOutcomeLeadsByUser.get(uk) || new Set();
+        let withOutcome = 0;
+        leadSet.forEach((lid) => {
+          if (outcomeSet.has(lid)) withOutcome++;
+        });
+        periodBalanceByPortfolioRuleMap.set(uk, Math.max(0, leadSet.size - withOutcome));
+      });
+
+      const setRecordToCounts = (rec) => {
+        const out = {};
+        if (!rec || typeof rec !== 'object') return out;
+        Object.entries(rec).forEach(([k, set]) => {
+          if (set && typeof set.size === 'number' && set.size > 0) out[k] = set.size;
+        });
+        return out;
+      };
+
+      assignmentByDateMap.forEach((perDate, userKey) => {
+        const outcomeSet = portfolioOutcomeLeadsByUser.get(userKey) || new Set();
+        perDate.forEach((bucket) => {
+          let withOutcomeInBucket = 0;
+          if (bucket._allLeadIds) {
+            bucket._allLeadIds.forEach((lid) => {
+              if (outcomeSet.has(String(lid))) withOutcomeInBucket++;
+            });
+          }
+          const nTot = bucket._allLeadIds ? bucket._allLeadIds.size : 0;
+          bucket.balanceByPortfolioRule = Math.max(0, nTot - withOutcomeInBucket);
+          bucket.totalAssigned = nTot;
+          bucket.callStatusCounts = setRecordToCounts(bucket._callStatusLeadSets);
+          bucket.visitStatusCounts = setRecordToCounts(bucket._visitStatusLeadSets);
+          bucket.leadStatusCounts = setRecordToCounts(bucket._leadStatusLeadSets);
+          bucket.mandalCounts = setRecordToCounts(bucket._mandalLeadSets);
+          bucket.studentGroupCounts = setRecordToCounts(bucket._studentGroupLeadSets);
+          bucket.targetDateCounts = setRecordToCounts(bucket._targetDateLeadSets);
+          bucket.reclaimedCount = bucket._reclaimedLeadIds ? bucket._reclaimedLeadIds.size : 0;
+          bucket.currentlyUnassigned = bucket._unassignedLeadIds ? bucket._unassignedLeadIds.size : 0;
+          bucket.currentlyWithSameUser = bucket._sameUserLeadIds ? bucket._sameUserLeadIds.size : 0;
+          bucket.movedToOtherUser = bucket._otherUserLeadIds ? bucket._otherUserLeadIds.size : 0;
+          delete bucket._allLeadIds;
+          delete bucket._callStatusLeadSets;
+          delete bucket._visitStatusLeadSets;
+          delete bucket._leadStatusLeadSets;
+          delete bucket._mandalLeadSets;
+          delete bucket._studentGroupLeadSets;
+          delete bucket._targetDateLeadSets;
+          delete bucket._reclaimedLeadIds;
+          delete bucket._unassignedLeadIds;
+          delete bucket._sameUserLeadIds;
+          delete bucket._otherUserLeadIds;
+        });
       });
 
       // Populate reclaimedUniqueMap
@@ -2253,6 +2512,7 @@ export const getUserAnalytics = async (req, res) => {
         perDate.forEach(d => { if (d.reclaimedCount > 0) totalReclaimed++; }); 
         reclaimedUniqueMap.set(userKey, totalReclaimed);
       });
+
     }
 
     // OPTIMIZATION: Use the Map we built earlier during the optimized combined query
@@ -2293,6 +2553,13 @@ export const getUserAnalytics = async (req, res) => {
       const reclaimedUniqueLeads = reclaimedUniqueMap.get(String(user.id || '').trim().toLowerCase()) || 0;
 
       const totalAssigned = stats.total_assigned;
+      const uidForCohort = String(user.id ?? '');
+      const isStudentCounselor = user.role_name === 'Student Counselor';
+      const cohortCallsDoneAmongAllotted = numAgg(callsAmongAllottedMap.get(uidForCohort) ?? 0);
+      /** Table Calls/Visits Done = allotted-period footer sum without Assigned column (aligned with expanded table). */
+      const allottedCallsVisitsDoneDisplay = sumCounselorCallStatusBucketsExcludingAssigned(
+        allottedByCallStatusByUser.get(uidForCohort)
+      );
 
       return {
         id: user.id,
@@ -2315,7 +2582,10 @@ export const getUserAnalytics = async (req, res) => {
         statusBreakdown: stats.statusBreakdown,
         activityLogsCount: logs.total_logs,
         calls: {
-          total: comms.calls.unique, // Following UI expectation of unique leads called
+          // Counsellors: sum of allotted-period breakdown by current call_status, excluding Assigned — matches footer row (Interested + … + Other).
+          // Distinct outcome-call totals (communications) remain in expanded performanceCohort.callsDoneAmongAllotted / …ByCallStatus when details load.
+          // Other roles: distinct leads with any logged outcome call in the activity window (unchanged).
+          total: isStudentCounselor ? allottedCallsVisitsDoneDisplay : comms.calls.unique,
           totalDuration: comms.calls.duration,
           averageDuration: comms.calls.total > 0 ? Math.round(comms.calls.duration / comms.calls.total) : 0,
         },
@@ -2328,6 +2598,22 @@ export const getUserAnalytics = async (req, res) => {
         statusConversions: {
           total: logs.status_changes,
         },
+        expandedAssignmentDiagnostics:
+          shouldIncludeAssignmentDetails && isStudentCounselor
+            ? {
+                performanceCohort: {
+                  allottedDistinctLeads: numAgg(allottedDistinctMap.get(uidForCohort) ?? 0),
+                  allottedByCallStatus: allottedByCallStatusByUser.get(uidForCohort) || {},
+                  callsDoneAmongAllotted: cohortCallsDoneAmongAllotted,
+                  callsDoneAmongAllottedByCallStatus:
+                    callsAmongAllottedByCallStatusByUser.get(uidForCohort) || {},
+                  /** max(0, distinct allotted leads in period − leads with outcome call while still assigned to counsellor); matches main pendingBalance logic scoped to allotment period. */
+                  periodBalanceByPortfolioRule: numAgg(
+                    periodBalanceByPortfolioRuleMap.get(String(uidForCohort || '').trim().toLowerCase()) ?? 0
+                  ),
+                },
+              }
+            : undefined,
         assignmentsByDate: (() => {
           const perDateMap = assignmentByDateMap.get(String(user.id || '').trim().toLowerCase());
           if (!perDateMap) return [];
@@ -2345,7 +2631,14 @@ export const getUserAnalytics = async (req, res) => {
       };
     });
 
-    return successResponse(res, { users: userAnalytics }, 'User analytics retrieved successfully', 200);
+    const payload = { users: userAnalytics };
+    if (String(bypassCache || '').toLowerCase() !== 'true') {
+      analyticsCache.set(cacheKey, {
+        data: payload,
+        expiresAt: Date.now() + ANALYTICS_CACHE_MS,
+      });
+    }
+    return successResponse(res, payload, 'User analytics retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting user analytics:', error);
     return errorResponse(res, error.message || 'Failed to get user analytics', 500);
