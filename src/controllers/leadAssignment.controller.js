@@ -10,7 +10,8 @@ const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
 
 const analyticsCache = new Map();
-const ANALYTICS_CACHE_MS = Number(process.env.ANALYTICS_CACHE_MS || 60000);
+/** Default 3 minutes — repeat Performance Summary loads hit cache (override with ANALYTICS_CACHE_MS). */
+const ANALYTICS_CACHE_MS = Number(process.env.ANALYTICS_CACHE_MS || 180000);
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return String(value);
@@ -1675,6 +1676,89 @@ export const getOverviewAnalytics = async (req, res) => {
   }
 };
 
+/** Non-blocking enrichment for Super Admin reports; safe to run parallel with aggregate SQL. */
+async function hydrateUserOrgFromHrms(users, pool) {
+  if (!users?.length) return;
+  try {
+    const hrmsConn = await connectHRMS();
+    const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+    const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+    const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+    const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+    const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
+
+    const [usersWithEmp] = await pool.execute(
+      `SELECT id, emp_no FROM users WHERE id IN (${users.map(() => '?').join(',')})`,
+      users.map((u) => u.id)
+    );
+    const empNos = usersWithEmp.map((u) => u.emp_no).filter(Boolean);
+    if (empNos.length === 0) return;
+
+    const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
+      .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+    const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(Boolean))];
+    const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(Boolean))];
+    const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(Boolean))];
+    const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(Boolean))];
+
+    const [divisions, departments, groups, designations] = await Promise.all([
+      Division.find({ _id: { $in: divIds } }).select('name'),
+      Department.find({ _id: { $in: deptIds } }).select('name'),
+      Group.find({ _id: { $in: groupIds } }).select('name'),
+      Designation.find({ _id: { $in: designationIds } }).select('name'),
+    ]);
+    const divMap = Object.fromEntries(divisions.map((d) => [d._id.toString(), d.name]));
+    const deptMap = Object.fromEntries(departments.map((d) => [d._id.toString(), d.name]));
+    const groupMap = Object.fromEntries(groups.map((g) => [g._id.toString(), g.name]));
+    const designationMap = Object.fromEntries(designations.map((d) => [d._id.toString(), d.name]));
+
+    const extractDesignationName = (emp) => {
+      const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
+      if (byId) return byId;
+      const dynamicFields = emp.dynamicFields || {};
+      if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
+        return dynamicFields.designation_name.trim();
+      }
+      const rawDesignation = dynamicFields.designation;
+      if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
+        try {
+          const parsed = JSON.parse(rawDesignation);
+          if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
+        } catch {
+          // ignore
+        }
+      }
+      return null;
+    };
+
+    const hrmsByEmpNo = new Map(
+      hrmsEmployees.map((emp) => [
+        String(emp.emp_no),
+        {
+          division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+          department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+          group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
+          designation: extractDesignationName(emp),
+        },
+      ])
+    );
+
+    const empByUserId = new Map(usersWithEmp.map((u) => [u.id, String(u.emp_no || '')]));
+    users.forEach((u) => {
+      const empNo = empByUserId.get(u.id);
+      const hrms = empNo ? hrmsByEmpNo.get(empNo) : null;
+      if (hrms) {
+        u.division = hrms.division;
+        u.department = hrms.department;
+        u.group = hrms.group;
+        u.designation = hrms.designation || u.designation || null;
+      }
+    });
+  } catch (hrmsHydrationError) {
+    console.error('HRMS hydration error in getUserAnalytics:', hrmsHydrationError);
+  }
+}
+
 // @desc    Get user-specific analytics (assigned leads and status breakdown)
 // @route   GET /api/leads/analytics/users
 // @access  Private (Super Admin)
@@ -1848,86 +1932,6 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
     }
 
-    // Hydrate designation/org fields from HRMS by emp_no (source of truth)
-    try {
-      const hrmsConn = await connectHRMS();
-      const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
-      const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
-      const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
-      const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
-      const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
-
-      const [usersWithEmp] = await pool.execute(
-        `SELECT id, emp_no FROM users WHERE id IN (${users.map(() => '?').join(',')})`,
-        users.map((u) => u.id)
-      );
-      const empNos = usersWithEmp.map((u) => u.emp_no).filter(Boolean);
-      if (empNos.length > 0) {
-        const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
-          .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
-        const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(Boolean))];
-        const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(Boolean))];
-        const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(Boolean))];
-        const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(Boolean))];
-
-        const [divisions, departments, groups, designations] = await Promise.all([
-          Division.find({ _id: { $in: divIds } }).select('name'),
-          Department.find({ _id: { $in: deptIds } }).select('name'),
-          Group.find({ _id: { $in: groupIds } }).select('name'),
-          Designation.find({ _id: { $in: designationIds } }).select('name'),
-        ]);
-        const divMap = Object.fromEntries(divisions.map((d) => [d._id.toString(), d.name]));
-        const deptMap = Object.fromEntries(departments.map((d) => [d._id.toString(), d.name]));
-        const groupMap = Object.fromEntries(groups.map((g) => [g._id.toString(), g.name]));
-        const designationMap = Object.fromEntries(designations.map((d) => [d._id.toString(), d.name]));
-
-        const extractDesignationName = (emp) => {
-          const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
-          if (byId) return byId;
-          const dynamicFields = emp.dynamicFields || {};
-          if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
-            return dynamicFields.designation_name.trim();
-          }
-          const rawDesignation = dynamicFields.designation;
-          if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
-            try {
-              const parsed = JSON.parse(rawDesignation);
-              if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
-            } catch {
-              // ignore parse errors and fallback
-            }
-          }
-          return null;
-        };
-
-        const hrmsByEmpNo = new Map(
-          hrmsEmployees.map((emp) => [
-            String(emp.emp_no),
-            {
-              division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
-              department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
-              designation: extractDesignationName(emp),
-            },
-          ])
-        );
-
-        const empByUserId = new Map(usersWithEmp.map((u) => [u.id, String(u.emp_no || '')]));
-        users.forEach((u) => {
-          const empNo = empByUserId.get(u.id);
-          const hrms = empNo ? hrmsByEmpNo.get(empNo) : null;
-          if (hrms) {
-            u.division = hrms.division;
-            u.department = hrms.department;
-            u.group = hrms.group;
-            u.designation = hrms.designation || u.designation || null;
-          }
-        });
-      }
-    } catch (hrmsHydrationError) {
-      console.error('HRMS hydration error in getUserAnalytics:', hrmsHydrationError);
-    }
-
     const selectedUserIds = users.map((u) => u.id).filter(Boolean);
     const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
 
@@ -1944,13 +1948,10 @@ export const getUserAnalytics = async (req, res) => {
     // OPTIMIZATION: Use historical logs to get cumulative performance
     const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
 
-    // 1. Get Summary Stats in Parallel
-    const [
-      [portfolioCounts],
-      [actionCounts],
-      [conversionCounts],
-      [activePortfolioCounts]
-    ] = await Promise.all([
+    /** HRMS hydration overlaps first aggregate batch — previously blocked all SQL after user list. */
+    const [, batch1Results] = await Promise.all([
+      hydrateUserOrgFromHrms(users, pool),
+      Promise.all([
       // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
       pool.execute(
         `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
@@ -2048,7 +2049,15 @@ export const getUserAnalytics = async (req, res) => {
           ? [...activityDateParams, ...filteredUserIds, yearNum]
           : [...activityDateParams, ...filteredUserIds]
       )
+      ]),
     ]);
+
+    const [
+      [portfolioCounts],
+      [actionCounts],
+      [conversionCounts],
+      [activePortfolioCounts],
+    ] = batch1Results;
 
     // Initialize statsByUserId Map with all filtered users
     const statsByUserId = new Map();
@@ -2084,11 +2093,34 @@ export const getUserAnalytics = async (req, res) => {
       if (stats) stats.active_leads = row.active_leads;
     });
 
-    const [
-      [commCounts],
-      [currentPortfolioCallCounts],
-      [actLogsCountResult]
-    ] = await Promise.all([
+    const numAgg = (v) => {
+      const n = typeof v === 'bigint' ? Number(v) : Number(v || 0);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    /** Sum call_status bucket counts excluding Assigned — same arithmetic as footer row (Interested + … + Other). */
+    const sumCounselorCallStatusBucketsExcludingAssigned = (bag) => {
+      if (!bag || typeof bag !== 'object') return 0;
+      let s = 0;
+      Object.entries(bag).forEach(([key, v]) => {
+        if (canonicalCounselorCallStatusForReports(key) === 'Assigned') return;
+        s += numAgg(v);
+      });
+      return s;
+    };
+
+    /** Cohort = leads with assignment to user in period; Calls/Visits Done = outcome calls only on that cohort (counsellor reporting). */
+    const allottedDistinctMap = new Map();
+    const allottedByCallStatusByUser = new Map();
+    const callsAmongAllottedMap = new Map();
+    const callsAmongAllottedByCallStatusByUser = new Map();
+
+    const assignmentExistsWhere = assignmentDateWhere.replace(/\bl\./g, 'la.');
+    const cohortCommParams = [...filteredUserIds, ...activityDateParams, ...assignmentDateParams];
+    const assignJoinParams = [...filteredUserIds, ...assignmentDateParams];
+
+    /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
+    const batch2Promise = Promise.all([
       pool.execute(
         `SELECT 
           sent_by as user_id, 
@@ -2131,106 +2163,90 @@ export const getUserAnalytics = async (req, res) => {
         WHERE performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.split('sent_at').join('created_at')}
         GROUP BY performed_by`,
         [...selectedUserIds, ...activityDateParams]
-      )
-    ]);    // Date-wise assignment details aggregation - Directly populate the map
+      ),
+    ]);
 
-    const numAgg = (v) => {
-      const n = typeof v === 'bigint' ? Number(v) : Number(v || 0);
-      return Number.isFinite(n) ? n : 0;
-    };
+    const emptyExec = [[], []];
+    const cohortPromise =
+      filteredUserIds.length === 0
+        ? Promise.resolve([emptyExec, emptyExec, emptyExec])
+        : Promise.all([
+            pool.execute(
+              `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
+               FROM activity_logs a
+               INNER JOIN leads l ON l.id = a.lead_id
+               WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+               ${assignmentDateWhere}`,
+              assignJoinParams
+            ),
+            pool.execute(
+              `SELECT a.target_user_id AS user_id,
+                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+                COUNT(DISTINCT a.lead_id) AS cnt
+               FROM activity_logs a
+               INNER JOIN leads l ON l.id = a.lead_id
+               WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+               ${assignmentDateWhere}
+               GROUP BY a.target_user_id, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+              assignJoinParams
+            ),
+            pool.execute(
+              `SELECT c.sent_by AS user_id,
+                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+                COUNT(DISTINCT c.lead_id) AS cnt
+               FROM communications c
+               INNER JOIN leads l ON l.id = c.lead_id
+               WHERE c.sent_by IN (${userIdPlaceholders})
+                 AND c.type = 'call'
+                 AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
+                 ${activityDateClause}
+                 AND EXISTS (
+                   SELECT 1 FROM activity_logs a
+                   INNER JOIN leads la ON la.id = a.lead_id
+                   WHERE a.type = 'status_change'
+                     AND a.target_user_id = c.sent_by
+                     AND a.lead_id = c.lead_id
+                     ${assignmentExistsWhere}
+                 )
+               GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+              cohortCommParams
+            ),
+          ]);
 
-    /** Sum call_status bucket counts excluding Assigned — same arithmetic as footer row (Interested + … + Other). */
-    const sumCounselorCallStatusBucketsExcludingAssigned = (bag) => {
-      if (!bag || typeof bag !== 'object') return 0;
+    const [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
+
+    const [[commCounts], [currentPortfolioCallCounts], [actLogsCountResult]] = batch2Results;
+    const allottedDistinctRows = cohortTriple[0][0];
+    const allottedStatusRows = cohortTriple[1][0];
+    const cohortOutcomeRows = cohortTriple[2][0];
+
+    allottedDistinctRows.forEach((row) => {
+      allottedDistinctMap.set(String(row.user_id), numAgg(row.cnt));
+    });
+
+    allottedStatusRows.forEach((row) => {
+      const uid = String(row.user_id ?? '');
+      const key = canonicalCounselorCallStatusForReports(row.bucket);
+      if (!allottedByCallStatusByUser.has(uid)) allottedByCallStatusByUser.set(uid, {});
+      const bag = allottedByCallStatusByUser.get(uid);
+      bag[key] = (bag[key] || 0) + numAgg(row.cnt);
+    });
+
+    cohortOutcomeRows.forEach((row) => {
+      const uid = String(row.user_id ?? '');
+      const key = canonicalCounselorCallStatusForReports(row.bucket);
+      if (!callsAmongAllottedByCallStatusByUser.has(uid)) callsAmongAllottedByCallStatusByUser.set(uid, {});
+      const bag = callsAmongAllottedByCallStatusByUser.get(uid);
+      bag[key] = (bag[key] || 0) + numAgg(row.cnt);
+    });
+
+    callsAmongAllottedByCallStatusByUser.forEach((bag, uid) => {
       let s = 0;
-      Object.entries(bag).forEach(([key, v]) => {
-        if (canonicalCounselorCallStatusForReports(key) === 'Assigned') return;
-        s += numAgg(v);
+      Object.values(bag).forEach((v) => {
+        s += Number(v) || 0;
       });
-      return s;
-    };
-
-    /** Cohort = leads with assignment to user in period; Calls/Visits Done = outcome calls only on that cohort (counsellor reporting). */
-    const allottedDistinctMap = new Map();
-    const allottedByCallStatusByUser = new Map();
-    const callsAmongAllottedMap = new Map();
-    const callsAmongAllottedByCallStatusByUser = new Map();
-
-    if (filteredUserIds.length > 0) {
-      const assignJoinParams = [...filteredUserIds, ...assignmentDateParams];
-
-      const [allottedDistinctRows] = await pool.execute(
-        `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
-         FROM activity_logs a
-         INNER JOIN leads l ON l.id = a.lead_id
-         WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
-         ${assignmentDateWhere}`,
-        assignJoinParams
-      );
-      allottedDistinctRows.forEach((row) => {
-        allottedDistinctMap.set(String(row.user_id), numAgg(row.cnt));
-      });
-
-      const [allottedStatusRows] = await pool.execute(
-        `SELECT a.target_user_id AS user_id,
-          CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
-          COUNT(DISTINCT a.lead_id) AS cnt
-         FROM activity_logs a
-         INNER JOIN leads l ON l.id = a.lead_id
-         WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
-         ${assignmentDateWhere}
-         GROUP BY a.target_user_id, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
-        assignJoinParams
-      );
-      allottedStatusRows.forEach((row) => {
-        const uid = String(row.user_id ?? '');
-        const key = canonicalCounselorCallStatusForReports(row.bucket);
-        if (!allottedByCallStatusByUser.has(uid)) allottedByCallStatusByUser.set(uid, {});
-        const bag = allottedByCallStatusByUser.get(uid);
-        bag[key] = (bag[key] || 0) + numAgg(row.cnt);
-      });
-
-      const assignmentExistsWhere = assignmentDateWhere.replace(/\bl\./g, 'la.');
-      const cohortCommParams = [...filteredUserIds, ...activityDateParams, ...assignmentDateParams];
-
-      const [cohortOutcomeRows] = await pool.execute(
-        `SELECT c.sent_by AS user_id,
-          CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
-          COUNT(DISTINCT c.lead_id) AS cnt
-         FROM communications c
-         INNER JOIN leads l ON l.id = c.lead_id
-         WHERE c.sent_by IN (${userIdPlaceholders})
-           AND c.type = 'call'
-           AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
-           ${activityDateClause}
-           AND EXISTS (
-             SELECT 1 FROM activity_logs a
-             INNER JOIN leads la ON la.id = a.lead_id
-             WHERE a.type = 'status_change'
-               AND a.target_user_id = c.sent_by
-               AND a.lead_id = c.lead_id
-               ${assignmentExistsWhere}
-           )
-         GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
-        cohortCommParams
-      );
-
-      cohortOutcomeRows.forEach((row) => {
-        const uid = String(row.user_id ?? '');
-        const key = canonicalCounselorCallStatusForReports(row.bucket);
-        if (!callsAmongAllottedByCallStatusByUser.has(uid)) callsAmongAllottedByCallStatusByUser.set(uid, {});
-        const bag = callsAmongAllottedByCallStatusByUser.get(uid);
-        bag[key] = (bag[key] || 0) + numAgg(row.cnt);
-      });
-
-      callsAmongAllottedByCallStatusByUser.forEach((bag, uid) => {
-        let s = 0;
-        Object.values(bag).forEach((v) => {
-          s += Number(v) || 0;
-        });
-        callsAmongAllottedMap.set(uid, s);
-      });
-    }
+      callsAmongAllottedMap.set(uid, s);
+    });
 
     const assignmentByDateMap = new Map();
     const reclaimedUniqueMap = new Map();

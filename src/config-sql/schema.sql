@@ -670,7 +670,8 @@ CREATE TABLE IF NOT EXISTS communications (
     INDEX idx_communications_sent_at (sent_at DESC),
     INDEX idx_communications_sent_by_at (sent_by, sent_at DESC),
     INDEX idx_communications_lead_sent_at (lead_id, sent_at DESC),
-    INDEX idx_communications_lead_contact_type (lead_id, contact_number, type)
+    INDEX idx_communications_lead_contact_type (lead_id, contact_number, type),
+    INDEX idx_communications_type_sent_by_sent_at (type, sent_by, sent_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
@@ -722,7 +723,10 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     INDEX idx_activity_logs_target_user_id (target_user_id),
     INDEX idx_activity_logs_source_user_id (source_user_id),
     INDEX idx_activity_logs_lead_created_at (lead_id, created_at DESC),
-    INDEX idx_activity_logs_type_created_at (type, created_at DESC)
+    INDEX idx_activity_logs_type_created_at (type, created_at DESC),
+    INDEX idx_activity_logs_type_target_user_created (type, target_user_id, created_at),
+    INDEX idx_activity_logs_type_performed_by_created (type, performed_by, created_at),
+    INDEX idx_activity_logs_type_source_user_created (type, source_user_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
