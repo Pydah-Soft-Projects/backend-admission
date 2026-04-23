@@ -56,7 +56,7 @@ if (process.env.DB_SECONDARY_HOST && process.env.DB_SECONDARY_NAME) {
 }
 
 const app = express();
-// Initialize Lead Reclamation Service (runs every 24 hours)
+// Lead reclamation: once daily at configured IST wall time (default 23:11; see leadReclaimer.service.js)
 initLeadReclaimer();
 
 const PORT = process.env.PORT || 5000;
