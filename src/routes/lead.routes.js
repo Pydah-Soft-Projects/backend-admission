@@ -40,6 +40,7 @@ import {
   getMyCallAnalytics,
   getOverviewAnalytics,
   getUserAnalytics,
+  clearUserAnalyticsCacheHandler,
 } from '../controllers/leadAssignment.controller.js';
 import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
@@ -101,6 +102,7 @@ router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
 router.get('/analytics/me', getMyCallAnalytics);
 // Allow managers to access user analytics (they can only see their team members)
 router.get('/analytics/users', getUserAnalytics);
+router.post('/analytics/users/cache', isSuperAdmin, clearUserAnalyticsCacheHandler);
 router.get('/analytics/:userId', getUserLeadAnalytics);
 
 // Activity log routes (must come before /:id routes)

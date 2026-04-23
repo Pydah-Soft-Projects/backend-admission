@@ -5,20 +5,15 @@ import { notifyLeadAssignment } from '../services/notification.service.js';
 import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { connectHRMS } from '../config-mongo/hrms.js';
+import {
+  analyticsCache,
+  USER_ANALYTICS_CACHE_MS,
+  MAX_USER_ANALYTICS_CACHE_ENTRIES,
+  clearUserAnalyticsCache,
+} from '../utils/userAnalyticsCache.js';
 
 const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
-
-const analyticsCache = new Map();
-/**
- * GET /leads/analytics/users response cache (in-memory).
- * Default 10 minutes — repeat loads (same query params) return instantly. Override with USER_ANALYTICS_CACHE_MS or legacy ANALYTICS_CACHE_MS.
- */
-const USER_ANALYTICS_CACHE_MS = Number(
-  process.env.USER_ANALYTICS_CACHE_MS || process.env.ANALYTICS_CACHE_MS || 600000
-);
-const MAX_USER_ANALYTICS_CACHE_ENTRIES = Number(process.env.MAX_USER_ANALYTICS_CACHE_ENTRIES || 200);
-
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return String(value);
@@ -2842,6 +2837,25 @@ export const getUserAnalytics = async (req, res) => {
   } catch (error) {
     console.error('Error getting user analytics:', error);
     return errorResponse(res, error.message || 'Failed to get user analytics', 500);
+  }
+};
+
+/** Super Admin: drop in-memory GET /analytics/users cache (e.g. after bulk SQL on leads.call_status). */
+export const clearUserAnalyticsCacheHandler = async (req, res) => {
+  try {
+    if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Access denied', 403);
+    }
+    const clearedEntries = clearUserAnalyticsCache();
+    return successResponse(
+      res,
+      { clearedEntries },
+      'User analytics in-memory cache cleared',
+      200
+    );
+  } catch (error) {
+    console.error('clearUserAnalyticsCacheHandler:', error);
+    return errorResponse(res, error.message || 'Failed to clear cache', 500);
   }
 };
 
