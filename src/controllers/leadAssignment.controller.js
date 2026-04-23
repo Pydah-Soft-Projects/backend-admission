@@ -44,6 +44,32 @@ const canonicalCounselorCallStatusForReports = (label) => {
   return hit || t;
 };
 
+/** Same labels as Super Admin reports `PRO_VISIT_STATUS_COLUMNS` (field visit workflow). */
+const PRO_VISIT_STATUS_CANONICAL = [
+  'Assigned',
+  'Interested',
+  'Not Interested',
+  'Not Available',
+  'Scheduled Revisit',
+  'Confirmed',
+];
+
+/** Blank / Not set / legacy or typo visit_status → Assigned (PRO dashboard has no separate “Other”). */
+const canonicalProVisitStatusForReports = (label) => {
+  const t = String(label ?? '').trim();
+  if (!t || /^not\s*set$/i.test(t)) return 'Assigned';
+  const lower = t.toLowerCase();
+  const hit = PRO_VISIT_STATUS_CANONICAL.find((s) => s.toLowerCase() === lower);
+  if (hit) return hit;
+  return 'Assigned';
+};
+
+const canonicalCohortBucketForRole = (roleName, bucket) => {
+  const r = String(roleName ?? '').trim().toUpperCase();
+  if (r === 'PRO') return canonicalProVisitStatusForReports(bucket);
+  return canonicalCounselorCallStatusForReports(bucket);
+};
+
 const getCachedAssignmentStats = (key) => {
   const hit = assignmentStatsCache.get(key);
   if (!hit) return null;
@@ -294,6 +320,7 @@ export const assignLeads = async (req, res) => {
       let updateParams;
 
       if (isProRole) {
+        // PRO field workflow: new PRO assignment always starts at visit_status Assigned (clears blank/legacy values).
         updateQuery = `UPDATE leads SET 
           assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
          WHERE id = ? AND assigned_to_pro IS NULL`;
@@ -2222,12 +2249,12 @@ export const getUserAnalytics = async (req, res) => {
       return Number.isFinite(n) ? n : 0;
     };
 
-    /** Sum call_status bucket counts excluding Assigned — same arithmetic as footer row (Interested + … + Other). */
-    const sumCounselorCallStatusBucketsExcludingAssigned = (bag) => {
+    /** Period “Calls/Visits Done”: cohort bucket map excluding Assigned (call_status for counsellors, visit_status for PRO). */
+    const sumAllottedCohortBucketsExcludingAssigned = (bag, roleName) => {
       if (!bag || typeof bag !== 'object') return 0;
       let s = 0;
       Object.entries(bag).forEach(([key, v]) => {
-        if (canonicalCounselorCallStatusForReports(key) === 'Assigned') return;
+        if (canonicalCohortBucketForRole(roleName, key) === 'Assigned') return;
         s += numAgg(v);
       });
       return s;
@@ -2309,21 +2336,41 @@ export const getUserAnalytics = async (req, res) => {
             ),
             pool.execute(
               `SELECT a.target_user_id AS user_id,
-                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+                TRIM(u.role_name) AS cohort_user_role,
+                CASE
+                  WHEN TRIM(u.role_name) = 'PRO' THEN
+                    CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+                  ELSE
+                    CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+                END AS bucket,
                 COUNT(DISTINCT a.lead_id) AS cnt
                FROM activity_logs a
                INNER JOIN leads l ON l.id = a.lead_id
+               INNER JOIN users u ON u.id = a.target_user_id
                WHERE a.type = 'status_change' AND a.target_user_id IN (${cohortUserIdPlaceholders})
                ${assignmentDateWhere}
-               GROUP BY a.target_user_id, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+               GROUP BY a.target_user_id, TRIM(u.role_name),
+                 CASE
+                   WHEN TRIM(u.role_name) = 'PRO' THEN
+                     CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+                   ELSE
+                     CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+                 END`,
               cohortAssignJoinParams
             ),
             pool.execute(
               `SELECT c.sent_by AS user_id,
-                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END AS bucket,
+                TRIM(u.role_name) AS cohort_user_role,
+                CASE
+                  WHEN TRIM(u.role_name) = 'PRO' THEN
+                    CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+                  ELSE
+                    CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+                END AS bucket,
                 COUNT(DISTINCT c.lead_id) AS cnt
                FROM communications c
                INNER JOIN leads l ON l.id = c.lead_id
+               INNER JOIN users u ON u.id = c.sent_by
                WHERE c.sent_by IN (${cohortUserIdPlaceholders})
                  AND c.type = 'call'
                  AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
@@ -2336,7 +2383,13 @@ export const getUserAnalytics = async (req, res) => {
                      AND a.lead_id = c.lead_id
                      ${assignmentExistsWhere}
                  )
-               GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
+               GROUP BY c.sent_by, TRIM(u.role_name),
+                 CASE
+                   WHEN TRIM(u.role_name) = 'PRO' THEN
+                     CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+                   ELSE
+                     CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+                 END`,
               cohortCommSqlParams
             ),
             pool.execute(
@@ -2382,7 +2435,8 @@ export const getUserAnalytics = async (req, res) => {
 
     allottedStatusRows.forEach((row) => {
       const uid = cohortAnalyticUserKey(row.user_id);
-      const key = canonicalCounselorCallStatusForReports(row.bucket);
+      const role = row.cohort_user_role;
+      const key = canonicalCohortBucketForRole(role, row.bucket);
       if (!allottedByCallStatusByUser.has(uid)) allottedByCallStatusByUser.set(uid, {});
       const bag = allottedByCallStatusByUser.get(uid);
       bag[key] = (bag[key] || 0) + numAgg(row.cnt);
@@ -2390,7 +2444,8 @@ export const getUserAnalytics = async (req, res) => {
 
     cohortOutcomeRows.forEach((row) => {
       const uid = cohortAnalyticUserKey(row.user_id);
-      const key = canonicalCounselorCallStatusForReports(row.bucket);
+      const role = row.cohort_user_role;
+      const key = canonicalCohortBucketForRole(role, row.bucket);
       if (!callsAmongAllottedByCallStatusByUser.has(uid)) callsAmongAllottedByCallStatusByUser.set(uid, {});
       const bag = callsAmongAllottedByCallStatusByUser.get(uid);
       bag[key] = (bag[key] || 0) + numAgg(row.cnt);
@@ -2408,6 +2463,11 @@ export const getUserAnalytics = async (req, res) => {
     const reclaimedUniqueMap = new Map();
 
     if (shouldIncludeAssignmentDetails) {
+      const uidKeyToRole = new Map();
+      cohortScopeUsers.forEach((u) => {
+        uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
+      });
+
       const [
         [rawAssignments],
         [reclamations],
@@ -2563,12 +2623,13 @@ export const getUserAnalytics = async (req, res) => {
             : 'Not set';
         if (!bucket._callStatusLeadSets[callS]) bucket._callStatusLeadSets[callS] = new Set();
         bucket._callStatusLeadSets[callS].add(lid);
-        const visitS =
+        const visitRaw =
           row.visit_status != null && String(row.visit_status).trim() !== ''
             ? String(row.visit_status).trim()
-            : 'Not set';
-        if (!bucket._visitStatusLeadSets[visitS]) bucket._visitStatusLeadSets[visitS] = new Set();
-        bucket._visitStatusLeadSets[visitS].add(lid);
+            : '';
+        const visitKey = canonicalProVisitStatusForReports(visitRaw);
+        if (!bucket._visitStatusLeadSets[visitKey]) bucket._visitStatusLeadSets[visitKey] = new Set();
+        bucket._visitStatusLeadSets[visitKey].add(lid);
 
         // 3. Target Date breakdown (distinct students per target date key)
         if (effectiveYmd) {
@@ -2603,16 +2664,29 @@ export const getUserAnalytics = async (req, res) => {
         return out;
       };
 
-      assignmentByDateMap.forEach((perDate) => {
+      assignmentByDateMap.forEach((perDate, userKey) => {
+        const assigneeRole = String(uidKeyToRole.get(userKey) || '').trim();
+        const isProAssignee = assigneeRole.toUpperCase() === 'PRO';
         perDate.forEach((bucket) => {
           let assignedBalance = 0;
-          const css = bucket._callStatusLeadSets;
-          if (css && typeof css === 'object') {
-            Object.entries(css).forEach(([k, set]) => {
-              if (canonicalCounselorCallStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
-                assignedBalance += set.size;
-              }
-            });
+          if (isProAssignee) {
+            const vss = bucket._visitStatusLeadSets;
+            if (vss && typeof vss === 'object') {
+              Object.entries(vss).forEach(([k, set]) => {
+                if (canonicalProVisitStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
+                  assignedBalance += set.size;
+                }
+              });
+            }
+          } else {
+            const css = bucket._callStatusLeadSets;
+            if (css && typeof css === 'object') {
+              Object.entries(css).forEach(([k, set]) => {
+                if (canonicalCounselorCallStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
+                  assignedBalance += set.size;
+                }
+              });
+            }
           }
           const nTot = bucket._allLeadIds ? bucket._allLeadIds.size : 0;
           bucket.balanceByPortfolioRule = assignedBalance;
@@ -2694,18 +2768,23 @@ export const getUserAnalytics = async (req, res) => {
         };
         const totalAssigned = numAgg(stats.total_assigned);
         const isStudentCounselor = u.role_name === 'Student Counselor';
+        const isPro = String(u.role_name || '').trim().toUpperCase() === 'PRO';
         const hasBucket = allottedBucketSumMap.has(uid);
         const bucketSum = hasBucket ? numAgg(allottedBucketSumMap.get(uid)) : null;
-        const leadPart = isStudentCounselor && hasBucket ? bucketSum : totalAssigned;
+        const leadPart = (isStudentCounselor || isPro) && hasBucket ? bucketSum : totalAssigned;
         totalAssignedLeads += leadPart;
         const allottedBag = allottedByCallStatusByUser.get(uid);
-        const allottedCallsVisitsDoneDisplay = sumCounselorCallStatusBucketsExcludingAssigned(allottedBag);
+        const allottedCallsVisitsDoneDisplay = sumAllottedCohortBucketsExcludingAssigned(
+          allottedBag,
+          u.role_name
+        );
         const comms = commMap.get(u.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
-        const callsDisplay = isStudentCounselor
-          ? allottedBag && Object.keys(allottedBag).length > 0
-            ? allottedCallsVisitsDoneDisplay
-            : numAgg(comms.calls.unique)
-          : numAgg(comms.calls.unique);
+        const callsDisplay =
+          isStudentCounselor || isPro
+            ? allottedBag && Object.keys(allottedBag).length > 0
+              ? allottedCallsVisitsDoneDisplay
+              : numAgg(comms.calls.unique)
+            : numAgg(comms.calls.unique);
         totalCallsDone += callsDisplay;
         totalSms += numAgg(comms.sms);
       }
@@ -2728,16 +2807,22 @@ export const getUserAnalytics = async (req, res) => {
       const totalAssigned = stats.total_assigned;
       const uidForCohort = cohortAnalyticUserKey(user.id);
       const isStudentCounselor = user.role_name === 'Student Counselor';
+      const isPro = String(user.role_name || '').trim().toUpperCase() === 'PRO';
       const cohortCallsDoneAmongAllotted = numAgg(callsAmongAllottedMap.get(uidForCohort) ?? 0);
       /** Table Calls/Visits Done = allotted-period footer sum without Assigned column (aligned with expanded table). */
       const allottedCallStatusBag = allottedByCallStatusByUser.get(uidForCohort);
-      const allottedCallsVisitsDoneDisplay =
-        sumCounselorCallStatusBucketsExcludingAssigned(allottedCallStatusBag);
+      const allottedCallsVisitsDoneDisplay = sumAllottedCohortBucketsExcludingAssigned(
+        allottedCallStatusBag,
+        user.role_name
+      );
       const counsellorBucketSum = isStudentCounselor ? numAgg(allottedBucketSumMap.get(uidForCohort) ?? 0) : 0;
+      const proBucketSum = isPro ? numAgg(allottedBucketSumMap.get(uidForCohort) ?? 0) : 0;
       /** Student Counselor: same as expanded footer — sum of distinct allotted-cohort leads in Interested + CET Applied (current call_status). */
       const interestedPlusCetAllotted = allottedCallStatusBag
         ? numAgg(allottedCallStatusBag['Interested']) + numAgg(allottedCallStatusBag['CET Applied'])
         : 0;
+      /** PRO: Interested on period-allotted cohort by current visit_status (no CET Applied in visit workflow). */
+      const interestedProAllotted = allottedCallStatusBag ? numAgg(allottedCallStatusBag['Interested']) : 0;
       /** Other roles: cumulative pipeline status_change events (activity log) for Interested + CET Applied. */
       const interestedPlusCetActivity =
         numAgg(stats.statusBreakdown['Interested']) + numAgg(stats.statusBreakdown['CET Applied']);
@@ -2755,27 +2840,33 @@ export const getUserAnalytics = async (req, res) => {
         group: user.group || '-',
         isActive: user.is_active === 1 || user.is_active === true,
         totalAssigned,
-        /** Student Counselor: sum of expanded table “Total Allotted” (bucket rows); portfolio “total handled” stays in totalAssigned for other uses. */
-        allottedBucketSumTotal: isStudentCounselor ? counsellorBucketSum : undefined,
+        /** Student Counselor / PRO: sum of expanded table “Total Allotted” (bucket rows); portfolio “total handled” stays in totalAssigned for other uses. */
+        allottedBucketSumTotal: isStudentCounselor ? counsellorBucketSum : isPro ? proBucketSum : undefined,
         activeLeads: stats.active_leads,
         convertedLeads: stats.total_converted,
-        interested: isStudentCounselor ? interestedPlusCetAllotted : interestedPlusCetActivity,
+        interested: isStudentCounselor
+          ? interestedPlusCetAllotted
+          : isPro
+            ? interestedProAllotted
+            : interestedPlusCetActivity,
         admittedLeads: numAgg(stats.statusBreakdown['Admitted']),
         conversionRate: totalAssigned > 0 ? parseFloat(((stats.total_converted / totalAssigned) * 100).toFixed(2)) : 0,
         statusBreakdown: stats.statusBreakdown,
         activityLogsCount: logs.total_logs,
         calls: {
-          // Counsellors: sum of allotted-period breakdown by current call_status, excluding Assigned — matches footer row (Interested + … + Other).
-          // Distinct outcome-call totals (communications) remain in expanded performanceCohort.callsDoneAmongAllotted / …ByCallStatus when details load.
+          // Counsellors / PRO: sum of allotted-period breakdown by current call/visit status, excluding Assigned — matches expanded footer.
+          // Distinct outcome-call totals (communications) remain in expanded performanceCohort.callsDoneAmongAllotted when details load.
           // Other roles: distinct leads with any logged outcome call in the activity window (unchanged).
-          total: isStudentCounselor ? allottedCallsVisitsDoneDisplay : comms.calls.unique,
+          total: isStudentCounselor || isPro ? allottedCallsVisitsDoneDisplay : comms.calls.unique,
           totalDuration: comms.calls.duration,
           averageDuration: comms.calls.total > 0 ? Math.round(comms.calls.duration / comms.calls.total) : 0,
         },
         callsOnCurrentPortfolio,
         pendingBalance: isStudentCounselor
           ? Math.max(0, counsellorBucketSum - allottedCallsVisitsDoneDisplay)
-          : Math.max(Number(totalAssigned || 0) - Number(callsOnCurrentPortfolio || 0), 0),
+          : isPro
+            ? Math.max(0, proBucketSum - allottedCallsVisitsDoneDisplay)
+            : Math.max(Number(totalAssigned || 0) - Number(callsOnCurrentPortfolio || 0), 0),
         reclaimedUniqueLeads,
         sms: {
           total: comms.sms,
@@ -2784,19 +2875,30 @@ export const getUserAnalytics = async (req, res) => {
           total: logs.status_changes,
         },
         expandedAssignmentDiagnostics:
-          shouldIncludeAssignmentDetails && isStudentCounselor
+          shouldIncludeAssignmentDetails && (isStudentCounselor || isPro)
             ? {
-                performanceCohort: {
-                  allottedDistinctLeads: numAgg(allottedDistinctMap.get(uidForCohort) ?? 0),
-                  allottedByCallStatus: allottedCallStatusBag || {},
-                  callsDoneAmongAllotted: cohortCallsDoneAmongAllotted,
-                  callsDoneAmongAllottedByCallStatus:
-                    callsAmongAllottedByCallStatusByUser.get(uidForCohort) || {},
-                  /** Footer Balance column: same as main-row pendingBalance — bucket-sum allotted − Calls/Visits Done (non‑Assigned status sum). Per-row Balance cells stay Assigned-based. */
-                  periodBalanceByPortfolioRule: numAgg(
-                    Math.max(0, counsellorBucketSum - allottedCallsVisitsDoneDisplay)
-                  ),
-                },
+                performanceCohort: isStudentCounselor
+                  ? {
+                      allottedDistinctLeads: numAgg(allottedDistinctMap.get(uidForCohort) ?? 0),
+                      allottedByCallStatus: allottedCallStatusBag || {},
+                      callsDoneAmongAllotted: cohortCallsDoneAmongAllotted,
+                      callsDoneAmongAllottedByCallStatus:
+                        callsAmongAllottedByCallStatusByUser.get(uidForCohort) || {},
+                      /** Footer Balance column: same as main-row pendingBalance — bucket-sum allotted − Calls/Visits Done (non‑Assigned status sum). Per-row Balance cells stay call_status Assigned-based. */
+                      periodBalanceByPortfolioRule: numAgg(
+                        Math.max(0, counsellorBucketSum - allottedCallsVisitsDoneDisplay)
+                      ),
+                    }
+                  : {
+                      allottedDistinctLeads: numAgg(allottedDistinctMap.get(uidForCohort) ?? 0),
+                      allottedByVisitStatus: allottedCallStatusBag || {},
+                      callsDoneAmongAllotted: cohortCallsDoneAmongAllotted,
+                      callsDoneAmongAllottedByVisitStatus:
+                        callsAmongAllottedByCallStatusByUser.get(uidForCohort) || {},
+                      periodBalanceByPortfolioRule: numAgg(
+                        Math.max(0, proBucketSum - allottedCallsVisitsDoneDisplay)
+                      ),
+                    },
               }
             : undefined,
         assignmentsByDate: (() => {
