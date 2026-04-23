@@ -1855,6 +1855,100 @@ export const getUserAnalytics = async (req, res) => {
       ? `AND ${activityDateConditions.map((c, i) => `sent_at ${c}`).join(' AND ')}`
       : '';
 
+    const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
+
+    /** Portfolio + status + conversion + active counts for a fixed user-id list (used in parallel with HRMS hydrate when safe). */
+    const executeBatch1ForAnalytics = async (ids) => {
+      if (!ids.length) {
+        return [
+          [[], []],
+          [[], []],
+          [[], []],
+          [[], []],
+        ];
+      }
+      const ph = ids.map(() => '?').join(',');
+      return Promise.all([
+        pool.execute(
+          `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
+           SELECT a.target_user_id as user_id, a.lead_id
+           FROM activity_logs a
+           JOIN leads l ON a.lead_id = l.id
+           WHERE a.type = 'status_change' AND a.target_user_id IS NOT NULL
+             ${logDateClause}
+             AND a.target_user_id IN (${ph})
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           UNION
+           SELECT a.performed_by as user_id, a.lead_id
+           FROM activity_logs a
+           JOIN leads l ON a.lead_id = l.id
+           WHERE a.type = 'status_change'
+             ${logDateClause}
+             AND a.performed_by IN (${ph})
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           UNION
+           SELECT c.sent_by as user_id, c.lead_id
+           FROM communications c
+           JOIN leads l ON c.lead_id = l.id
+           WHERE c.sent_by IN (${ph})
+             ${activityDateClause}
+             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         ) as full_portfolio
+         GROUP BY user_id`,
+          useAcademicYear
+            ? [...activityDateParams, ...ids, yearNum, ...activityDateParams, ...ids, yearNum, ...activityDateParams, ...ids, yearNum]
+            : [...activityDateParams, ...ids, ...activityDateParams, ...ids, ...activityDateParams, ...ids]
+        ),
+        pool.execute(
+          `SELECT 
+          a.performed_by as user_id,
+          a.new_status as lead_status,
+          COUNT(*) AS status_count
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         WHERE a.type = 'status_change'
+           ${logDateClause.replace('a.created_at', 'a.created_at')}
+           AND a.performed_by IN (${ph})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+         GROUP BY a.performed_by, a.new_status`,
+          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+        ),
+        pool.execute(
+          `SELECT 
+          a.target_user_id as user_id,
+          COUNT(DISTINCT adm.lead_id) as converted_count
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         JOIN admissions adm ON adm.lead_id = a.lead_id
+         WHERE a.type = 'status_change'
+           AND a.target_user_id IS NOT NULL
+           ${logDateClause}
+           AND a.target_user_id IN (${ph})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           AND adm.created_at >= a.created_at
+         GROUP BY user_id`,
+          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+        ),
+        pool.execute(
+          `SELECT 
+          a.target_user_id as user_id,
+          COUNT(DISTINCT a.lead_id) as active_leads
+         FROM activity_logs a
+         JOIN leads l ON a.lead_id = l.id
+         WHERE a.type = 'status_change'
+           AND a.target_user_id IS NOT NULL
+           ${logDateClause}
+           AND a.target_user_id IN (${ph})
+           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
+           AND (l.assigned_to = a.target_user_id 
+                OR l.assigned_to_pro = a.target_user_id)
+         GROUP BY user_id`,
+          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+        ),
+      ]);
+    };
+
     /** Assignment logs in the selected period (same window as date-wise expanded rows). */
     let assignmentDateConditions = [];
     let assignmentDateParams = [];
@@ -1900,6 +1994,8 @@ export const getUserAnalytics = async (req, res) => {
     }
     const reclaimLogWhere =
       reclaimLogConditions.length > 0 ? `AND ${reclaimLogConditions.join(' AND ')}` : '';
+
+    const perfRoleNorm = String(perfRole || '').trim();
 
     // Build user filter
     let userConditions = ["role_name NOT IN ('Super Admin', 'Sub Super Admin')"];
@@ -1966,6 +2062,12 @@ export const getUserAnalytics = async (req, res) => {
       }
     }
 
+    /** Reports UI role filter — push into SQL so we fetch/hydrate fewer rows (faster initial load). */
+    if (!userId && perfRoleNorm) {
+      userConditions.push('role_name = ?');
+      userParams.push(perfRoleNorm);
+    }
+
     const userWhereClause = `WHERE ${userConditions.join(' AND ')}`;
 
     // Get users based on filter
@@ -1978,30 +2080,47 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
     }
 
-    await hydrateUserOrgFromHrms(users, pool);
-
     /** Optional UI filters (reports → User Performance). Distinct from HRMS org query params division/department/group. */
     const perfSearchNorm = String(perfSearch || '').trim().toLowerCase();
     const perfDeptNorm = String(perfDepartment || '').trim();
     const perfGroupNorm = String(perfGroup || '').trim();
-    const perfRoleNorm = String(perfRole || '').trim();
+    const perfRoleAppliedInSql = Boolean(!userId && perfRoleNorm);
+    const needsPostHydratePerfFilter = Boolean(perfSearchNorm || perfDeptNorm || perfGroupNorm);
 
-    let perfFilteredUsers = users;
-    if (perfSearchNorm || perfDeptNorm || perfGroupNorm || perfRoleNorm) {
-      perfFilteredUsers = users.filter((u) => {
-        const name = String(u.name || '').toLowerCase();
-        const email = String(u.email || '').toLowerCase();
-        if (perfSearchNorm && !name.includes(perfSearchNorm) && !email.includes(perfSearchNorm)) return false;
-        if (perfDeptNorm && String(u.department || '').trim() !== perfDeptNorm) return false;
-        if (perfGroupNorm && String(u.group || '').trim() !== perfGroupNorm) return false;
-        if (perfRoleNorm && String(u.role_name || '').trim() !== perfRoleNorm) return false;
-        return true;
-      });
+    let perfFilteredUsers;
+    let batch1Results;
+
+    if (!needsPostHydratePerfFilter && !shouldIncludeAssignmentDetails) {
+      perfFilteredUsers = [...users].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+      );
+      const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+      [, batch1Results] = await Promise.all([
+        hydrateUserOrgFromHrms(users, pool),
+        executeBatch1ForAnalytics(batch1Ids),
+      ]);
+    } else {
+      await hydrateUserOrgFromHrms(users, pool);
+      perfFilteredUsers = users;
+      if (perfSearchNorm || perfDeptNorm || perfGroupNorm || (perfRoleNorm && !perfRoleAppliedInSql)) {
+        perfFilteredUsers = users.filter((u) => {
+          const name = String(u.name || '').toLowerCase();
+          const email = String(u.email || '').toLowerCase();
+          if (perfSearchNorm && !name.includes(perfSearchNorm) && !email.includes(perfSearchNorm)) return false;
+          if (perfDeptNorm && String(u.department || '').trim() !== perfDeptNorm) return false;
+          if (perfGroupNorm && String(u.group || '').trim() !== perfGroupNorm) return false;
+          if (perfRoleNorm && !perfRoleAppliedInSql && String(u.role_name || '').trim() !== perfRoleNorm) {
+            return false;
+          }
+          return true;
+        });
+      }
+      perfFilteredUsers = [...perfFilteredUsers].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+      );
+      const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+      batch1Results = await executeBatch1ForAnalytics(batch1IdsElse);
     }
-
-    perfFilteredUsers = [...perfFilteredUsers].sort((a, b) =>
-      String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
-    );
 
     /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
     const explicitUserIds = userId ? String(userId).split(',').map((id) => id.trim()).filter(Boolean) : [];
@@ -2055,120 +2174,12 @@ export const getUserAnalytics = async (req, res) => {
 
     const filteredUserIds = aggregateUserIds;
 
-    // Get aggregate counts for all users in one go
-    // Note: If filters are applied, we only aggregate for those specific users to improve performance
     if (filteredUserIds.length === 0) {
       return successResponse(res, { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) }, 'No users found', 200);
     }
-    const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
 
     const selectedUserIds = cohortScopeUserIds;
     const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
-
-    // OPTIMIZATION: Combine Lead Counts, Status counts and Conversion counts into fewer queries
-    // We use conditional aggregation to avoid multiple subquery joins
-    // OPTIMIZATION: Use historical logs to get cumulative performance
-    const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
-
-    const batch1Results = await Promise.all([
-      // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
-      pool.execute(
-        `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
-           -- Leads newly assigned within the period
-           SELECT a.target_user_id as user_id, a.lead_id
-           FROM activity_logs a
-           JOIN leads l ON a.lead_id = l.id
-           WHERE a.type = 'status_change' AND a.target_user_id IS NOT NULL
-             ${logDateClause}
-             AND a.target_user_id IN (${userIdPlaceholders})
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-           
-           UNION
-           
-           -- Leads where user performed ANY recorded action in period (proves they handled it)
-           SELECT a.performed_by as user_id, a.lead_id
-           FROM activity_logs a
-           JOIN leads l ON a.lead_id = l.id
-           WHERE a.type = 'status_change'
-             ${logDateClause}
-             AND a.performed_by IN (${userIdPlaceholders})
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-  
-           UNION
-  
-           -- Leads where user made a call/sms in period
-           SELECT c.sent_by as user_id, c.lead_id
-           FROM communications c
-           JOIN leads l ON c.lead_id = l.id
-           WHERE c.sent_by IN (${userIdPlaceholders}) 
-             ${activityDateClause}
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-         ) as full_portfolio
-         GROUP BY user_id`,
-        useAcademicYear 
-          ? [...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum, ...activityDateParams, ...filteredUserIds, yearNum]
-          : [...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds, ...activityDateParams, ...filteredUserIds]
-      ),
-
-      // 2. Get Cumulative Status Actions (every time user moved a lead to a status in period)
-      pool.execute(
-        `SELECT 
-          a.performed_by as user_id,
-          a.new_status as lead_status,
-          COUNT(DISTINCT a.lead_id) as status_count
-         FROM activity_logs a
-         JOIN leads l ON a.lead_id = l.id
-         WHERE a.type = 'status_change'
-           ${logDateClause.replace('a.created_at', 'a.created_at')}
-           AND a.performed_by IN (${userIdPlaceholders})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-         GROUP BY a.performed_by, a.new_status`,
-        useAcademicYear 
-          ? [...activityDateParams, ...filteredUserIds, yearNum]
-          : [...activityDateParams, ...filteredUserIds]
-      ),
-
-      // 3. Get Cumulative Conversions (leads assigned to user that converted in period)
-      pool.execute(
-        `SELECT 
-          a.target_user_id as user_id,
-          COUNT(DISTINCT adm.lead_id) as converted_count
-         FROM activity_logs a
-         JOIN leads l ON a.lead_id = l.id
-         JOIN admissions adm ON adm.lead_id = a.lead_id
-         WHERE a.type = 'status_change'
-           AND a.target_user_id IS NOT NULL
-           ${logDateClause}
-           AND a.target_user_id IN (${userIdPlaceholders})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-           AND adm.created_at >= a.created_at
-         GROUP BY user_id`,
-         useAcademicYear 
-          ? [...activityDateParams, ...filteredUserIds, yearNum]
-          : [...activityDateParams, ...filteredUserIds]
-      ),
-
-      // 4. Current Active Portfolio (subset of ever-assigned leads that are currently active)
-      pool.execute(
-        `SELECT 
-          a.target_user_id as user_id,
-          COUNT(DISTINCT a.lead_id) as active_leads
-         FROM activity_logs a
-         JOIN leads l ON a.lead_id = l.id
-         WHERE a.type = 'status_change'
-           AND a.target_user_id IS NOT NULL
-           ${logDateClause}
-           AND a.target_user_id IN (${userIdPlaceholders})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
-           AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
-           AND (l.assigned_to = a.target_user_id 
-                OR l.assigned_to_pro = a.target_user_id)
-         GROUP BY user_id`,
-         useAcademicYear 
-          ? [...activityDateParams, ...filteredUserIds, yearNum]
-          : [...activityDateParams, ...filteredUserIds]
-      )
-    ]);
 
     const [
       [portfolioCounts],
@@ -2728,6 +2739,13 @@ export const getUserAnalytics = async (req, res) => {
       const allottedCallsVisitsDoneDisplay =
         sumCounselorCallStatusBucketsExcludingAssigned(allottedCallStatusBag);
       const counsellorBucketSum = isStudentCounselor ? numAgg(allottedBucketSumMap.get(uidForCohort) ?? 0) : 0;
+      /** Student Counselor: same as expanded footer — sum of distinct allotted-cohort leads in Interested + CET Applied (current call_status). */
+      const interestedPlusCetAllotted = allottedCallStatusBag
+        ? numAgg(allottedCallStatusBag['Interested']) + numAgg(allottedCallStatusBag['CET Applied'])
+        : 0;
+      /** Other roles: cumulative pipeline status_change events (activity log) for Interested + CET Applied. */
+      const interestedPlusCetActivity =
+        numAgg(stats.statusBreakdown['Interested']) + numAgg(stats.statusBreakdown['CET Applied']);
 
       return {
         id: user.id,
@@ -2746,8 +2764,8 @@ export const getUserAnalytics = async (req, res) => {
         allottedBucketSumTotal: isStudentCounselor ? counsellorBucketSum : undefined,
         activeLeads: stats.active_leads,
         convertedLeads: stats.total_converted,
-        interested: stats.statusBreakdown['Interested'] || 0,
-        admittedLeads: stats.statusBreakdown['Admitted'] || 0,
+        interested: isStudentCounselor ? interestedPlusCetAllotted : interestedPlusCetActivity,
+        admittedLeads: numAgg(stats.statusBreakdown['Admitted']),
         conversionRate: totalAssigned > 0 ? parseFloat(((stats.total_converted / totalAssigned) * 100).toFixed(2)) : 0,
         statusBreakdown: stats.statusBreakdown,
         activityLogsCount: logs.total_logs,
