@@ -10,8 +10,15 @@ const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
 
 const analyticsCache = new Map();
-/** Default 3 minutes — repeat Performance Summary loads hit cache (override with ANALYTICS_CACHE_MS). */
-const ANALYTICS_CACHE_MS = Number(process.env.ANALYTICS_CACHE_MS || 180000);
+/**
+ * GET /leads/analytics/users response cache (in-memory).
+ * Default 10 minutes — repeat loads (same query params) return instantly. Override with USER_ANALYTICS_CACHE_MS or legacy ANALYTICS_CACHE_MS.
+ */
+const USER_ANALYTICS_CACHE_MS = Number(
+  process.env.USER_ANALYTICS_CACHE_MS || process.env.ANALYTICS_CACHE_MS || 600000
+);
+const MAX_USER_ANALYTICS_CACHE_ENTRIES = Number(process.env.MAX_USER_ANALYTICS_CACHE_ENTRIES || 200);
+
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return String(value);
@@ -1789,6 +1796,7 @@ export const getUserAnalytics = async (req, res) => {
       perfSearch,
       perfDepartment,
       perfGroup,
+      perfRole,
     } = req.query;
 
     const cacheKey = stableStringify({
@@ -1806,12 +1814,16 @@ export const getUserAnalytics = async (req, res) => {
       perfSearch,
       perfDepartment,
       perfGroup,
+      perfRole,
     });
 
     if (String(bypassCache || '').toLowerCase() !== 'true') {
       const cached = analyticsCache.get(cacheKey);
       if (cached) {
         if (Date.now() < cached.expiresAt) {
+          // Move to end of Map so LRU eviction keeps hot keys longer.
+          analyticsCache.delete(cacheKey);
+          analyticsCache.set(cacheKey, cached);
           return successResponse(res, cached.data, 'User analytics retrieved from cache', 200);
         }
         analyticsCache.delete(cacheKey);
@@ -1972,15 +1984,17 @@ export const getUserAnalytics = async (req, res) => {
     const perfSearchNorm = String(perfSearch || '').trim().toLowerCase();
     const perfDeptNorm = String(perfDepartment || '').trim();
     const perfGroupNorm = String(perfGroup || '').trim();
+    const perfRoleNorm = String(perfRole || '').trim();
 
     let perfFilteredUsers = users;
-    if (perfSearchNorm || perfDeptNorm || perfGroupNorm) {
+    if (perfSearchNorm || perfDeptNorm || perfGroupNorm || perfRoleNorm) {
       perfFilteredUsers = users.filter((u) => {
         const name = String(u.name || '').toLowerCase();
         const email = String(u.email || '').toLowerCase();
         if (perfSearchNorm && !name.includes(perfSearchNorm) && !email.includes(perfSearchNorm)) return false;
         if (perfDeptNorm && String(u.department || '').trim() !== perfDeptNorm) return false;
         if (perfGroupNorm && String(u.group || '').trim() !== perfGroupNorm) return false;
+        if (perfRoleNorm && String(u.role_name || '').trim() !== perfRoleNorm) return false;
         return true;
       });
     }
@@ -2794,9 +2808,16 @@ export const getUserAnalytics = async (req, res) => {
       ...(pagination ? { pagination, summaryTotals } : {}),
     };
     if (String(bypassCache || '').toLowerCase() !== 'true') {
+      if (!analyticsCache.has(cacheKey)) {
+        while (analyticsCache.size >= MAX_USER_ANALYTICS_CACHE_ENTRIES) {
+          const firstKey = analyticsCache.keys().next().value;
+          if (firstKey === undefined) break;
+          analyticsCache.delete(firstKey);
+        }
+      }
       analyticsCache.set(cacheKey, {
         data: payload,
-        expiresAt: Date.now() + ANALYTICS_CACHE_MS,
+        expiresAt: Date.now() + USER_ANALYTICS_CACHE_MS,
       });
     }
     return successResponse(res, payload, 'User analytics retrieved successfully', 200);
