@@ -472,6 +472,8 @@ export const getAssignmentStats = async (req, res) => {
     const includeBreakdowns = String(req.query.includeBreakdowns || 'true').toLowerCase() !== 'false';
     const summaryOnly = String(req.query.summaryOnly || 'false').toLowerCase() === 'true';
     const geoBreakdown = req.query.geoBreakdown ? String(req.query.geoBreakdown).trim().toLowerCase() : '';
+    const institutionBreakdownOnly =
+      String(req.query.institutionBreakdownOnly || '').toLowerCase() === 'true';
     const cacheKey = stableStringify({
       mandal,
       district,
@@ -485,6 +487,7 @@ export const getAssignmentStats = async (req, res) => {
       includeBreakdowns,
       summaryOnly,
       geoBreakdown,
+      institutionBreakdownOnly,
     });
     const cached = getCachedAssignmentStats(cacheKey);
     if (cached) {
@@ -606,15 +609,62 @@ export const getAssignmentStats = async (req, res) => {
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
-    const [summaryRows] = await pool.execute(
-      `SELECT
+    const nullAssignedExpr = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
+
+    const needsInstitutionBreakdown = forBreakdown === 'school' || forBreakdown === 'college';
+    /** School/college tab: second request runs only the heavy GROUP BY (skip duplicate summary scan). */
+    const skipSummaryForInstitutionBreakdownOnly =
+      institutionBreakdownOnly && needsInstitutionBreakdown;
+
+    const summaryPromise = skipSummaryForInstitutionBreakdownOnly
+      ? Promise.resolve([[{ total: 0, unassigned: 0 }]])
+      : pool.execute(
+          `SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN ${isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL'} THEN 1 ELSE 0 END) AS unassigned
+        SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned
        FROM leads ${baseWhere}`,
-      baseParams
-    );
-    const totalLeads = Number(summaryRows?.[0]?.total || 0);
-    const trulyUnassignedCount = Number(summaryRows?.[0]?.unassigned || 0);
+          baseParams
+        );
+
+    const institutionPromise = needsInstitutionBreakdown
+      ? (() => {
+          const table = forBreakdown === 'school' ? 'schools' : 'colleges';
+          const institutionNameExpr = LEAD_INSTITUTION_KEY_SQL;
+          const institutionJoinExpr = 'LOWER(TRIM(i.name))';
+          return pool.execute(
+            `SELECT i.id, i.name,
+                la.unassigned_count AS unassigned_count,
+                la.assigned_count AS assigned_count
+             FROM (
+               SELECT ${institutionNameExpr} AS institution_key,
+                 SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned_count,
+                 SUM(CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS assigned_count
+               FROM leads
+               ${baseWhere}
+               GROUP BY institution_key
+               HAVING institution_key IS NOT NULL AND institution_key <> ''
+             ) la
+             INNER JOIN ${table} i
+               ON la.institution_key = ${institutionJoinExpr}
+               AND i.is_active = 1
+             ORDER BY i.name ASC`,
+            [...baseParams]
+          );
+        })()
+      : Promise.resolve([[]]);
+
+    const [[summaryRows], institutionRowsResult] = await Promise.all([
+      summaryPromise,
+      institutionPromise,
+    ]);
+    const institutionRowsPrelim = institutionRowsResult?.[0] ?? [];
+
+    let totalLeads = Number(summaryRows?.[0]?.total || 0);
+    let trulyUnassignedCount = Number(summaryRows?.[0]?.unassigned || 0);
+    if (skipSummaryForInstitutionBreakdownOnly) {
+      totalLeads = 0;
+      trulyUnassignedCount = 0;
+    }
     const unassignedCount = trulyUnassignedCount;
     const assignedCount = Math.max(totalLeads - trulyUnassignedCount, 0);
 
@@ -643,8 +693,6 @@ export const getAssignmentStats = async (req, res) => {
     }
 
     // Optional: per-district or per-mandal assigned vs unassigned (bulk assign UI dropdown hints)
-    const nullAssignedExpr = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
-
     const buildGeoScopeConditions = (opts) => {
       const { includeDistrict, districtValue } = opts;
       const gc = [];
@@ -726,9 +774,13 @@ export const getAssignmentStats = async (req, res) => {
     }
 
     const payload = {
-      totalLeads,
-      assignedCount,
-      unassignedCount,
+      ...(skipSummaryForInstitutionBreakdownOnly
+        ? {}
+        : {
+            totalLeads,
+            assignedCount,
+            unassignedCount,
+          }),
       mandalBreakdown: mandalBreakdown.map((item) => ({
         mandal: item.mandal || 'Unknown',
         count: item.count,
@@ -741,37 +793,12 @@ export const getAssignmentStats = async (req, res) => {
       ...(mandalAssignmentBreakdown ? { mandalAssignmentBreakdown } : {}),
     };
 
-    // Optional: school-wise or college-wise unassigned breakdown (for institution allocation UI)
-    if (forBreakdown === 'school' || forBreakdown === 'college') {
-      const table = forBreakdown === 'school' ? 'schools' : 'colleges';
-      const institutionNameExpr = LEAD_INSTITUTION_KEY_SQL;
-      const institutionJoinExpr = `LOWER(TRIM(i.name))`;
-      const leadAggConditions = [
-        ...baseConditions,
-        isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL',
-      ];
-      const leadAggWhere = leadAggConditions.length > 0 ? `WHERE ${leadAggConditions.join(' AND ')}` : '';
-
-      // Start from grouped leads (often far fewer keys than all master rows), then join catalog names.
-      const [institutionRows] = await pool.execute(
-        `SELECT i.id, i.name, la.count
-         FROM (
-           SELECT ${institutionNameExpr} AS institution_key, COUNT(*) AS count
-           FROM leads
-           ${leadAggWhere}
-           GROUP BY institution_key
-           HAVING institution_key IS NOT NULL AND institution_key <> ''
-         ) la
-         INNER JOIN ${table} i
-           ON la.institution_key = ${institutionJoinExpr}
-           AND i.is_active = 1
-         ORDER BY i.name ASC`,
-        [...baseParams]
-      );
-      payload.institutionBreakdown = (institutionRows || []).map((r) => ({
+    if (needsInstitutionBreakdown) {
+      payload.institutionBreakdown = (institutionRowsPrelim || []).map((r) => ({
         id: r.id,
         name: r.name,
-        count: Number(r.count) || 0,
+        count: Number(r.unassigned_count) || 0,
+        assignedCount: Number(r.assigned_count) || 0,
       }));
     }
 
@@ -1993,29 +2020,16 @@ export const getUserAnalytics = async (req, res) => {
     const assignmentDateWhere =
       assignmentDateConditions.length > 0 ? `AND ${assignmentDateConditions.join(' AND ')}` : '';
 
-    /** Reclamation rows aligned with report filters (assignment previously had no date filter → “Reclaimed” looked inflated vs future target dates). */
-    const reclaimLogConditions = [];
-    const reclaimLogParamsSuffix = [];
-    if (startDate) {
-      const start = new Date(startDate);
-      start.setHours(0, 0, 0, 0);
-      reclaimLogConditions.push('created_at >= ?');
-      reclaimLogParamsSuffix.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      reclaimLogConditions.push('created_at <= ?');
-      reclaimLogParamsSuffix.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (useAcademicYear) {
-      reclaimLogConditions.push(
-        'EXISTS (SELECT 1 FROM leads l_r WHERE l_r.id = activity_logs.lead_id AND l_r.academic_year = ?)'
-      );
-      reclaimLogParamsSuffix.push(yearNum);
-    }
-    const reclaimLogWhere =
-      reclaimLogConditions.length > 0 ? `AND ${reclaimLogConditions.join(' AND ')}` : '';
+    /**
+     * Reclamation logs for “Not attended” / per-batch reclaimed counts: do **not** filter by
+     * reclaim event date (created_at). Those counts are “ever reclaimed from this allotment cohort”,
+     * which may happen after the report activity window. When the report filters by academic year,
+     * still restrict to reclaims for leads in that year.
+     */
+    const reclaimLogWhereForBatchMetrics = useAcademicYear
+      ? 'AND EXISTS (SELECT 1 FROM leads l_r WHERE l_r.id = activity_logs.lead_id AND l_r.academic_year = ?)'
+      : '';
+    const reclaimLogParamsForBatchMetrics = useAcademicYear ? [yearNum] : [];
 
     const perfRoleNorm = String(perfRole || '').trim();
 
@@ -2531,9 +2545,9 @@ export const getUserAnalytics = async (req, res) => {
             created_at
           FROM activity_logs
           WHERE type = 'status_change' AND source_user_id IN (${cohortUserIdPlaceholders})
-          ${reclaimLogWhere}
+          ${reclaimLogWhereForBatchMetrics}
           ORDER BY created_at DESC`,
-          [...cohortScopeUserIds, ...reclaimLogParamsSuffix]
+          [...cohortScopeUserIds, ...reclaimLogParamsForBatchMetrics]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`

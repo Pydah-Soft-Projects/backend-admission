@@ -4,6 +4,11 @@
  * Why:
  * - Reduce CPU and sort pressure on paginated lead list queries.
  * - Improve filtering on assignment and academic/student group predicates.
+ * - Speed up GET /leads/assign/stats (summary COUNT/SUM and district/mandal breakdowns)
+ *   which filter by academic_year, student_group, cycle_number, state/district/mandal
+ *   and aggregate on assigned_to vs assigned_to_pro.
+ * - Geo-style indexes use prefix lengths on state/district/mandal (utf8mb4 × VARCHAR(255)
+ *   would exceed InnoDB’s 3072-byte key limit otherwise).
  *
  * Run (from backend-admission):
  *   node src/scripts-sql/addLeadListPerformanceIndexes.js
@@ -48,6 +53,43 @@ const INDEXES = [
     table: 'leads',
     name: 'idx_leads_assignpro_year_group_created_id',
     ddl: 'CREATE INDEX idx_leads_assignpro_year_group_created_id ON leads (assigned_to_pro, academic_year, student_group, created_at DESC, id ASC)',
+  },
+  // --- Assignment stats API (getAssignmentStats): scoped aggregates + geo breakdowns ---
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_summary_counselor',
+    ddl:
+      'CREATE INDEX idx_leads_stats_summary_counselor ON leads (academic_year, student_group, cycle_number, assigned_to)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_summary_pro',
+    ddl:
+      'CREATE INDEX idx_leads_stats_summary_pro ON leads (academic_year, student_group, cycle_number, assigned_to_pro)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_district_counselor',
+    ddl:
+      'CREATE INDEX idx_leads_stats_district_counselor ON leads (academic_year, student_group, cycle_number, state(100), district(100), assigned_to)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_district_pro',
+    ddl:
+      'CREATE INDEX idx_leads_stats_district_pro ON leads (academic_year, student_group, cycle_number, state(100), district(100), assigned_to_pro)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_mandal_counselor',
+    ddl:
+      'CREATE INDEX idx_leads_stats_mandal_counselor ON leads (academic_year, student_group, cycle_number, state(100), district(100), mandal(100), assigned_to)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_stats_mandal_pro',
+    ddl:
+      'CREATE INDEX idx_leads_stats_mandal_pro ON leads (academic_year, student_group, cycle_number, state(100), district(100), mandal(100), assigned_to_pro)',
   },
 ];
 
