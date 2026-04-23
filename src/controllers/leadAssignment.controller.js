@@ -1784,6 +1784,11 @@ export const getUserAnalytics = async (req, res) => {
       department,
       group,
       bypassCache,
+      page: pageQuery,
+      limit: limitQuery,
+      perfSearch,
+      perfDepartment,
+      perfGroup,
     } = req.query;
 
     const cacheKey = stableStringify({
@@ -1796,6 +1801,11 @@ export const getUserAnalytics = async (req, res) => {
       department,
       group,
       managedBy: isManager && !isAdmin ? currentUserId : null,
+      page: pageQuery,
+      limit: limitQuery,
+      perfSearch,
+      perfDepartment,
+      perfGroup,
     });
 
     if (String(bypassCache || '').toLowerCase() !== 'true') {
@@ -1956,26 +1966,97 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
     }
 
-    const selectedUserIds = users.map((u) => u.id).filter(Boolean);
-    const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
+    await hydrateUserOrgFromHrms(users, pool);
+
+    /** Optional UI filters (reports → User Performance). Distinct from HRMS org query params division/department/group. */
+    const perfSearchNorm = String(perfSearch || '').trim().toLowerCase();
+    const perfDeptNorm = String(perfDepartment || '').trim();
+    const perfGroupNorm = String(perfGroup || '').trim();
+
+    let perfFilteredUsers = users;
+    if (perfSearchNorm || perfDeptNorm || perfGroupNorm) {
+      perfFilteredUsers = users.filter((u) => {
+        const name = String(u.name || '').toLowerCase();
+        const email = String(u.email || '').toLowerCase();
+        if (perfSearchNorm && !name.includes(perfSearchNorm) && !email.includes(perfSearchNorm)) return false;
+        if (perfDeptNorm && String(u.department || '').trim() !== perfDeptNorm) return false;
+        if (perfGroupNorm && String(u.group || '').trim() !== perfGroupNorm) return false;
+        return true;
+      });
+    }
+
+    perfFilteredUsers = [...perfFilteredUsers].sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+    );
+
+    /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
+    const explicitUserIds = userId ? String(userId).split(',').map((id) => id.trim()).filter(Boolean) : [];
+    const allowPagination = explicitUserIds.length === 0;
+    const pageNum =
+      allowPagination && pageQuery != null && pageQuery !== ''
+        ? Math.max(1, parseInt(String(pageQuery), 10) || 1)
+        : null;
+    const limitNum =
+      allowPagination && limitQuery != null && limitQuery !== ''
+        ? Math.min(100, Math.max(1, parseInt(String(limitQuery), 10) || 25))
+        : null;
+    const isPaginated = pageNum != null && limitNum != null;
+
+    if (!perfFilteredUsers.length) {
+      const emptyPag =
+        isPaginated
+          ? { page: 1, limit: limitNum, total: 0, pages: 1 }
+          : null;
+      return successResponse(
+        res,
+        { users: [], ...(emptyPag ? { pagination: emptyPag, summaryTotals: null } : {}) },
+        'User analytics retrieved successfully',
+        200
+      );
+    }
+
+    let pagination = null;
+    let pageUsers = perfFilteredUsers;
+    if (isPaginated) {
+      const total = perfFilteredUsers.length;
+      const pages = Math.max(1, Math.ceil(total / limitNum));
+      const safePage = Math.min(pageNum, pages);
+      const start = (safePage - 1) * limitNum;
+      pageUsers = perfFilteredUsers.slice(start, start + limitNum);
+      pagination = { page: safePage, limit: limitNum, total, pages };
+    }
+
+    if (!pageUsers.length) {
+      const emptyPayload = { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) };
+      return successResponse(res, emptyPayload, 'User analytics retrieved successfully', 200);
+    }
+
+    const aggregateUserIds = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+    const cohortScopeUsers = isPaginated ? pageUsers : perfFilteredUsers;
+    const cohortScopeUserIds = cohortScopeUsers.map((u) => u.id).filter(Boolean);
+
+    if (aggregateUserIds.length === 0 || cohortScopeUserIds.length === 0) {
+      return successResponse(res, { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) }, 'No users found', 200);
+    }
+
+    const filteredUserIds = aggregateUserIds;
 
     // Get aggregate counts for all users in one go
     // Note: If filters are applied, we only aggregate for those specific users to improve performance
-    const filteredUserIds = users.map(u => u.id);
     if (filteredUserIds.length === 0) {
-      return successResponse(res, { users: [] }, 'No users found', 200);
+      return successResponse(res, { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) }, 'No users found', 200);
     }
     const userIdPlaceholders = filteredUserIds.map(() => '?').join(',');
+
+    const selectedUserIds = cohortScopeUserIds;
+    const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
 
     // OPTIMIZATION: Combine Lead Counts, Status counts and Conversion counts into fewer queries
     // We use conditional aggregation to avoid multiple subquery joins
     // OPTIMIZATION: Use historical logs to get cumulative performance
     const logDateClause = activityDateClause.split('sent_at').join('a.created_at');
 
-    /** HRMS hydration overlaps first aggregate batch — previously blocked all SQL after user list. */
-    const [, batch1Results] = await Promise.all([
-      hydrateUserOrgFromHrms(users, pool),
-      Promise.all([
+    const batch1Results = await Promise.all([
       // 1. Get Full Handled Portfolio (Total Leads Involved in Period)
       pool.execute(
         `SELECT user_id, COUNT(DISTINCT lead_id) as total_handled FROM (
@@ -2073,7 +2154,6 @@ export const getUserAnalytics = async (req, res) => {
           ? [...activityDateParams, ...filteredUserIds, yearNum]
           : [...activityDateParams, ...filteredUserIds]
       )
-      ]),
     ]);
 
     const [
@@ -2141,8 +2221,11 @@ export const getUserAnalytics = async (req, res) => {
     const callsAmongAllottedByCallStatusByUser = new Map();
 
     const assignmentExistsWhere = assignmentDateWhere.replace(/\bl\./g, 'la.');
-    const cohortCommParams = [...filteredUserIds, ...activityDateParams, ...assignmentDateParams];
-    const assignJoinParams = [...filteredUserIds, ...assignmentDateParams];
+    const cohortUserIdPlaceholders = cohortScopeUserIds.map(() => '?').join(',');
+    const cohortAssignJoinParams = [...cohortScopeUserIds, ...assignmentDateParams];
+    const cohortCommSqlParams = [...cohortScopeUserIds, ...activityDateParams, ...assignmentDateParams];
+
+    const aggregateUserPlaceholders = aggregateUserIds.map(() => '?').join(',');
 
     /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
     const batch2Promise = Promise.all([
@@ -2154,13 +2237,13 @@ export const getUserAnalytics = async (req, res) => {
           SUM(CASE WHEN type = 'call' THEN duration_seconds ELSE 0 END) as total_duration,
           COUNT(DISTINCT lead_id) as unique_leads
         FROM communications 
-        WHERE sent_by IN (${selectedUserPlaceholders}) ${activityDateClause}
+        WHERE sent_by IN (${aggregateUserPlaceholders}) ${activityDateClause}
           AND (
             type <> 'call'
             OR (call_outcome IS NOT NULL AND TRIM(call_outcome) <> '')
           )
         GROUP BY sent_by, type`,
-        [...selectedUserIds, ...activityDateParams]
+        [...aggregateUserIds, ...activityDateParams]
       ),
       pool.execute(
         `SELECT
@@ -2193,16 +2276,16 @@ export const getUserAnalytics = async (req, res) => {
 
     const emptyExec = [[], []];
     const cohortPromise =
-      filteredUserIds.length === 0
+      cohortScopeUserIds.length === 0
         ? Promise.resolve([emptyExec, emptyExec, emptyExec, emptyExec])
         : Promise.all([
             pool.execute(
               `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
                FROM activity_logs a
                INNER JOIN leads l ON l.id = a.lead_id
-               WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+               WHERE a.type = 'status_change' AND a.target_user_id IN (${cohortUserIdPlaceholders})
                ${assignmentDateWhere}`,
-              assignJoinParams
+              cohortAssignJoinParams
             ),
             pool.execute(
               `SELECT a.target_user_id AS user_id,
@@ -2210,10 +2293,10 @@ export const getUserAnalytics = async (req, res) => {
                 COUNT(DISTINCT a.lead_id) AS cnt
                FROM activity_logs a
                INNER JOIN leads l ON l.id = a.lead_id
-               WHERE a.type = 'status_change' AND a.target_user_id IN (${userIdPlaceholders})
+               WHERE a.type = 'status_change' AND a.target_user_id IN (${cohortUserIdPlaceholders})
                ${assignmentDateWhere}
                GROUP BY a.target_user_id, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
-              assignJoinParams
+              cohortAssignJoinParams
             ),
             pool.execute(
               `SELECT c.sent_by AS user_id,
@@ -2221,7 +2304,7 @@ export const getUserAnalytics = async (req, res) => {
                 COUNT(DISTINCT c.lead_id) AS cnt
                FROM communications c
                INNER JOIN leads l ON l.id = c.lead_id
-               WHERE c.sent_by IN (${userIdPlaceholders})
+               WHERE c.sent_by IN (${cohortUserIdPlaceholders})
                  AND c.type = 'call'
                  AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
                  ${activityDateClause}
@@ -2234,7 +2317,7 @@ export const getUserAnalytics = async (req, res) => {
                      ${assignmentExistsWhere}
                  )
                GROUP BY c.sent_by, CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END`,
-              cohortCommParams
+              cohortCommSqlParams
             ),
             pool.execute(
               `SELECT agg.user_id, SUM(agg.cnt) AS bucket_sum
@@ -2250,12 +2333,12 @@ export const getUserAnalytics = async (req, res) => {
                  FROM activity_logs a
                  INNER JOIN leads l ON l.id = a.lead_id
                  WHERE a.type = 'status_change'
-                   AND a.target_user_id IN (${userIdPlaceholders})
+                   AND a.target_user_id IN (${cohortUserIdPlaceholders})
                    ${assignmentDateWhere}
                  GROUP BY a.target_user_id, DATE(a.created_at), eff_target
                ) agg
                GROUP BY agg.user_id`,
-              assignJoinParams
+              cohortAssignJoinParams
             ),
           ]);
 
@@ -2329,9 +2412,9 @@ export const getUserAnalytics = async (req, res) => {
           FROM activity_logs a
           JOIN leads l ON l.id = a.lead_id
           WHERE a.type = 'status_change' 
-            AND a.target_user_id IN (${userIdPlaceholders})
+            AND a.target_user_id IN (${cohortUserIdPlaceholders})
             ${assignmentDateWhere}`,
-          [...filteredUserIds, ...assignmentDateParams]
+          [...cohortScopeUserIds, ...assignmentDateParams]
         ),
         pool.execute(
           `SELECT 
@@ -2341,10 +2424,10 @@ export const getUserAnalytics = async (req, res) => {
             old_status,
             created_at
           FROM activity_logs
-          WHERE type = 'status_change' AND source_user_id IN (${userIdPlaceholders})
+          WHERE type = 'status_change' AND source_user_id IN (${cohortUserIdPlaceholders})
           ${reclaimLogWhere}
           ORDER BY created_at DESC`,
-          [...filteredUserIds, ...reclaimLogParamsSuffix]
+          [...cohortScopeUserIds, ...reclaimLogParamsSuffix]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
@@ -2576,8 +2659,46 @@ export const getUserAnalytics = async (req, res) => {
       );
     });
 
-    // Compile analytics for each user
-    const userAnalytics = users.map((user) => {
+    let summaryTotals = null;
+    if (isPaginated) {
+      let totalAssignedLeads = 0;
+      let totalCallsDone = 0;
+      let totalSms = 0;
+      for (const u of perfFilteredUsers) {
+        const uid = cohortAnalyticUserKey(u.id);
+        const stats = statsByUserId.get(u.id) || {
+          total_assigned: 0,
+          active_leads: 0,
+          total_converted: 0,
+          statusBreakdown: {},
+        };
+        const totalAssigned = numAgg(stats.total_assigned);
+        const isStudentCounselor = u.role_name === 'Student Counselor';
+        const hasBucket = allottedBucketSumMap.has(uid);
+        const bucketSum = hasBucket ? numAgg(allottedBucketSumMap.get(uid)) : null;
+        const leadPart = isStudentCounselor && hasBucket ? bucketSum : totalAssigned;
+        totalAssignedLeads += leadPart;
+        const allottedBag = allottedByCallStatusByUser.get(uid);
+        const allottedCallsVisitsDoneDisplay = sumCounselorCallStatusBucketsExcludingAssigned(allottedBag);
+        const comms = commMap.get(u.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
+        const callsDisplay = isStudentCounselor
+          ? allottedBag && Object.keys(allottedBag).length > 0
+            ? allottedCallsVisitsDoneDisplay
+            : numAgg(comms.calls.unique)
+          : numAgg(comms.calls.unique);
+        totalCallsDone += callsDisplay;
+        totalSms += numAgg(comms.sms);
+      }
+      summaryTotals = {
+        userCount: perfFilteredUsers.length,
+        totalAssignedLeads,
+        totalCallsDone,
+        totalSms,
+      };
+    }
+
+    // Compile analytics for each user (one page when paginated)
+    const userAnalytics = pageUsers.map((user) => {
       const stats = statsByUserId.get(user.id) || { total_assigned: 0, active_leads: 0, total_converted: 0, statusBreakdown: {} };
       const comms = commMap.get(user.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
       const logs = logsMap.get(user.id) || { total_logs: 0, status_changes: 0 };
@@ -2668,7 +2789,10 @@ export const getUserAnalytics = async (req, res) => {
       };
     });
 
-    const payload = { users: userAnalytics };
+    const payload = {
+      users: userAnalytics,
+      ...(pagination ? { pagination, summaryTotals } : {}),
+    };
     if (String(bypassCache || '').toLowerCase() !== 'true') {
       analyticsCache.set(cacheKey, {
         data: payload,
