@@ -13,10 +13,15 @@
  * Apply (updates all matching rows, no LIMIT):
  *   node src/scripts-sql/backfillTargetDateForAssignedLeads.js --apply
  *
+ * With --apply, also copies each lead’s target_date into assignment activity_logs
+ * (metadata.assignment.targetDate) when missing, so reports and timelines match.
+ * Skip that step with --skip-activity-log-backfill.
+ *
  * Options:
  *   --target-date=2026-04-25   Exact DATE to set (overrides --year)
  *   --year=2026              Use April 25 of this year (ignored if --target-date set)
  *   --lead-status=Assigned   Optional: only leads with this lead_status
+ *   --skip-activity-log-backfill  Do not update activity_logs after lead UPDATE
  */
 
 import dotenv from 'dotenv';
@@ -30,9 +35,11 @@ function parseArgs() {
     targetDate: null,
     year: null,
     leadStatus: null,
+    skipActivityLogBackfill: false,
   };
   for (const arg of process.argv.slice(2)) {
     if (arg === '--apply') out.apply = true;
+    if (arg === '--skip-activity-log-backfill') out.skipActivityLogBackfill = true;
     if (arg.startsWith('--target-date=')) {
       const v = arg.slice('--target-date='.length).trim();
       if (/^\d{4}-\d{2}-\d{2}$/.test(v)) out.targetDate = v;
@@ -135,7 +142,55 @@ async function main() {
   );
 
   const affected = Number(result?.affectedRows ?? 0);
-  console.log(`UPDATE complete. affectedRows: ${affected}\n`);
+  console.log(`UPDATE leads complete. affectedRows: ${affected}\n`);
+
+  if (!args.skipActivityLogBackfill) {
+    const [[logCountRow]] = await pool.execute(
+      `
+      SELECT COUNT(*) AS cnt
+      FROM activity_logs a
+      INNER JOIN leads l ON l.id = a.lead_id
+      WHERE a.type = 'status_change'
+        AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+        AND l.target_date IS NOT NULL
+        AND (
+          JSON_EXTRACT(a.metadata, '$.assignment.targetDate') IS NULL
+          OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate')), '')) = ''
+        )
+      `
+    );
+    const logMatches = Number(logCountRow?.cnt || 0);
+    console.log(
+      `Activity logs missing assignment.targetDate (lead has target_date): ${logMatches} row(s).`
+    );
+    if (logMatches > 0) {
+      const [logResult] = await pool.execute(
+        `
+        UPDATE activity_logs a
+        INNER JOIN leads l ON l.id = a.lead_id
+        SET
+          a.metadata = JSON_SET(
+            COALESCE(CAST(a.metadata AS JSON), JSON_OBJECT()),
+            '$.assignment.targetDate',
+            DATE_FORMAT(l.target_date, '%Y-%m-%d')
+          ),
+          a.updated_at = NOW()
+        WHERE a.type = 'status_change'
+          AND JSON_EXTRACT(a.metadata, '$.assignment.assignedTo') IS NOT NULL
+          AND l.target_date IS NOT NULL
+          AND (
+            JSON_EXTRACT(a.metadata, '$.assignment.targetDate') IS NULL
+            OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate')), '')) = ''
+          )
+        `
+      );
+      console.log(
+        `UPDATE activity_logs complete. affectedRows: ${Number(logResult?.affectedRows ?? 0)}\n`
+      );
+    }
+  } else {
+    console.log('Skipped activity_logs backfill (--skip-activity-log-backfill).\n');
+  }
 
   await closeDB();
 }

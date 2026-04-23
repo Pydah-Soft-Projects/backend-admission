@@ -2400,7 +2400,19 @@ export const getUserAnalytics = async (req, res) => {
                    DATE(a.created_at) AS assigned_day,
                    COALESCE(
                      NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
-                     IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d'))
+                     IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+                     IF(
+                       l.academic_year IS NOT NULL AND l.academic_year BETWEEN 2000 AND 2100,
+                       DATE_FORMAT(
+                         STR_TO_DATE(CONCAT(l.academic_year, '-04-25'), '%Y-%m-%d'),
+                         '%Y-%m-%d'
+                       ),
+                       NULL
+                     ),
+                     DATE_FORMAT(
+                       STR_TO_DATE(CONCAT(YEAR(DATE(a.created_at)), '-04-25'), '%Y-%m-%d'),
+                       '%Y-%m-%d'
+                     )
                    ) AS eff_target,
                    COUNT(DISTINCT a.lead_id) AS cnt
                  FROM activity_logs a
@@ -2483,8 +2495,22 @@ export const getUserAnalytics = async (req, res) => {
             l.visit_status,
             l.student_group,
             l.mandal,
-            l.target_date,
-            NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), '') AS log_assignment_target_date,
+            COALESCE(
+              NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
+              IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+              IF(
+                l.academic_year IS NOT NULL AND l.academic_year BETWEEN 2000 AND 2100,
+                DATE_FORMAT(
+                  STR_TO_DATE(CONCAT(l.academic_year, '-04-25'), '%Y-%m-%d'),
+                  '%Y-%m-%d'
+                ),
+                NULL
+              ),
+              DATE_FORMAT(
+                STR_TO_DATE(CONCAT(YEAR(DATE(a.created_at)), '-04-25'), '%Y-%m-%d'),
+                '%Y-%m-%d'
+              )
+            ) AS report_target_date_ymd,
             l.cycle_number,
             l.assigned_to,
             l.assigned_to_pro,
@@ -2547,9 +2573,8 @@ export const getUserAnalytics = async (req, res) => {
         
         if (!dateKey || dateKey === 'null') return;
 
-        // Prefer target date stored on the assignment log (at assign time); else current lead.target_date.
-        const effectiveYmd =
-          sliceAssignmentYmd(row.log_assignment_target_date) || sliceAssignmentYmd(row.target_date);
+        // Log targetDate → lead.target_date → 25 Apr of lead.academic_year (if set) → 25 Apr of assignment calendar year.
+        const effectiveYmd = sliceAssignmentYmd(row.report_target_date_ymd);
         let tDateSegment = '__NULL__';
         if (effectiveYmd) {
           tDateSegment = effectiveYmd;
