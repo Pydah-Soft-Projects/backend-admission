@@ -1956,6 +1956,8 @@ export const getUserAnalytics = async (req, res) => {
       perfRole,
       /** When true/1, return only roster fields + active lead counts (communications UI); skips heavy analytics SQL. */
       rosterOnly,
+      /** Super Admin dashboard: current `leads` rows only (no activity date window / default rolling range). */
+      currentPortfolioOnly,
     } = req.query;
 
     const isRosterOnly =
@@ -1963,9 +1965,14 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly === '1' ||
       String(rosterOnly || '') === '1';
 
+    const isCurrentPortfolioOnly =
+      String(currentPortfolioOnly || '').toLowerCase() === 'true' ||
+      currentPortfolioOnly === '1';
+
     /**
      * When both dates are omitted, analytics previously scanned all-time activity_logs / communications
      * (timeouts in production). Default to a rolling window unless rosterOnly (fast path).
+     * Super Admin overview uses `currentPortfolioOnly` instead (no implicit date range).
      * Override with env USER_ANALYTICS_DEFAULT_WINDOW_DAYS (1–366, default 90).
      */
     const rawStartIn = String(startDate || '').trim();
@@ -1976,7 +1983,7 @@ export const getUserAnalytics = async (req, res) => {
     );
     let rangeStartStr = rawStartIn || null;
     let rangeEndStr = rawEndIn || null;
-    if (!isRosterOnly && !rangeStartStr && !rangeEndStr) {
+    if (!isRosterOnly && !rangeStartStr && !rangeEndStr && !isCurrentPortfolioOnly) {
       const endD = new Date();
       const startD = new Date(endD);
       startD.setDate(endD.getDate() - (defaultWindowDays - 1));
@@ -2001,6 +2008,7 @@ export const getUserAnalytics = async (req, res) => {
       perfGroup,
       perfRole,
       rosterOnly: isRosterOnly,
+      currentPortfolioOnly: isCurrentPortfolioOnly,
     });
 
     if (!isRosterOnly && String(bypassCache || '').toLowerCase() !== 'true') {
@@ -2020,6 +2028,8 @@ export const getUserAnalytics = async (req, res) => {
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
     const shouldIncludeAssignmentDetails =
       String(includeAssignmentDetails || '').toLowerCase() === 'true';
+    const includeAssignmentDetailsForWork =
+      shouldIncludeAssignmentDetails && !isCurrentPortfolioOnly;
     const hasOrgFilters = Boolean(division || department || group);
 
     // Set date range for filtering activities (effective range includes server default when both were blank)
@@ -2134,6 +2144,61 @@ export const getUserAnalytics = async (req, res) => {
         ),
       ]);
     };
+
+    /** Current `leads` rows only (assigned_to / assigned_to_pro); no activity_log / communications date window. */
+    const executeBatch1PortfolioSnapshot = async (ids) => {
+      if (!ids.length) {
+        return [
+          [[], []],
+          [[], []],
+          [[], []],
+          [[], []],
+        ];
+      }
+      const ph = ids.map(() => '?').join(',');
+      const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
+      const paramsBase = useAcademicYear ? [...ids, yearNum] : [...ids];
+      return Promise.all([
+        pool.execute(
+          `SELECT u.id AS user_id, COUNT(DISTINCT l.id) AS total_handled
+           FROM users u
+           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+           WHERE u.id IN (${ph}) ${aySql}
+           GROUP BY u.id`,
+          paramsBase
+        ),
+        pool.execute(
+          `SELECT u.id AS user_id,
+            COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown') AS lead_status,
+            COUNT(*) AS status_count
+           FROM users u
+           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+           WHERE u.id IN (${ph}) ${aySql}
+           GROUP BY u.id, l.lead_status`,
+          paramsBase
+        ),
+        pool.execute(
+          `SELECT u.id AS user_id, COUNT(DISTINCT adm.lead_id) AS converted_count
+           FROM users u
+           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+           INNER JOIN admissions adm ON adm.lead_id = l.id
+           WHERE u.id IN (${ph}) ${aySql}
+           GROUP BY u.id`,
+          paramsBase
+        ),
+        pool.execute(
+          `SELECT u.id AS user_id, COUNT(DISTINCT l.id) AS active_leads
+           FROM users u
+           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+           WHERE u.id IN (${ph}) ${aySql}
+             AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
+           GROUP BY u.id`,
+          paramsBase
+        ),
+      ]);
+    };
+
+    const runBatch1 = isCurrentPortfolioOnly ? executeBatch1PortfolioSnapshot : executeBatch1ForAnalytics;
 
     /** Assignment logs in the selected period (same window as date-wise expanded rows). */
     let assignmentDateConditions = [];
@@ -2288,14 +2353,14 @@ export const getUserAnalytics = async (req, res) => {
     let perfFilteredUsers;
     let batch1Results;
 
-    if (!needsPostHydratePerfFilter && !shouldIncludeAssignmentDetails) {
+    if (!needsPostHydratePerfFilter && !includeAssignmentDetailsForWork) {
       perfFilteredUsers = [...users].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
       const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
       [, batch1Results] = await Promise.all([
         hydrateUserOrgFromHrms(users, pool),
-        executeBatch1ForAnalytics(batch1Ids),
+        runBatch1(batch1Ids),
       ]);
     } else {
       await hydrateUserOrgFromHrms(users, pool);
@@ -2317,7 +2382,7 @@ export const getUserAnalytics = async (req, res) => {
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
       const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
-      batch1Results = await executeBatch1ForAnalytics(batch1IdsElse);
+      batch1Results = await runBatch1(batch1IdsElse);
     }
 
     /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
@@ -2603,7 +2668,37 @@ export const getUserAnalytics = async (req, res) => {
             ),
           ]);
 
-    const [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
+    const emptyMysqlResult = [[], []];
+    let batch2Results;
+    let cohortTriple;
+    if (isCurrentPortfolioOnly) {
+      cohortTriple = [emptyMysqlResult, emptyMysqlResult, emptyMysqlResult, emptyMysqlResult];
+      let currentPortfolioCallPack = emptyMysqlResult;
+      if (cohortScopeUserIds.length) {
+        const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
+        const cpParams = useAcademicYear
+          ? [...cohortScopeUserIds, yearNum]
+          : [...cohortScopeUserIds];
+        const [cpRows] = await pool.execute(
+          `SELECT
+            c.sent_by AS user_id,
+            COUNT(DISTINCT c.lead_id) AS unique_current_leads_called
+           FROM communications c
+           INNER JOIN leads l ON l.id = c.lead_id
+           WHERE c.type = 'call'
+             AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
+             AND c.sent_by IN (${selectedUserPlaceholders})
+             AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
+             ${aySql}
+           GROUP BY c.sent_by`,
+          cpParams
+        );
+        currentPortfolioCallPack = [cpRows, []];
+      }
+      batch2Results = [emptyMysqlResult, currentPortfolioCallPack, emptyMysqlResult];
+    } else {
+      [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
+    }
 
     const [[commCounts], [currentPortfolioCallCounts], [actLogsCountResult]] = batch2Results;
     const allottedDistinctRows = cohortTriple[0][0];
@@ -2647,10 +2742,58 @@ export const getUserAnalytics = async (req, res) => {
       callsAmongAllottedMap.set(uid, s);
     });
 
+    if (isCurrentPortfolioOnly) {
+      if (cohortScopeUserIds.length) {
+        const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
+        const snapParams = useAcademicYear ? [...cohortScopeUserIds, yearNum] : [...cohortScopeUserIds];
+        const [snapRowsPack] = await pool.execute(
+          `SELECT u.id AS user_id,
+            TRIM(u.role_name) AS cohort_user_role,
+            CASE
+              WHEN TRIM(u.role_name) = 'PRO' THEN
+                CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+              ELSE
+                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+            END AS bucket,
+            COUNT(DISTINCT l.id) AS cnt
+           FROM users u
+           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+           WHERE u.id IN (${selectedUserPlaceholders}) ${aySql}
+           GROUP BY u.id, TRIM(u.role_name),
+             CASE
+               WHEN TRIM(u.role_name) = 'PRO' THEN
+                 CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
+               ELSE
+                 CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
+             END`,
+          snapParams
+        );
+        (snapRowsPack || []).forEach((row) => {
+          const uidK = cohortAnalyticUserKey(row.user_id);
+          const role = row.cohort_user_role;
+          const key = canonicalCohortBucketForRole(role, row.bucket);
+          if (!allottedByCallStatusByUser.has(uidK)) allottedByCallStatusByUser.set(uidK, {});
+          const bag = allottedByCallStatusByUser.get(uidK);
+          bag[key] = (bag[key] || 0) + numAgg(row.cnt);
+        });
+      }
+      cohortScopeUsers.forEach((u) => {
+        const uidK = cohortAnalyticUserKey(u.id);
+        const st = statsByUserId.get(u.id);
+        const ta = numAgg(st?.total_assigned);
+        allottedDistinctMap.set(uidK, ta);
+        const isSc = u.role_name === 'Student Counselor';
+        const isProRole = String(u.role_name || '').trim().toUpperCase() === 'PRO';
+        if (isSc || isProRole) {
+          allottedBucketSumMap.set(uidK, ta);
+        }
+      });
+    }
+
     const assignmentByDateMap = new Map();
     const reclaimedUniqueMap = new Map();
 
-    if (shouldIncludeAssignmentDetails) {
+    if (includeAssignmentDetailsForWork) {
       const uidKeyToRole = new Map();
       cohortScopeUsers.forEach((u) => {
         uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
@@ -3075,7 +3218,7 @@ export const getUserAnalytics = async (req, res) => {
           total: logs.status_changes,
         },
         expandedAssignmentDiagnostics:
-          shouldIncludeAssignmentDetails && (isStudentCounselor || isPro)
+          includeAssignmentDetailsForWork && (isStudentCounselor || isPro)
             ? {
                 performanceCohort: isStudentCounselor
                   ? {
