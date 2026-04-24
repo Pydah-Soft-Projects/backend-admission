@@ -248,8 +248,22 @@ export const getLeads = async (req, res) => {
       params.push(req.query.district);
     }
     if (req.query.village) {
-      conditions.push('l.village = ?');
-      params.push(req.query.village);
+      const vTrim = String(req.query.village).trim();
+      if (vTrim) {
+        const proAddressMatch =
+          req.user.roleName === 'PRO' &&
+          (req.query.villageInAddress === 'true' || req.query.villageInAddress === '1');
+        if (proAddressMatch) {
+          const esc = vTrim.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+          conditions.push(
+            `LOWER(CONCAT_WS(' ', IFNULL(l.address,''), IFNULL(l.village,''), IFNULL(l.mandal,''), IFNULL(l.district,''), IFNULL(l.state,''))) LIKE ?`
+          );
+          params.push(`%${esc.toLowerCase()}%`);
+        } else {
+          conditions.push('l.village = ?');
+          params.push(vTrim);
+        }
+      }
     }
     if (req.query.quota) {
       conditions.push('l.quota = ?');

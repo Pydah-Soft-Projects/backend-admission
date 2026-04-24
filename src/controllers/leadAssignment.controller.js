@@ -32,6 +32,7 @@ const COUNSELLOR_CALL_STATUS_CANONICAL = [
   'Not Answered',
   'Wrong Data',
   'Call Back',
+  'Visited',
   'Confirmed',
   'CET Applied',
 ];
@@ -1962,9 +1963,30 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly === '1' ||
       String(rosterOnly || '') === '1';
 
+    /**
+     * When both dates are omitted, analytics previously scanned all-time activity_logs / communications
+     * (timeouts in production). Default to a rolling window unless rosterOnly (fast path).
+     * Override with env USER_ANALYTICS_DEFAULT_WINDOW_DAYS (1–366, default 90).
+     */
+    const rawStartIn = String(startDate || '').trim();
+    const rawEndIn = String(endDate || '').trim();
+    const defaultWindowDays = Math.min(
+      366,
+      Math.max(1, Number(process.env.USER_ANALYTICS_DEFAULT_WINDOW_DAYS || 90))
+    );
+    let rangeStartStr = rawStartIn || null;
+    let rangeEndStr = rawEndIn || null;
+    if (!isRosterOnly && !rangeStartStr && !rangeEndStr) {
+      const endD = new Date();
+      const startD = new Date(endD);
+      startD.setDate(endD.getDate() - (defaultWindowDays - 1));
+      rangeStartStr = startD.toISOString().slice(0, 10);
+      rangeEndStr = endD.toISOString().slice(0, 10);
+    }
+
     const cacheKey = stableStringify({
-      startDate,
-      endDate,
+      startDate: rangeStartStr,
+      endDate: rangeEndStr,
       userId,
       academicYear,
       includeAssignmentDetails,
@@ -2000,17 +2022,17 @@ export const getUserAnalytics = async (req, res) => {
       String(includeAssignmentDetails || '').toLowerCase() === 'true';
     const hasOrgFilters = Boolean(division || department || group);
 
-    // Set date range for filtering activities
+    // Set date range for filtering activities (effective range includes server default when both were blank)
     let activityDateConditions = [];
     let activityDateParams = [];
-    if (startDate) {
-      const start = new Date(startDate);
+    if (rangeStartStr) {
+      const start = new Date(rangeStartStr);
       start.setHours(0, 0, 0, 0);
       activityDateConditions.push('>= ?');
       activityDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
     }
-    if (endDate) {
-      const end = new Date(endDate);
+    if (rangeEndStr) {
+      const end = new Date(rangeEndStr);
       end.setHours(23, 59, 59, 999);
       activityDateConditions.push('<= ?');
       activityDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
@@ -2116,14 +2138,14 @@ export const getUserAnalytics = async (req, res) => {
     /** Assignment logs in the selected period (same window as date-wise expanded rows). */
     let assignmentDateConditions = [];
     let assignmentDateParams = [];
-    if (startDate) {
-      const start = new Date(startDate);
+    if (rangeStartStr) {
+      const start = new Date(rangeStartStr);
       start.setHours(0, 0, 0, 0);
       assignmentDateConditions.push('a.created_at >= ?');
       assignmentDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
     }
-    if (endDate) {
-      const end = new Date(endDate);
+    if (rangeEndStr) {
+      const end = new Date(rangeEndStr);
       end.setHours(23, 59, 59, 999);
       assignmentDateConditions.push('a.created_at <= ?');
       assignmentDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
