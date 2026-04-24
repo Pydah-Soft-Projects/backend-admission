@@ -87,16 +87,34 @@ const setCachedAssignmentStats = (key, value) => {
   });
 };
 
+/** JSON paths used by 10th (and similar) lead forms for school name. */
+const LEAD_INSTITUTION_DYN_SCHOOL_SN =
+  "NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), '')), '')";
+const LEAD_INSTITUTION_DYN_SCHOOL_CAMEL =
+  "NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), '')), '')";
+const LEAD_INSTITUTION_INTER_COL = "NULLIF(TRIM(COALESCE(inter_college, '')), '')";
+
 /**
  * Normalized institution name key for a lead row (JOIN / GROUP BY / WHERE).
- * Prefer `inter_college` (bulk upload and manual entry); then JSON dynamic_fields used by forms/API.
+ * - **10th**: `dynamic_fields` school keys (`school_or_college_name` / `schoolOrCollegeName`), then `inter_college` fallback.
+ * - **All other groups** (Inter, Inter-MPC, Degree, …): **only** `leads.inter_college` (no JSON dynamic fallback).
  */
-const LEAD_INSTITUTION_KEY_SQL = `LOWER(TRIM(COALESCE(
-  NULLIF(TRIM(COALESCE(inter_college, '')), ''),
-  NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.school_or_college_name')), '')), ''),
-  NULLIF(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(dynamic_fields, '$.schoolOrCollegeName')), '')), ''),
-  ''
-)))`;
+function leadInstitutionKeySql(studentGroup) {
+  const is10th = String(studentGroup || '').trim() === '10th';
+  if (is10th) {
+    const parts = `${LEAD_INSTITUTION_DYN_SCHOOL_SN}, ${LEAD_INSTITUTION_DYN_SCHOOL_CAMEL}, ${LEAD_INSTITUTION_INTER_COL}`;
+    return `LOWER(TRIM(COALESCE(${parts}, '')))`;
+  }
+  return `LOWER(TRIM(COALESCE(${LEAD_INSTITUTION_INTER_COL}, '')))`;
+}
+
+/** One row’s display label (same precedence as {@link leadInstitutionKeySql}, not lowercased). For GROUP BY institution_key → MIN(label). */
+function leadInstitutionLabelExprSql(studentGroup) {
+  if (String(studentGroup || '').trim() === '10th') {
+    return `COALESCE(${LEAD_INSTITUTION_DYN_SCHOOL_SN}, ${LEAD_INSTITUTION_DYN_SCHOOL_CAMEL}, ${LEAD_INSTITUTION_INTER_COL})`;
+  }
+  return LEAD_INSTITUTION_INTER_COL;
+}
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
 // @route   POST /api/leads/assign
@@ -225,10 +243,10 @@ export const assignLeads = async (req, res) => {
         }
       }
 
-      // Add school/college (institution) filter: inter_college first, then JSON dynamic_fields
+      // Add school/college filter (10th: dynamic_fields + inter_college fallback; others: leads.inter_college only)
       if (institutionName && typeof institutionName === 'string' && institutionName.trim()) {
         const instParam = institutionName.trim();
-        conditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
+        conditions.push(`${leadInstitutionKeySql(studentGroup)} = LOWER(?)`);
         params.push(instParam);
       }
 
@@ -551,10 +569,12 @@ export const getAssignmentStats = async (req, res) => {
       params.push(state);
     }
 
+    const institutionKeySql = leadInstitutionKeySql(studentGroup);
+
     // Add school/college (institution) filter if provided
     if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
       const instParam = String(institutionName).trim();
-      conditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
+      conditions.push(`${institutionKeySql} = LOWER(?)`);
       params.push(instParam);
     }
 
@@ -604,7 +624,7 @@ export const getAssignmentStats = async (req, res) => {
     }
     if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
       const instBase = String(institutionName).trim();
-      baseConditions.push(`${LEAD_INSTITUTION_KEY_SQL} = LOWER(?)`);
+      baseConditions.push(`${institutionKeySql} = LOWER(?)`);
       baseParams.push(instBase);
     }
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
@@ -626,28 +646,34 @@ export const getAssignmentStats = async (req, res) => {
           baseParams
         );
 
+    // Institution dropdown: aggregate **from leads** only. Joining `schools`/`colleges` master tables
+    // hid almost all options because `inter_college` / form text rarely matches `i.name` exactly.
     const institutionPromise = needsInstitutionBreakdown
       ? (() => {
-          const table = forBreakdown === 'school' ? 'schools' : 'colleges';
-          const institutionNameExpr = LEAD_INSTITUTION_KEY_SQL;
-          const institutionJoinExpr = 'LOWER(TRIM(i.name))';
+          const institutionNameExpr = institutionKeySql;
+          const labelExpr = leadInstitutionLabelExprSql(studentGroup);
           return pool.execute(
-            `SELECT i.id, i.name,
-                la.unassigned_count AS unassigned_count,
-                la.assigned_count AS assigned_count
+            `SELECT j.institution_key AS id,
+                COALESCE(NULLIF(TRIM(j.display_name), ''), j.institution_key) AS name,
+                j.unassigned_count AS unassigned_count,
+                j.assigned_count AS assigned_count
              FROM (
-               SELECT ${institutionNameExpr} AS institution_key,
-                 SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned_count,
-                 SUM(CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS assigned_count
-               FROM leads
-               ${baseWhere}
-               GROUP BY institution_key
-               HAVING institution_key IS NOT NULL AND institution_key <> ''
-             ) la
-             INNER JOIN ${table} i
-               ON la.institution_key = ${institutionJoinExpr}
-               AND i.is_active = 1
-             ORDER BY i.name ASC`,
+               SELECT x.institution_key,
+                 MIN(x.label_per_row) AS display_name,
+                 SUM(x.unassigned_flag) AS unassigned_count,
+                 SUM(x.assigned_flag) AS assigned_count
+               FROM (
+                 SELECT ${institutionNameExpr} AS institution_key,
+                   (${labelExpr}) AS label_per_row,
+                   CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END AS unassigned_flag,
+                   CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END AS assigned_flag
+                 FROM leads
+                 ${baseWhere}
+               ) x
+               WHERE x.institution_key IS NOT NULL AND x.institution_key <> ''
+               GROUP BY x.institution_key
+             ) j
+             ORDER BY COALESCE(NULLIF(TRIM(j.display_name), ''), j.institution_key) ASC`,
             [...baseParams]
           );
         })()
