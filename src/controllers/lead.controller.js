@@ -1945,12 +1945,21 @@ export const getPublicFilterOptions = async (req, res) => {
       return successResponse(res, cached, 'Filter options retrieved successfully', 200);
     }
 
-    // Get distinct values for each field
-    const [mandals] = await pool.execute('SELECT DISTINCT mandal FROM leads WHERE mandal IS NOT NULL AND mandal != "" ORDER BY mandal ASC');
-    const [districts] = await pool.execute('SELECT DISTINCT district FROM leads WHERE district IS NOT NULL AND district != "" ORDER BY district ASC');
-    const [states] = await pool.execute('SELECT DISTINCT state FROM leads WHERE state IS NOT NULL AND state != "" ORDER BY state ASC');
-    const [quotas] = await pool.execute('SELECT DISTINCT quota FROM leads WHERE quota IS NOT NULL AND quota != "" ORDER BY quota ASC');
-    const [applicationStatuses] = await pool.execute('SELECT DISTINCT application_status FROM leads WHERE application_status IS NOT NULL AND application_status != "" ORDER BY application_status ASC');
+    const [
+      [mandals],
+      [districts],
+      [states],
+      [quotas],
+      [applicationStatuses],
+    ] = await Promise.all([
+      pool.execute('SELECT DISTINCT mandal FROM leads WHERE mandal IS NOT NULL AND mandal != "" ORDER BY mandal ASC'),
+      pool.execute('SELECT DISTINCT district FROM leads WHERE district IS NOT NULL AND district != "" ORDER BY district ASC'),
+      pool.execute('SELECT DISTINCT state FROM leads WHERE state IS NOT NULL AND state != "" ORDER BY state ASC'),
+      pool.execute('SELECT DISTINCT quota FROM leads WHERE quota IS NOT NULL AND quota != "" ORDER BY quota ASC'),
+      pool.execute(
+        'SELECT DISTINCT application_status FROM leads WHERE application_status IS NOT NULL AND application_status != "" ORDER BY application_status ASC'
+      ),
+    ]);
 
     const payload = {
       mandals: mandals.map(r => r.mandal),
@@ -2038,58 +2047,73 @@ export const getFilterOptions = async (req, res) => {
       villageParams.push(mandalFilter);
     }
 
-    // Get distinct values for each field
-    const [mandals] = await pool.execute(
-      `SELECT DISTINCT mandal FROM leads ${whereClause(mandalConditionScoped)} ORDER BY mandal ASC`,
-      mandalParams
-    );
-    const [districts] = await pool.execute(
-      `SELECT DISTINCT district FROM leads ${whereClause(districtCondition)} ORDER BY district ASC`,
-      params
-    );
-    const [villages] = await pool.execute(
-      `SELECT DISTINCT village FROM leads ${whereClause(villageConditionScoped)} ORDER BY village ASC`,
-      villageParams
-    );
-    const [states] = await pool.execute(
-      `SELECT DISTINCT state FROM leads ${whereClause(stateCondition)} ORDER BY state ASC`,
-      params
-    );
-    const [quotas] = await pool.execute(
-      `SELECT DISTINCT quota FROM leads ${whereClause(quotaCondition)} ORDER BY quota ASC`,
-      params
-    );
-    const [leadStatuses] = await pool.execute(
-      `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
-      params
-    );
-    const [sources] = await pool.execute(
-      `SELECT DISTINCT source FROM leads ${whereClause(sourceCondition)} ORDER BY source ASC`,
-      params
-    );
-    const [callStatuses] = await pool.execute(
-      `SELECT DISTINCT call_status FROM leads ${whereClause(callStatusCondition)} ORDER BY call_status ASC`,
-      params
-    );
-    const [visitStatuses] = await pool.execute(
-      `SELECT DISTINCT visit_status FROM leads ${whereClause(visitStatusCondition)} ORDER BY visit_status ASC`,
-      params
-    );
-    const [applicationStatuses] = await pool.execute(
-      `SELECT DISTINCT application_status FROM leads ${whereClause(appStatusCondition)} ORDER BY application_status ASC`,
-      params
-    );
-
     const academicYearCondition = [...conditions, 'academic_year IS NOT NULL'];
     const studentGroupCondition = [...conditions, 'student_group IS NOT NULL AND student_group != ""'];
-    const [academicYearsRows] = await pool.execute(
-      `SELECT DISTINCT academic_year FROM leads ${whereClause(academicYearCondition)} ORDER BY academic_year DESC`,
-      params
-    );
-    const [studentGroupsRows] = await pool.execute(
-      `SELECT DISTINCT student_group FROM leads ${whereClause(studentGroupCondition)} ORDER BY student_group ASC`,
-      params
-    );
+
+    // Run DISTINCT scans in parallel — sequential round-trips were timing out (502) behind proxies on large leads tables.
+    const [
+      [mandals],
+      [districts],
+      [villages],
+      [states],
+      [quotas],
+      [leadStatuses],
+      [sources],
+      [callStatuses],
+      [visitStatuses],
+      [applicationStatuses],
+      [academicYearsRows],
+      [studentGroupsRows],
+    ] = await Promise.all([
+      pool.execute(
+        `SELECT DISTINCT mandal FROM leads ${whereClause(mandalConditionScoped)} ORDER BY mandal ASC`,
+        mandalParams
+      ),
+      pool.execute(
+        `SELECT DISTINCT district FROM leads ${whereClause(districtCondition)} ORDER BY district ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT village FROM leads ${whereClause(villageConditionScoped)} ORDER BY village ASC`,
+        villageParams
+      ),
+      pool.execute(
+        `SELECT DISTINCT state FROM leads ${whereClause(stateCondition)} ORDER BY state ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT quota FROM leads ${whereClause(quotaCondition)} ORDER BY quota ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT source FROM leads ${whereClause(sourceCondition)} ORDER BY source ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT call_status FROM leads ${whereClause(callStatusCondition)} ORDER BY call_status ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT visit_status FROM leads ${whereClause(visitStatusCondition)} ORDER BY visit_status ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT application_status FROM leads ${whereClause(appStatusCondition)} ORDER BY application_status ASC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT academic_year FROM leads ${whereClause(academicYearCondition)} ORDER BY academic_year DESC`,
+        params
+      ),
+      pool.execute(
+        `SELECT DISTINCT student_group FROM leads ${whereClause(studentGroupCondition)} ORDER BY student_group ASC`,
+        params
+      ),
+    ]);
     const academicYears = academicYearsRows.map(r => r.academic_year).filter(Boolean);
     const currentYear = new Date().getFullYear();
     for (let y = currentYear; y >= currentYear - 3; y -= 1) {
