@@ -26,4 +26,14 @@ const getHRMSConnection = () => {
   return hrmsConn;
 };
 
+/**
+ * Open HRMS Mongo as soon as the API boots (non-blocking). First HRMS hydrate avoids cold connect.
+ * Safe to call multiple times; connectHRMS is idempotent after first success.
+ */
+export const warmupHrmsMongo = () => {
+  const uri = process.env.HRMS_MONGO_URI?.trim();
+  if (!uri) return Promise.resolve(null);
+  return connectHRMS();
+};
+
 export { connectHRMS, getHRMSConnection };

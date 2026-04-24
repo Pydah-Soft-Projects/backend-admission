@@ -2,6 +2,31 @@ import { getPool } from '../config-sql/database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { notifyLeadReclamationSummary } from './notification.service.js';
 
+/**
+ * Under PM2, stdout can be closed during reload/restart; console.log may throw EPIPE and
+ * crash the process if unhandled — PM2 then restarts in a loop. Swallow EPIPE only.
+ */
+function safeConsoleLog(...args) {
+  try {
+    console.log(...args);
+  } catch (err) {
+    if (err && err.code === 'EPIPE') return;
+    try {
+      console.error('[LeadReclaimer] safeConsoleLog failed:', err);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function safeConsoleError(...args) {
+  try {
+    console.error(...args);
+  } catch (err) {
+    if (err && err.code === 'EPIPE') return;
+  }
+}
+
 const TZ_IST = 'Asia/Kolkata';
 
 /** Calendar date YYYY-MM-DD in Asia/Kolkata for the given instant. */
@@ -91,7 +116,7 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
       typeof asOfDateYmd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(asOfDateYmd)
         ? asOfDateYmd
         : formatDateIST(new Date());
-    console.log(
+    safeConsoleLog(
       `[LeadReclaimer] Starting automated lead reclamation (cutoff target_date <= ${cutoff} IST calendar)...`
     );
 
@@ -111,11 +136,11 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
     );
 
     if (leadsToReclaim.length === 0) {
-      console.log('[LeadReclaimer] No leads found for reclamation.');
+      safeConsoleLog('[LeadReclaimer] No leads found for reclamation.');
       return 0;
     }
 
-    console.log(`[LeadReclaimer] Found ${leadsToReclaim.length} leads to reclaim.`);
+    safeConsoleLog(`[LeadReclaimer] Found ${leadsToReclaim.length} leads to reclaim.`);
 
     let reclaimedCount = 0;
     const reclaimedByPreviousAssignee = new Map();
@@ -211,13 +236,13 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
         totalReclaimed: reclaimedCount,
       });
     } catch (notificationError) {
-      console.error('[LeadReclaimer] Error sending reclamation summary notification:', notificationError);
+      safeConsoleError('[LeadReclaimer] Error sending reclamation summary notification:', notificationError);
     }
 
-    console.log(`[LeadReclaimer] Successfully reclaimed ${reclaimedCount} leads.`);
+    safeConsoleLog(`[LeadReclaimer] Successfully reclaimed ${reclaimedCount} leads.`);
     return reclaimedCount;
   } catch (error) {
-    console.error('[LeadReclaimer] Error during lead reclamation:', error);
+    safeConsoleError('[LeadReclaimer] Error during lead reclamation:', error);
     throw error;
   }
 };
@@ -231,7 +256,7 @@ function scheduleNextISTDailyReclaim() {
     try {
       await reclaimExpiredLeads(asOf);
     } catch (e) {
-      console.error('[LeadReclaimer] Scheduled run failed:', e);
+      safeConsoleError('[LeadReclaimer] Scheduled run failed:', e);
     }
     scheduleNextISTDailyReclaim();
   }, delay);
@@ -239,7 +264,7 @@ function scheduleNextISTDailyReclaim() {
   const nextRun = new Date(Date.now() + delay);
   const hh = String(hour).padStart(2, '0');
   const mm = String(minute).padStart(2, '0');
-  console.log(
+  safeConsoleLog(
     `[LeadReclaimer] Next run ${hh}:${mm} IST (~${Math.round(delay / 1000 / 60)} min; UTC ${nextRun.toISOString()})`
   );
 }
@@ -255,7 +280,7 @@ function scheduleNextISTDailyReclaim() {
 export const initLeadReclaimer = () => {
   const enabled = String(process.env.LEAD_RECLAIMER_ENABLED ?? 'true').toLowerCase();
   if (enabled === 'false' || enabled === '0') {
-    console.log('[LeadReclaimer] Disabled (LEAD_RECLAIMER_ENABLED).');
+    safeConsoleLog('[LeadReclaimer] Disabled (LEAD_RECLAIMER_ENABLED).');
     return;
   }
 
@@ -266,7 +291,7 @@ export const initLeadReclaimer = () => {
 
   reclaimSchedule = parseReclaimScheduleIST();
   const { hour, minute } = reclaimSchedule;
-  console.log(
+  safeConsoleLog(
     `[LeadReclaimer] Daily schedule: ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} Asia/Kolkata`
   );
 

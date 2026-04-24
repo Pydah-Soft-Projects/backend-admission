@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 // import connectDB from './config/database.js'; // COMMENTED OUT: Migration to SQL complete
 import connectSQLDB from './config-sql/database.js';
 import connectSecondaryDB from './config-sql/database-secondary.js';
+import { warmupHrmsMongo } from './config-mongo/hrms.js';
 import { initLeadReclaimer } from './services/leadReclaimer.service.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
@@ -54,6 +55,11 @@ if (process.env.DB_SECONDARY_HOST && process.env.DB_SECONDARY_NAME) {
 } else {
   console.log('⚠️  Secondary MySQL configuration not found - skipping secondary MySQL connection');
 }
+
+// HRMS Mongo: warm connection early so first user-analytics / HRMS hydrate is not paying cold-connect latency
+warmupHrmsMongo().catch((err) => {
+  console.error('HRMS MongoDB warmup failed (non-fatal):', err?.message || err);
+});
 
 const app = express();
 // Lead reclamation: once daily at configured IST wall time (default 23:11; see leadReclaimer.service.js)
