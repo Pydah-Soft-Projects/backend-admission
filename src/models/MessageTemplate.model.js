@@ -5,6 +5,8 @@ const variableSchema = new mongoose.Schema(
     key: { type: String, required: true, trim: true },
     label: { type: String, trim: true },
     defaultValue: { type: String, trim: true },
+    /** When true, bulk SMS uses one value for every recipient; otherwise editable per lead. */
+    isGlobal: { type: Boolean, default: false },
   },
   { _id: false }
 );

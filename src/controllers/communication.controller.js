@@ -38,36 +38,40 @@ const collectLeadContactNumbers = (lead) => {
   return numbers;
 };
 
-const findTemplate = async (templateId) => {
+const formatTemplateRow = (template) => ({
+  _id: template.id,
+  id: template.id,
+  name: template.name,
+  dltTemplateId: template.dlt_template_id,
+  language: template.language,
+  content: template.content,
+  isUnicode: template.is_unicode === 1 || template.is_unicode === true,
+  variableCount: template.variable_count || 0,
+  variables:
+    typeof template.variables === 'string'
+      ? JSON.parse(template.variables)
+      : template.variables || [],
+  isActive: template.is_active === 1 || template.is_active === true,
+});
+
+const findTemplate = async (templateId, { activeOnly = true } = {}) => {
   if (!templateId) {
     throw new Error('Template ID is required');
   }
 
   const pool = getPool();
-  const [templates] = await pool.execute(
-    'SELECT * FROM message_templates WHERE id = ? AND is_active = ?',
-    [templateId, true]
-  );
+  const [templates] = activeOnly
+    ? await pool.execute('SELECT * FROM message_templates WHERE id = ? AND is_active = ?', [
+        templateId,
+        true,
+      ])
+    : await pool.execute('SELECT * FROM message_templates WHERE id = ?', [templateId]);
 
   if (templates.length === 0) {
-    throw new Error('Template not found or inactive');
+    throw new Error(activeOnly ? 'Template not found or inactive' : 'Template not found');
   }
 
-  const template = templates[0];
-  return {
-    _id: template.id,
-    id: template.id,
-    name: template.name,
-    dltTemplateId: template.dlt_template_id,
-    language: template.language,
-    content: template.content,
-    isUnicode: template.is_unicode === 1 || template.is_unicode === true,
-    variableCount: template.variable_count || 0,
-    variables: typeof template.variables === 'string' 
-      ? JSON.parse(template.variables) 
-      : template.variables || [],
-    isActive: template.is_active === 1 || template.is_active === true,
-  };
+  return formatTemplateRow(templates[0]);
 };
 
 const renderTemplateContent = (template, variables = []) => {
@@ -347,11 +351,21 @@ export const sendSmsCommunication = async (req, res) => {
         });
       }
 
+      const dltTempId = String(template.dltTemplateId || '').trim();
+      const isUnicodeSms = template.isUnicode || template.language !== 'en';
+      if (isUnicodeSms && !dltTempId) {
+        console.warn('[Communications][SMS] Unicode/non-English message without DLT template id — delivery may fail.', {
+          templateId: template.id,
+          templateName: template.name,
+        });
+      }
+
       try {
         apiResponse = await sendSmsThroughBulkSmsApps({
           numbers: validatedNumbers,
           message: rendered,
-          isUnicode: template.isUnicode || template.language !== 'en',
+          isUnicode: isUnicodeSms,
+          tempid: dltTempId || undefined,
         });
         status = apiResponse.success ? 'success' : 'failed';
         const primaryMessageId = Array.isArray(apiResponse.messageIds)
@@ -760,3 +774,89 @@ export const getLeadCommunicationStats = async (req, res) => {
   }
 };
 
+/**
+ * Super Admin: send one rendered template to any mobile number (provider only).
+ * Does not create a `communications` row or require a lead (lead_id is NOT NULL in DB).
+ */
+export const sendTestTemplateSms = async (req, res) => {
+  try {
+    const { id: templateId } = req.params;
+    const { phone, variables: bodyVariables } = req.body || {};
+
+    if (req.user.roleName === 'PRO') {
+      return errorResponse(res, 'SMS is not available for PRO users', 403);
+    }
+
+    const raw = String(phone || '').trim();
+    if (!raw) {
+      return errorResponse(res, 'Phone number is required', 400);
+    }
+
+    const digitsOnly = raw.replace(/\D/g, '');
+    if (digitsOnly.length < 10) {
+      return errorResponse(res, 'Enter a valid mobile number (at least 10 digits)', 400);
+    }
+
+    const userVariables = Array.isArray(bodyVariables) ? bodyVariables : [];
+
+    let template;
+    try {
+      template = await findTemplate(templateId, { activeOnly: false });
+    } catch (e) {
+      return errorResponse(res, e.message || 'Template not found', 404);
+    }
+
+    const { rendered } = renderTemplateContent(template, userVariables);
+    const unresolvedPlaceholders = /\{#var#\}/i.test(rendered);
+    if (unresolvedPlaceholders) {
+      return errorResponse(
+        res,
+        'Message still contains unresolved {#var#} placeholders. Fill every variable value before testing.',
+        400
+      );
+    }
+
+    const dltTempId = String(template.dltTemplateId || '').trim();
+    const isUnicodeSms = template.isUnicode || template.language !== 'en';
+    if (isUnicodeSms && !dltTempId) {
+      console.warn('[Communications][Test SMS] Unicode/non-English without DLT template id — delivery may fail.', {
+        templateId: template.id,
+      });
+    }
+
+    let apiResponse;
+    try {
+      apiResponse = await sendSmsThroughBulkSmsApps({
+        numbers: [raw],
+        message: rendered,
+        isUnicode: isUnicodeSms,
+        tempid: dltTempId || undefined,
+      });
+    } catch (providerError) {
+      console.error('[Communications][Test SMS] Provider error', {
+        templateId: template.id,
+        error: providerError?.message,
+      });
+      return errorResponse(res, providerError.message || 'Failed to send test SMS', 502);
+    }
+
+    const success = apiResponse.success === true;
+    return successResponse(
+      res,
+      {
+        success,
+        messageId:
+          Array.isArray(apiResponse?.messageIds) && apiResponse.messageIds.length > 0
+            ? apiResponse.messageIds[0]
+            : undefined,
+        responseText: apiResponse.responseText,
+        renderedPreview: rendered.slice(0, 500),
+      },
+      success ? 'Test SMS submitted successfully' : 'Provider did not confirm success — see response details',
+      200
+    );
+  } catch (error) {
+    console.error('Error sending test template SMS:', error);
+    return errorResponse(res, error.message || 'Failed to send test SMS', 500);
+  }
+};

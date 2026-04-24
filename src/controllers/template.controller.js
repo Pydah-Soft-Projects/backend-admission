@@ -9,6 +9,7 @@ const buildDefaultVariables = (count) => {
     key: `var${index + 1}`,
     label: `Variable ${index + 1}`,
     defaultValue: '',
+    isGlobal: false,
   }));
 };
 
@@ -23,6 +24,7 @@ const normalizeVariables = (requestedVariables, requiredCount) => {
       key: variable?.key?.trim() || `var${index + 1}`,
       label: variable?.label?.trim() || `Variable ${index + 1}`,
       defaultValue: variable?.defaultValue ? String(variable.defaultValue).trim() : '',
+      isGlobal: variable?.isGlobal === true || variable?.isGlobal === 'true',
     }));
 
   while (sanitized.length < requiredCount) {
@@ -30,6 +32,7 @@ const normalizeVariables = (requestedVariables, requiredCount) => {
       key: `var${sanitized.length + 1}`,
       label: `Variable ${sanitized.length + 1}`,
       defaultValue: '',
+      isGlobal: false,
     });
   }
 

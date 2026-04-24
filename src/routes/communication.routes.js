@@ -2,6 +2,7 @@ import express from 'express';
 import {
   logCallCommunication,
   sendSmsCommunication,
+  sendTestTemplateSms,
   getLeadCommunications,
   getLeadCommunicationStats,
 } from '../controllers/communication.controller.js';
@@ -26,6 +27,7 @@ router.post('/templates', isSuperAdmin, createTemplate);
 router.put('/templates/:id', isSuperAdmin, updateTemplate);
 router.delete('/templates/:id', isSuperAdmin, deleteTemplate);
 router.delete('/templates/:id/hard', isSuperAdmin, hardDeleteTemplate);
+router.post('/templates/:id/test-sms', isSuperAdmin, sendTestTemplateSms);
 
 // Lead communications
 router.post('/lead/:leadId/call', logCallCommunication);

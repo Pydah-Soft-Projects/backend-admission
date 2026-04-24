@@ -1887,38 +1887,69 @@ async function hydrateUserOrgFromHrms(users, pool) {
   }
 }
 
-/** Lead statuses used when bulk-SMS fetches leads per counsellor (communications user-leads tab). */
-const ROSTER_ACTIVE_LEAD_STATUSES = ['New', 'Assigned', 'In Progress', 'Interested'];
+/** `leads.student_group` filter fragment (`Inter` is exact match only). */
+function buildStudentGroupLeadClause(tableAlias, studentGroupRaw) {
+  const sg = studentGroupRaw != null ? String(studentGroupRaw).trim() : '';
+  if (!sg) return { clause: '', params: [] };
+  return { clause: ` AND ${tableAlias}.student_group = ?`, params: [sg] };
+}
 
 /**
- * One aggregated query: distinct leads per user where user is assigned_to or assigned_to_pro.
- * Matches communications bulk-send leadStatus filter.
+ * Distinct **current portfolio** leads per user (`assigned_to` / `assigned_to_pro`), optional `studentGroup`.
+ * Aligns with Super Admin dashboard “total assigned” (no lead_status window).
  */
-async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds) {
+async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, studentGroupRaw) {
   const map = new Map();
   if (!userIds.length) return map;
   const ph = userIds.map(() => '?').join(',');
-  const stPh = ROSTER_ACTIVE_LEAD_STATUSES.map(() => '?').join(',');
+  const { clause, params: sgParams } = buildStudentGroupLeadClause('l', studentGroupRaw);
   const [rows] = await pool.execute(
     `SELECT user_id, COUNT(DISTINCT lead_id) AS cnt FROM (
        SELECT l.assigned_to AS user_id, l.id AS lead_id
        FROM leads l
-       WHERE l.assigned_to IN (${ph})
-         AND l.lead_status IN (${stPh})
+       WHERE l.assigned_to IN (${ph})${clause}
        UNION ALL
        SELECT l.assigned_to_pro AS user_id, l.id AS lead_id
        FROM leads l
        WHERE l.assigned_to_pro IN (${ph})
-         AND l.assigned_to_pro IS NOT NULL
-         AND l.lead_status IN (${stPh})
+         AND l.assigned_to_pro IS NOT NULL${clause}
      ) x
      GROUP BY user_id`,
-    [...userIds, ...ROSTER_ACTIVE_LEAD_STATUSES, ...userIds, ...ROSTER_ACTIVE_LEAD_STATUSES]
+    [...userIds, ...sgParams, ...userIds, ...sgParams]
   );
   (rows || []).forEach((r) => {
     const uid = r.user_id;
     if (uid == null) return;
     map.set(uid, Number(r.cnt) || 0);
+  });
+  return map;
+}
+
+/** Distinct non-empty `student_group` values on current portfolio leads per user (same optional SG filter as counts). */
+async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGroupRaw) {
+  const map = new Map();
+  if (!userIds.length) return map;
+  const ph = userIds.map(() => '?').join(',');
+  const { clause, params: sgParams } = buildStudentGroupLeadClause('l', studentGroupRaw);
+  const [rows] = await pool.execute(
+    `SELECT x.user_id, GROUP_CONCAT(DISTINCT x.sg ORDER BY x.sg SEPARATOR ', ') AS cats
+     FROM (
+       SELECT l.assigned_to AS user_id, NULLIF(TRIM(l.student_group), '') AS sg
+       FROM leads l
+       WHERE l.assigned_to IN (${ph})${clause}
+       UNION ALL
+       SELECT l.assigned_to_pro AS user_id, NULLIF(TRIM(l.student_group), '') AS sg
+       FROM leads l
+       WHERE l.assigned_to_pro IN (${ph}) AND l.assigned_to_pro IS NOT NULL${clause}
+     ) x
+     WHERE x.sg IS NOT NULL AND x.sg <> ''
+     GROUP BY x.user_id`,
+    [...userIds, ...sgParams, ...userIds, ...sgParams]
+  );
+  (rows || []).forEach((r) => {
+    const uid = r.user_id;
+    if (uid == null) return;
+    map.set(uid, String(r.cats || '').trim() || '');
   });
   return map;
 }
@@ -1958,6 +1989,8 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly,
       /** Super Admin dashboard: current `leads` rows only (no activity date window / default rolling range). */
       currentPortfolioOnly,
+      /** Communications roster: filter portfolio counts / student-group column by `leads.student_group`. */
+      studentGroup: studentGroupQuery,
     } = req.query;
 
     const isRosterOnly =
@@ -2009,6 +2042,7 @@ export const getUserAnalytics = async (req, res) => {
       perfRole,
       rosterOnly: isRosterOnly,
       currentPortfolioOnly: isCurrentPortfolioOnly,
+      studentGroup: studentGroupQuery != null && String(studentGroupQuery).trim() !== '' ? String(studentGroupQuery).trim() : null,
     });
 
     if (!isRosterOnly && String(bypassCache || '').toLowerCase() !== 'true') {
@@ -2318,15 +2352,28 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
     }
 
-    /** Communications → user-specific leads: names/org from HRMS + one lead count query (no batch1/batch2 analytics). */
+    /** Communications → user-specific leads: names/org from HRMS + portfolio lead counts (no batch1/batch2 analytics). */
     if (isRosterOnly) {
       await hydrateUserOrgFromHrms(users, pool);
       const sorted = [...users].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
       const rosterIds = sorted.map((u) => u.id).filter(Boolean);
-      const countsByUserId = await fetchActiveLeadCountsForCommunicationsRoster(pool, rosterIds);
-      const userRows = sorted.map((u) => ({
+      const studentGroupRoster =
+        studentGroupQuery != null && String(studentGroupQuery).trim() !== ''
+          ? String(studentGroupQuery).trim()
+          : null;
+      const countsByUserId = await fetchActiveLeadCountsForCommunicationsRoster(
+        pool,
+        rosterIds,
+        studentGroupRoster
+      );
+      const studentGroupsByUserId = await fetchCommunicationsRosterStudentGroups(
+        pool,
+        rosterIds,
+        studentGroupRoster
+      );
+      let userRows = sorted.map((u) => ({
         id: u.id,
         userId: u.id,
         userName: u.name,
@@ -2339,7 +2386,11 @@ export const getUserAnalytics = async (req, res) => {
         group: u.group || '-',
         isActive: u.is_active === 1 || u.is_active === true,
         totalAssigned: countsByUserId.get(u.id) ?? 0,
+        portfolioStudentGroups: studentGroupsByUserId.get(u.id) || null,
       }));
+      if (studentGroupRoster) {
+        userRows = userRows.filter((row) => (row.totalAssigned || 0) > 0);
+      }
       return successResponse(res, { users: userRows }, 'User roster retrieved successfully', 200);
     }
 

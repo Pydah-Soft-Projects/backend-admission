@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BULK_SMS_API_KEY = process.env.BULK_SMS_API_KEY || '7c9c967a-4ce9-4748-9dc7-d2aaef847275';
+const BULK_SMS_API_KEY = process.env.BULK_SMS_API_KEY || '';
 const BULK_SMS_SENDER_ID = process.env.BULK_SMS_SENDER_ID || 'PYDAHK';
 const BULK_SMS_ENGLISH_API_URL =
   process.env.BULK_SMS_ENGLISH_API_URL || 'https://www.bulksmsapps.com/api/apismsv2.aspx';

@@ -3,8 +3,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const BULKSMS_API_KEY = process.env.BULKSMS_API_KEY;
-const BULKSMS_SENDER_ID = process.env.BULKSMS_SENDER_ID || 'PYDAHK';
+const BULK_SMS_API_KEY = process.env.BULK_SMS_API_KEY;
+const BULK_SMS_SENDER_ID = process.env.BULK_SMS_SENDER_ID || 'PYDAHK';
 
 const smsService = {
   /**
@@ -14,7 +14,7 @@ const smsService = {
    * @returns {Promise<Object>} - The API response
    */
   sendOTP: async (mobileNumber, otp) => {
-    if (!BULKSMS_API_KEY) {
+    if (!BULK_SMS_API_KEY) {
       console.warn('BULKSMS_API_KEY is not set. OTP sending skipped (Dev Mode).');
       return { success: true, message: 'SMS simulation successful (Dev Mode)' };
     }
@@ -28,7 +28,7 @@ const smsService = {
     // URL Encode message
     const encodedMessage = encodeURIComponent(message);
 
-    const url = `https://www.bulksmsapps.com/api/apismsv2.aspx?apikey=${BULKSMS_API_KEY}&sender=${BULKSMS_SENDER_ID}&mobile=${cleanNumber}&message=${encodedMessage}&type=1&tempid=${otpTemplateId}`;
+    const url = `https://www.bulksmsapps.com/api/apismsv2.aspx?apikey=${BULK_SMS_API_KEY}&sender=${BULK_SMS_SENDER_ID}&mobile=${cleanNumber}&message=${encodedMessage}&type=1&tempid=${otpTemplateId}`;
 
     try {
       const response = await axios.get(url);
@@ -46,7 +46,7 @@ const smsService = {
    * Template ID: 1707176526611076697
    */
   sendPasswordResetSuccess: async (mobileNumber, name, username, newPassword, loginUrl) => {
-    if (!BULKSMS_API_KEY) {
+    if (!BULK_SMS_API_KEY) {
       console.warn('BULKSMS_API_KEY is not set. Reset SMS skipping (Dev Mode).');
       return { success: true, message: 'SMS simulation successful (Dev Mode)' };
     }
@@ -60,7 +60,7 @@ const smsService = {
     const encodedMessage = encodeURIComponent(message);
     const templateId = '1707176526611076697';
 
-    const url = `https://www.bulksmsapps.com/api/apismsv2.aspx?apikey=${BULKSMS_API_KEY}&sender=${BULKSMS_SENDER_ID}&mobile=${cleanNumber}&message=${encodedMessage}&type=1&tempid=${templateId}`;
+    const url = `https://www.bulksmsapps.com/api/apismsv2.aspx?apikey=${BULK_SMS_API_KEY}&sender=${BULK_SMS_SENDER_ID}&mobile=${cleanNumber}&message=${encodedMessage}&type=1&tempid=${templateId}`;
 
     try {
       const response = await axios.get(url);
