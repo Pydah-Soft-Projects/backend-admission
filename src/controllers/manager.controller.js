@@ -1,6 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
+import { buildLeadNameFuzzySql } from '../utils/leadNameSearch.util.js';
 
 // Helper function to format lead data (reuse from lead.controller.js pattern)
 const formatLead = (leadData, assignedToUser = null) => {
@@ -168,17 +169,21 @@ export const getManagerLeads = async (req, res) => {
       params.push(end.toISOString().slice(0, 19).replace('T', ' '));
     }
 
-    // Search functionality (using table alias for JOIN query)
+    // Search: fuzzy name (short queries) + enquiry; min 2 chars
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      conditions.push(`(
-        MATCH(l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.mother_name, l.course_interested, l.district, l.mandal, l.state, l.application_status, l.hall_ticket_number, l.inter_college) 
-        AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR l.name LIKE ?
-        OR l.phone LIKE ?
-        OR l.email LIKE ?
-      )`);
-      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+      if (searchTerm.length >= 2) {
+        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
+        if (nameSql) {
+          if (searchTerm.toUpperCase().startsWith('ENQ')) {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`${searchTerm}%`);
+          } else {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`%${searchTerm}%`);
+          }
+        }
+      }
     }
 
     if (req.query.enquiryNumber) {
@@ -251,14 +256,18 @@ export const getManagerLeads = async (req, res) => {
     }
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      countConditions.push(`(
-        MATCH(enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college) 
-        AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR name LIKE ?
-        OR phone LIKE ?
-        OR email LIKE ?
-      )`);
-      countParams.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+      if (searchTerm.length >= 2) {
+        const nameSql = buildLeadNameFuzzySql('name', searchTerm, countParams);
+        if (nameSql) {
+          if (searchTerm.toUpperCase().startsWith('ENQ')) {
+            countConditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
+            countParams.push(`${searchTerm}%`);
+          } else {
+            countConditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
+            countParams.push(`%${searchTerm}%`);
+          }
+        }
+      }
     }
     if (req.query.enquiryNumber) {
       const searchTerm = req.query.enquiryNumber.trim();
