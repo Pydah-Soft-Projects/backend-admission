@@ -1732,6 +1732,19 @@ export const getOverviewAnalytics = async (req, res) => {
   }
 };
 
+/** Stable string key for user id across mysql2 return types (CHAR UUID vs BINARY(16) Buffer). */
+function normalizeUserRowId(id) {
+  if (id == null || id === '') return '';
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(id)) {
+    if (id.length === 16) {
+      const h = id.toString('hex');
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`.toLowerCase();
+    }
+    return id.toString('utf8').replace(/\0+$/, '');
+  }
+  return String(id);
+}
+
 /** Non-blocking enrichment for Super Admin reports; safe to run parallel with aggregate SQL. */
 async function hydrateUserOrgFromHrms(users, pool) {
   if (!users?.length) return;
@@ -1743,15 +1756,42 @@ async function hydrateUserOrgFromHrms(users, pool) {
     const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
     const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
 
-    const [usersWithEmp] = await pool.execute(
-      `SELECT id, emp_no FROM users WHERE id IN (${users.map(() => '?').join(',')})`,
-      users.map((u) => u.id)
-    );
-    const empNos = usersWithEmp.map((u) => u.emp_no).filter(Boolean);
-    if (empNos.length === 0) return;
+    const userIdsForEmp = users.map((u) => u.id).filter((id) => id != null);
+    if (userIdsForEmp.length === 0) return;
 
-    const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
+    const [usersWithEmp] = await pool.execute(
+      `SELECT id, emp_no FROM users WHERE id IN (${userIdsForEmp.map(() => '?').join(',')})`,
+      userIdsForEmp
+    );
+    const empNoStrings = [
+      ...new Set(
+        usersWithEmp
+          .map((u) => u.emp_no)
+          .filter((e) => e != null && String(e).trim() !== '')
+          .map((e) => String(e).trim())
+      ),
+    ];
+    if (empNoStrings.length === 0) return;
+
+    const empNoNumbers = [
+      ...new Set(
+        empNoStrings.map((s) => Number(s)).filter((n) => Number.isFinite(n) && !Number.isNaN(n))
+      ),
+    ];
+    const empNoOr = [];
+    if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
+    if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
+    const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
       .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+
+    const seenEmp = new Set();
+    const hrmsEmployees = [];
+    for (const emp of hrmsEmployeesRaw || []) {
+      const k = String(emp.emp_no ?? '').trim();
+      if (!k || seenEmp.has(k)) continue;
+      seenEmp.add(k);
+      hrmsEmployees.push(emp);
+    }
     const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(Boolean))];
     const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(Boolean))];
     const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(Boolean))];
@@ -1788,20 +1828,25 @@ async function hydrateUserOrgFromHrms(users, pool) {
     };
 
     const hrmsByEmpNo = new Map(
-      hrmsEmployees.map((emp) => [
-        String(emp.emp_no),
-        {
-          division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
-          department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-          group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
-          designation: extractDesignationName(emp),
-        },
-      ])
+      hrmsEmployees.map((emp) => {
+        const key = String(emp.emp_no ?? '').trim();
+        return [
+          key,
+          {
+            division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+            department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+            group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
+            designation: extractDesignationName(emp),
+          },
+        ];
+      })
     );
 
-    const empByUserId = new Map(usersWithEmp.map((u) => [u.id, String(u.emp_no || '')]));
+    const empByUserId = new Map(
+      usersWithEmp.map((u) => [normalizeUserRowId(u.id), String(u.emp_no || '').trim()])
+    );
     users.forEach((u) => {
-      const empNo = empByUserId.get(u.id);
+      const empNo = empByUserId.get(normalizeUserRowId(u.id));
       const hrms = empNo ? hrmsByEmpNo.get(empNo) : null;
       if (hrms) {
         u.division = hrms.division;
@@ -1855,19 +1900,6 @@ async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds) {
 // @route   GET /api/leads/analytics/users
 // @access  Private (Super Admin)
 export const getUserAnalytics = async (req, res) => {
-  const t0 = Date.now();
-  const reqId = `ua-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const logUa = (msg, extra = {}) => {
-    console.log(
-      JSON.stringify({
-        scope: 'getUserAnalytics',
-        reqId,
-        msg,
-        elapsedMs: Date.now() - t0,
-        ...extra,
-      })
-    );
-  };
   try {
     // Allow Super Admin, Sub Super Admin, and Managers
     const isAdmin = hasElevatedAdminPrivileges(req.user.roleName);
@@ -1904,28 +1936,6 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly === '1' ||
       String(rosterOnly || '') === '1';
 
-    logUa('request', {
-      actorUserId: currentUserId,
-      isAdmin,
-      isManager,
-      startDate: startDate ?? null,
-      endDate: endDate ?? null,
-      academicYear: academicYear ?? null,
-      division: division ?? null,
-      department: department ?? null,
-      group: group ?? null,
-      userId: userId ? String(userId).slice(0, 120) : null,
-      includeAssignmentDetails: includeAssignmentDetails ?? null,
-      bypassCache: bypassCache ?? null,
-      page: pageQuery ?? null,
-      limit: limitQuery ?? null,
-      perfSearchLen: perfSearch ? String(perfSearch).length : 0,
-      perfDepartment: perfDepartment ?? null,
-      perfGroup: perfGroup ?? null,
-      perfRole: perfRole ?? null,
-      rosterOnly: isRosterOnly,
-    });
-
     const cacheKey = stableStringify({
       startDate,
       endDate,
@@ -1952,14 +1962,11 @@ export const getUserAnalytics = async (req, res) => {
           // Move to end of Map so LRU eviction keeps hot keys longer.
           analyticsCache.delete(cacheKey);
           analyticsCache.set(cacheKey, cached);
-          logUa('cache_hit', { cacheKeyLen: cacheKey.length });
           return successResponse(res, cached.data, 'User analytics retrieved from cache', 200);
         }
         analyticsCache.delete(cacheKey);
       }
     }
-
-    logUa(isRosterOnly ? 'roster_cache_bypass' : 'cache_miss_computing');
 
     const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
@@ -2135,11 +2142,6 @@ export const getUserAnalytics = async (req, res) => {
     } else if (hasOrgFilters) {
       // Filter by HRMS organizational units
       try {
-        logUa('hrms_org_filter_start', {
-          division: division || null,
-          department: department || null,
-          group: group || null,
-        });
         const hrmsConn = await connectHRMS();
         const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
         const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
@@ -2152,7 +2154,6 @@ export const getUserAnalytics = async (req, res) => {
           if (divDoc) hrmsQuery.division_id = divDoc._id;
           else {
             // Division not found, return empty results
-            logUa('early_empty', { reason: 'hrms_division_name_not_found', division });
             return successResponse(res, { users: [] }, 'No users found for this division', 200);
           }
         }
@@ -2160,7 +2161,6 @@ export const getUserAnalytics = async (req, res) => {
           const deptDoc = await Department.findOne({ name: department });
           if (deptDoc) hrmsQuery.department_id = deptDoc._id;
           else {
-            logUa('early_empty', { reason: 'hrms_department_name_not_found', department });
             return successResponse(res, { users: [] }, 'No users found for this department', 200);
           }
         }
@@ -2168,28 +2168,21 @@ export const getUserAnalytics = async (req, res) => {
           const groupDoc = await Group.findOne({ name: group });
           if (groupDoc) hrmsQuery.employee_group_id = groupDoc._id;
           else {
-            logUa('early_empty', { reason: 'hrms_group_name_not_found', group });
             return successResponse(res, { users: [] }, 'No users found for this group', 200);
           }
         }
 
         const matchingEmployees = await Employee.find(hrmsQuery).select('emp_no');
-        const empNos = matchingEmployees.map(e => e.emp_no).filter(Boolean);
-        logUa('hrms_org_filter_employees', { matchCount: empNos.length });
+        const empNos = matchingEmployees.map((e) => e.emp_no).filter(Boolean);
 
         if (empNos.length === 0) {
-          logUa('early_empty', { reason: 'no_hrms_employees_for_org_filters' });
           return successResponse(res, { users: [] }, 'No employees found matching organizational filters', 200);
         }
 
         userConditions.push(`emp_no IN (${empNos.map(() => '?').join(',')})`);
-        userParams.push(...empNos);
+        userParams.push(...empNos.map((e) => String(e)));
       } catch (hrmsError) {
-        console.error(`[getUserAnalytics ${reqId}] HRMS filtering error:`, hrmsError);
-        logUa('hrms_org_filter_failed', {
-          message: hrmsError?.message || String(hrmsError),
-          name: hrmsError?.name,
-        });
+        console.error('HRMS filtering error in getUserAnalytics:', hrmsError);
         // Fallback: continue without HRMS filtering (or could return error)
       }
     }
@@ -2207,16 +2200,13 @@ export const getUserAnalytics = async (req, res) => {
       `SELECT id, name, email, role_name, designation, is_active FROM users ${userWhereClause}`,
       userParams
     );
-    logUa('users_sql_ok', { rowCount: users?.length ?? 0 });
 
     if (!users || users.length === 0) {
-      logUa('early_empty', { reason: 'no_users_after_sql' });
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
     }
 
     /** Communications → user-specific leads: names/org from HRMS + one lead count query (no batch1/batch2 analytics). */
     if (isRosterOnly) {
-      const tRoster = Date.now();
       await hydrateUserOrgFromHrms(users, pool);
       const sorted = [...users].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
@@ -2237,11 +2227,6 @@ export const getUserAnalytics = async (req, res) => {
         isActive: u.is_active === 1 || u.is_active === true,
         totalAssigned: countsByUserId.get(u.id) ?? 0,
       }));
-      logUa('roster_only_done', {
-        usersOut: userRows.length,
-        rosterSqlMs: Date.now() - tRoster,
-        totalElapsedMs: Date.now() - t0,
-      });
       return successResponse(res, { users: userRows }, 'User roster retrieved successfully', 200);
     }
 
@@ -2287,12 +2272,6 @@ export const getUserAnalytics = async (req, res) => {
       batch1Results = await executeBatch1ForAnalytics(batch1IdsElse);
     }
 
-    logUa('batch1_hydrate_done', {
-      perfFilteredUsers: perfFilteredUsers.length,
-      needsPostHydratePerfFilter,
-      shouldIncludeAssignmentDetails,
-    });
-
     /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
     const explicitUserIds = userId ? String(userId).split(',').map((id) => id.trim()).filter(Boolean) : [];
     const allowPagination = explicitUserIds.length === 0;
@@ -2307,7 +2286,6 @@ export const getUserAnalytics = async (req, res) => {
     const isPaginated = pageNum != null && limitNum != null;
 
     if (!perfFilteredUsers.length) {
-      logUa('early_empty', { reason: 'perf_filtered_users_empty' });
       const emptyPag =
         isPaginated
           ? { page: 1, limit: limitNum, total: 0, pages: 1 }
@@ -2577,14 +2555,7 @@ export const getUserAnalytics = async (req, res) => {
             ),
           ]);
 
-    logUa('batch2_cohort_sql_start', {
-      aggregateUserIds: aggregateUserIds.length,
-      cohortScopeUserIds: cohortScopeUserIds.length,
-      shouldIncludeAssignmentDetails,
-    });
-    const tBatch2 = Date.now();
     const [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
-    logUa('batch2_cohort_sql_done', { durationMs: Date.now() - tBatch2 });
 
     const [[commCounts], [currentPortfolioCallCounts], [actLogsCountResult]] = batch2Results;
     const allottedDistinctRows = cohortTriple[0][0];
@@ -2903,8 +2874,6 @@ export const getUserAnalytics = async (req, res) => {
         perDate.forEach(d => { if (d.reclaimedCount > 0) totalReclaimed++; }); 
         reclaimedUniqueMap.set(userKey, totalReclaimed);
       });
-
-      logUa('assignment_details_sql_done', { cohortUsers: cohortScopeUsers.length });
     }
 
     // OPTIMIZATION: Use the Map we built earlier during the optimized combined query
@@ -3118,28 +3087,9 @@ export const getUserAnalytics = async (req, res) => {
         expiresAt: Date.now() + USER_ANALYTICS_CACHE_MS,
       });
     }
-    logUa('response_ok', {
-      usersOut: userAnalytics.length,
-      totalElapsedMs: Date.now() - t0,
-      paginated: Boolean(pagination),
-    });
     return successResponse(res, payload, 'User analytics retrieved successfully', 200);
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        scope: 'getUserAnalytics',
-        reqId,
-        msg: 'fatal_error',
-        message: error?.message || String(error),
-        name: error?.name,
-        code: error?.code,
-        errno: error?.errno,
-        sqlState: error?.sqlState,
-        sqlMessage: error?.sqlMessage,
-        elapsedMs: Date.now() - t0,
-      })
-    );
-    console.error(`[getUserAnalytics ${reqId}] stack:`, error?.stack);
+    console.error('Error getting user analytics:', error);
     return errorResponse(res, error.message || 'Failed to get user analytics', 500);
   }
 };

@@ -65,8 +65,21 @@ export const getUsers = async (req, res) => {
     const formattedUsers = users.map(formatUser);
 
     // Hydrate users with HRMS organizational details if linked
-    const empNos = formattedUsers.filter(u => u.emp_no).map(u => u.emp_no);
-    if (empNos.length > 0) {
+    const empNoStrings = [
+      ...new Set(
+        formattedUsers
+          .filter((u) => u.emp_no != null && String(u.emp_no).trim() !== '')
+          .map((u) => String(u.emp_no).trim())
+      ),
+    ];
+    const empNoNumbers = [
+      ...new Set(
+        empNoStrings
+          .map((s) => Number(s))
+          .filter((n) => Number.isFinite(n) && !Number.isNaN(n))
+      ),
+    ];
+    if (empNoStrings.length > 0) {
       try {
         const hrmsConn = await connectHRMS();
         const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
@@ -75,8 +88,21 @@ export const getUsers = async (req, res) => {
         const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
         const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
 
-        const hrmsEmployees = await Employee.find({ emp_no: { $in: empNos } })
+        // HRMS may store emp_no as Number or String; $in with only strings misses numeric docs (list shows blank div/dept until per-user HRMS fetch).
+        const empNoOr = [];
+        if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
+        if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
+        const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
           .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+
+        const seenEmp = new Set();
+        const hrmsEmployees = [];
+        for (const emp of hrmsEmployeesRaw || []) {
+          const k = String(emp.emp_no ?? '').trim();
+          if (!k || seenEmp.has(k)) continue;
+          seenEmp.add(k);
+          hrmsEmployees.push(emp);
+        }
 
         if (hrmsEmployees.length > 0) {
           const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(id => id))];
@@ -115,23 +141,29 @@ export const getUsers = async (req, res) => {
             return null;
           };
 
-          const hrmsMap = Object.fromEntries(hrmsEmployees.map(emp => [
-            emp.emp_no,
-            {
-              division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
-              department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-              group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
-              designation: extractDesignationName(emp) || null,
-            }
-          ]));
+          const hrmsMap = Object.fromEntries(
+            hrmsEmployees.map((emp) => {
+              const key = String(emp.emp_no ?? '').trim();
+              return [
+                key,
+                {
+                  division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
+                  department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
+                  group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
+                  designation: extractDesignationName(emp) || null,
+                },
+              ];
+            })
+          );
 
-          formattedUsers.forEach(user => {
-            if (user.emp_no && hrmsMap[user.emp_no]) {
-              user.division = hrmsMap[user.emp_no].division;
-              user.department = hrmsMap[user.emp_no].department;
-              user.group = hrmsMap[user.emp_no].group;
+          formattedUsers.forEach((user) => {
+            const key = user.emp_no != null ? String(user.emp_no).trim() : '';
+            if (key && hrmsMap[key]) {
+              user.division = hrmsMap[key].division;
+              user.department = hrmsMap[key].department;
+              user.group = hrmsMap[key].group;
               // HRMS designation is source of truth; fallback to SQL designation if unavailable
-              user.designation = hrmsMap[user.emp_no].designation || user.designation || null;
+              user.designation = hrmsMap[key].designation || user.designation || null;
             }
           });
         }
@@ -626,6 +658,8 @@ export const searchHrmsEmployees = async (req, res) => {
 export const getHrmsEmployeeByEmpNo = async (req, res) => {
   try {
     const { empNo } = req.params;
+    const empNoStr = String(empNo ?? '').trim();
+    const empNoNum = Number(empNoStr);
 
     const hrmsConn = await connectHRMS();
     
@@ -634,7 +668,9 @@ export const getHrmsEmployeeByEmpNo = async (req, res) => {
     const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
     const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
 
-    const employee = await Employee.findOne({ emp_no: empNo });
+    const empNoOr = [{ emp_no: empNoStr }];
+    if (Number.isFinite(empNoNum) && !Number.isNaN(empNoNum)) empNoOr.push({ emp_no: empNoNum });
+    const employee = await Employee.findOne(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr });
 
     if (!employee) {
       return errorResponse(res, 'Employee not found in HRMS', 404);
