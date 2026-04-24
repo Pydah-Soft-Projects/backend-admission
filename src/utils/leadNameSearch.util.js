@@ -71,3 +71,24 @@ export function buildLeadNameFuzzySql(columnExpr, searchTerm, params) {
   variants.forEach((v) => params.push(`%${v}%`));
   return `(${parts.join(' OR ')})`;
 }
+
+/**
+ * OR-group for student / father phone: raw substring + digits-only match on lightly normalized numbers
+ * (spaces, dashes, parentheses, + stripped). Caller appends `values` after the enquiry `?` bind.
+ *
+ * @param {string} phoneColExpr e.g. `l.phone` or `phone`
+ * @param {string} fatherPhoneColExpr e.g. `l.father_phone` or `father_phone`
+ * @param {string} searchTerm trimmed (caller enforces min length for overall search)
+ * @returns {{ sql: string, values: string[] }}
+ */
+export function buildLeadSearchPhoneOrSql(phoneColExpr, fatherPhoneColExpr, searchTerm) {
+  const digitsOnly = String(searchTerm ?? '').replace(/\D/g, '');
+  if (digitsOnly.length < 2) return { sql: '', values: [] };
+  const norm = (col) =>
+    `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(IFNULL(${col},''),' ',''),'-',''),'(',''),')',''),'+','')`;
+  const rawLike = `%${searchTerm}%`;
+  const digitsLike = `%${digitsOnly}%`;
+  const values = [rawLike, rawLike, digitsLike, digitsLike];
+  const sql = ` OR (${phoneColExpr} LIKE ? OR ${fatherPhoneColExpr} LIKE ? OR ${norm(phoneColExpr)} LIKE ? OR ${norm(fatherPhoneColExpr)} LIKE ?)`;
+  return { sql, values };
+}

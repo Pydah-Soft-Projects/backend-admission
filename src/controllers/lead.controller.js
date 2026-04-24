@@ -6,7 +6,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
-import { buildLeadNameFuzzySql } from '../utils/leadNameSearch.util.js';
+import { buildLeadNameFuzzySql, buildLeadSearchPhoneOrSql } from '../utils/leadNameSearch.util.js';
 import { resolveLeadStatus, isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 const deleteQueue = new PQueue({
@@ -360,18 +360,19 @@ export const getLeads = async (req, res) => {
       }
     }
 
-    // Search: fuzzy name (short queries only) + enquiry; min 2 chars to avoid per-keystroke full scans
+    // Search: fuzzy name (short queries only) + enquiry + phone/father_phone; min 2 chars to avoid per-keystroke full scans
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
       if (searchTerm.length >= 2) {
         const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
         if (nameSql) {
+          const phonePart = buildLeadSearchPhoneOrSql('l.phone', 'l.father_phone', searchTerm);
           if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`${searchTerm}%`);
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`${searchTerm}%`, ...phonePart.values);
           } else {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`%${searchTerm}%`);
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`%${searchTerm}%`, ...phonePart.values);
           }
         }
       }
@@ -1888,12 +1889,13 @@ export const getAllLeadIds = async (req, res) => {
       if (searchTerm.length >= 2) {
         const nameSql = buildLeadNameFuzzySql('name', searchTerm, params);
         if (nameSql) {
+          const phonePart = buildLeadSearchPhoneOrSql('phone', 'father_phone', searchTerm);
           if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
-            params.push(`${searchTerm}%`);
+            conditions.push(`(${nameSql} OR enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`${searchTerm}%`, ...phonePart.values);
           } else {
-            conditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
-            params.push(`%${searchTerm}%`);
+            conditions.push(`(${nameSql} OR enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`%${searchTerm}%`, ...phonePart.values);
           }
         }
       }
@@ -2290,12 +2292,13 @@ export const exportLeads = async (req, res) => {
       if (searchTerm.length >= 2) {
         const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
         if (nameSql) {
+          const phonePart = buildLeadSearchPhoneOrSql('l.phone', 'l.father_phone', searchTerm);
           if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`${searchTerm}%`);
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`${searchTerm}%`, ...phonePart.values);
           } else {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`%${searchTerm}%`);
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
+            params.push(`%${searchTerm}%`, ...phonePart.values);
           }
         }
       }
