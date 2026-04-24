@@ -6,7 +6,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
-import { findBestMatch, similarity } from '../utils/fuzzyMatch.util.js';
+import { buildLeadNameFuzzySql } from '../utils/leadNameSearch.util.js';
 import { resolveLeadStatus, isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 const deleteQueue = new PQueue({
@@ -360,26 +360,21 @@ export const getLeads = async (req, res) => {
       }
     }
 
-    // Full-text search and partial matching
+    // Search: fuzzy name (short queries only) + enquiry; min 2 chars to avoid per-keystroke full scans
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      conditions.push(`(
-        MATCH(l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.mother_name, l.course_interested, l.district, l.mandal, l.state, l.application_status, l.hall_ticket_number, l.inter_college) 
-        AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR l.name LIKE ?
-        OR l.phone LIKE ?
-        OR l.email LIKE ?
-        OR l.district LIKE ?
-        OR l.enquiry_number LIKE ?
-      )`);
-      params.push(
-        searchTerm, 
-        `%${searchTerm}%`, 
-        `%${searchTerm}%`, 
-        `%${searchTerm}%`, 
-        `%${searchTerm}%`,
-        `%${searchTerm}%`
-      );
+      if (searchTerm.length >= 2) {
+        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
+        if (nameSql) {
+          if (searchTerm.toUpperCase().startsWith('ENQ')) {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`${searchTerm}%`);
+          } else {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`%${searchTerm}%`);
+          }
+        }
+      }
     }
 
     // Access control - if user is not Super Admin, only show assigned leads
@@ -1890,15 +1885,18 @@ export const getAllLeadIds = async (req, res) => {
     }
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      conditions.push(`(
-        MATCH(enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college) 
-        AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR name LIKE ?
-        OR phone LIKE ?
-        OR email LIKE ?
-        OR district LIKE ?
-      )`);
-      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+      if (searchTerm.length >= 2) {
+        const nameSql = buildLeadNameFuzzySql('name', searchTerm, params);
+        if (nameSql) {
+          if (searchTerm.toUpperCase().startsWith('ENQ')) {
+            conditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
+            params.push(`${searchTerm}%`);
+          } else {
+            conditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
+            params.push(`%${searchTerm}%`);
+          }
+        }
+      }
     }
 
     // Access control
@@ -2289,15 +2287,18 @@ export const exportLeads = async (req, res) => {
 
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      conditions.push(`(
-        MATCH(l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.mother_name, l.course_interested, l.district, l.mandal, l.state, l.application_status, l.hall_ticket_number, l.inter_college) 
-        AGAINST(? IN NATURAL LANGUAGE MODE)
-        OR l.name LIKE ?
-        OR l.phone LIKE ?
-        OR l.email LIKE ?
-        OR l.district LIKE ?
-      )`);
-      params.push(searchTerm, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`, `%${searchTerm}%`);
+      if (searchTerm.length >= 2) {
+        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
+        if (nameSql) {
+          if (searchTerm.toUpperCase().startsWith('ENQ')) {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`${searchTerm}%`);
+          } else {
+            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
+            params.push(`%${searchTerm}%`);
+          }
+        }
+      }
     }
 
     // Access control

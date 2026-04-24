@@ -7,6 +7,7 @@ import {
   updateUser,
   deleteUser,
   searchHrmsEmployees,
+  getHrmsEmployeeByMongoId,
   getHrmsEmployeeByEmpNo,
 } from '../controllers/user.controller.js';
 import { getMySettings, updateMySettings } from '../controllers/userSettings.controller.js';
@@ -30,6 +31,7 @@ router.route('/').get(isSuperAdmin, getUsers).post(isSuperAdmin, createUser);
 router.get('/assignable', isSuperAdmin, getAssignableUsers);
 router.get('/all/login-logs', isSuperAdmin, getAllUserLoginLogs);
 router.get('/hrms/search', isSuperAdmin, searchHrmsEmployees);
+router.get('/hrms/id/:mongoId', isSuperAdmin, getHrmsEmployeeByMongoId);
 router.get('/hrms/:empNo', isSuperAdmin, getHrmsEmployeeByEmpNo);
 
 // Require time tracking for User/Counsellor/Manager dashboard routes below

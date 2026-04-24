@@ -2,9 +2,37 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import mongoose from 'mongoose';
 import { connectHRMS } from '../config-mongo/hrms.js';
 
 const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO'];
+
+/**
+ * Align CRM emp_no with HRMS emp_no when HRMS uses leading zeros, strings, or numeric types differently.
+ */
+const normalizeEmpNoKey = (value) => {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  if (/^\d+$/.test(s)) return String(parseInt(s, 10));
+  return s;
+};
+
+/**
+ * Same resolution as GET /users/hrms/:empNo and /users/hrms/id/:mongoId — findById on division / department / group.
+ * Used for list hydration so table org columns match the view dialog exactly.
+ */
+const resolveHrmsOrgNamesFindById = async (employee, Division, Department, Group) => {
+  const [divDoc, deptDoc, groupDoc] = await Promise.all([
+    employee.division_id ? Division.findById(employee.division_id) : Promise.resolve(null),
+    employee.department_id ? Department.findById(employee.department_id) : Promise.resolve(null),
+    employee.employee_group_id ? Group.findById(employee.employee_group_id) : Promise.resolve(null),
+  ]);
+  return {
+    division: divDoc?.name || '-',
+    department: deptDoc?.name || '-',
+    group: groupDoc?.name || '-',
+  };
+};
 
 const sanitizePermissions = (permissions = {}) => {
   if (!permissions || typeof permissions !== 'object') {
@@ -72,98 +100,90 @@ export const getUsers = async (req, res) => {
           .map((u) => String(u.emp_no).trim())
       ),
     ];
-    const empNoNumbers = [
+    // Student Counselors (and some other roles) are often linked via HRMS Mongo _id only; emp_no may be empty.
+    const hrmsIdStrings = [
       ...new Set(
-        empNoStrings
-          .map((s) => Number(s))
-          .filter((n) => Number.isFinite(n) && !Number.isNaN(n))
+        formattedUsers
+          .map((u) => (u.hrms_id != null ? String(u.hrms_id).trim() : ''))
+          .filter((s) => s && mongoose.Types.ObjectId.isValid(s))
       ),
     ];
-    if (empNoStrings.length > 0) {
+
+    if (empNoStrings.length > 0 || hrmsIdStrings.length > 0) {
       try {
         const hrmsConn = await connectHRMS();
         const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
         const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
         const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
         const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
-        const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
+        const empByMongoId = new Map();
 
-        // HRMS may store emp_no as Number or String; $in with only strings misses numeric docs (list shows blank div/dept until per-user HRMS fetch).
-        const empNoOr = [];
-        if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
-        if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
-        const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
-          .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+        if (empNoStrings.length > 0) {
+          const empNoNumbers = [
+            ...new Set(
+              empNoStrings
+                .map((s) => Number(s))
+                .filter((n) => Number.isFinite(n) && !Number.isNaN(n))
+            ),
+          ];
+          const empNoOr = [];
+          if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
+          if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
+          const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
+            .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
 
-        const seenEmp = new Set();
-        const hrmsEmployees = [];
-        for (const emp of hrmsEmployeesRaw || []) {
-          const k = String(emp.emp_no ?? '').trim();
-          if (!k || seenEmp.has(k)) continue;
-          seenEmp.add(k);
-          hrmsEmployees.push(emp);
+          for (const emp of hrmsEmployeesRaw || []) {
+            if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+          }
         }
 
+        if (hrmsIdStrings.length > 0) {
+          const oids = hrmsIdStrings.map((id) => new mongoose.Types.ObjectId(id));
+          const byIdRaw = await Employee.find({ _id: { $in: oids } })
+            .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+          for (const emp of byIdRaw || []) {
+            if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+          }
+        }
+
+        const hrmsEmployees = [...empByMongoId.values()];
+
         if (hrmsEmployees.length > 0) {
-          const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(id => id))];
-          const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(id => id))];
-          const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(id => id))];
-          const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(id => id))];
-
-          const [divisions, departments, groups, designations] = await Promise.all([
-            Division.find({ _id: { $in: divIds } }).select('name'),
-            Department.find({ _id: { $in: deptIds } }).select('name'),
-            Group.find({ _id: { $in: groupIds } }).select('name'),
-            Designation.find({ _id: { $in: designationIds } }).select('name')
-          ]);
-
-          const divMap = Object.fromEntries(divisions.map(d => [d._id.toString(), d.name]));
-          const deptMap = Object.fromEntries(departments.map(d => [d._id.toString(), d.name]));
-          const groupMap = Object.fromEntries(groups.map(g => [g._id.toString(), g.name]));
-          const designationMap = Object.fromEntries(designations.map(d => [d._id.toString(), d.name]));
-
-          const extractDesignationName = (emp) => {
-            const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
-            if (byId) return byId;
-            const dynamicFields = emp.dynamicFields || {};
-            if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
-              return dynamicFields.designation_name.trim();
-            }
-            const rawDesignation = dynamicFields.designation;
-            if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
-              try {
-                const parsed = JSON.parse(rawDesignation);
-                if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
-              } catch {
-                // ignore parse errors and fallback
-              }
-            }
-            return null;
-          };
-
-          const hrmsMap = Object.fromEntries(
-            hrmsEmployees.map((emp) => {
-              const key = String(emp.emp_no ?? '').trim();
-              return [
-                key,
-                {
-                  division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
-                  department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-                  group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
-                  designation: extractDesignationName(emp) || null,
-                },
-              ];
-            })
+          const orgRows = await Promise.all(
+            hrmsEmployees.map(async (emp) => ({
+              emp,
+              org: await resolveHrmsOrgNamesFindById(emp, Division, Department, Group),
+            }))
           );
 
+          const hrmsRowByEmployeeId = Object.fromEntries(
+            orgRows.map(({ emp, org }) => [emp._id.toString(), org])
+          );
+          const hrmsMap = {};
+          for (const { emp, org } of orgRows) {
+            const rawKey = String(emp.emp_no ?? '').trim();
+            const normKey = normalizeEmpNoKey(emp.emp_no);
+            if (rawKey) hrmsMap[rawKey] = org;
+            if (normKey && normKey !== rawKey) hrmsMap[normKey] = org;
+          }
+
           formattedUsers.forEach((user) => {
-            const key = user.emp_no != null ? String(user.emp_no).trim() : '';
-            if (key && hrmsMap[key]) {
-              user.division = hrmsMap[key].division;
-              user.department = hrmsMap[key].department;
-              user.group = hrmsMap[key].group;
-              // HRMS designation is source of truth; fallback to SQL designation if unavailable
-              user.designation = hrmsMap[key].designation || user.designation || null;
+            const rawKey = user.emp_no != null ? String(user.emp_no).trim() : '';
+            const normKey = normalizeEmpNoKey(user.emp_no);
+            let hrmsRow =
+              (rawKey && hrmsMap[rawKey]) ||
+              (normKey && hrmsMap[normKey]) ||
+              null;
+            if (!hrmsRow && user.hrms_id) {
+              const hid = String(user.hrms_id).trim();
+              if (mongoose.Types.ObjectId.isValid(hid)) {
+                hrmsRow = hrmsRowByEmployeeId[hid] || null;
+              }
+            }
+            if (hrmsRow) {
+              user.division = hrmsRow.division;
+              user.department = hrmsRow.department;
+              user.group = hrmsRow.group;
             }
           });
         }
@@ -171,6 +191,18 @@ export const getUsers = async (req, res) => {
         console.error('HRMS hydration error in getUsers:', hrmsError);
       }
     }
+
+    // Resolve manager id to a small object so list/card views match detail modal lookups
+    const userById = Object.fromEntries(formattedUsers.map((u) => [String(u._id), u]));
+    formattedUsers.forEach((u) => {
+      const mb = u.managedBy;
+      if (mb == null || mb === '') return;
+      if (typeof mb === 'object') return;
+      const manager = userById[String(mb)];
+      if (manager) {
+        u.managedBy = { _id: manager._id, name: manager.name, email: manager.email };
+      }
+    });
 
     return successResponse(res, formattedUsers, 'Users retrieved successfully', 200);
   } catch (error) {
@@ -652,6 +684,51 @@ export const searchHrmsEmployees = async (req, res) => {
   }
 };
 
+// @desc    Get employee details from HRMS by Mongo employee _id (stored as users.hrms_id)
+// @route   GET /api/users/hrms/id/:mongoId
+// @access  Private (Super Admin)
+export const getHrmsEmployeeByMongoId = async (req, res) => {
+  try {
+    const { mongoId } = req.params;
+    const idStr = String(mongoId ?? '').trim();
+    if (!mongoose.Types.ObjectId.isValid(idStr)) {
+      return errorResponse(res, 'Invalid HRMS employee id', 400);
+    }
+
+    const hrmsConn = await connectHRMS();
+
+    const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+    const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+    const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+    const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+
+    const employee = await Employee.findById(idStr);
+
+    if (!employee) {
+      return errorResponse(res, 'Employee not found in HRMS', 404);
+    }
+
+    const { division, department, group } = await resolveHrmsOrgNamesFindById(employee, Division, Department, Group);
+
+    const result = {
+      _id: employee._id,
+      id: employee._id,
+      emp_no: employee.emp_no,
+      name: employee.employee_name,
+      email: employee.email,
+      mobileNumber: employee.phone_number,
+      division,
+      department,
+      group,
+    };
+
+    return successResponse(res, result, 'Employee details retrieved successfully');
+  } catch (error) {
+    console.error('Get HRMS employee by id error:', error);
+    return errorResponse(res, 'Failed to fetch HRMS employee details', 500);
+  }
+};
+
 // @desc    Get employee details from HRMS by emp_no
 // @route   GET /api/users/hrms/:empNo
 // @access  Private (Super Admin)
@@ -676,25 +753,7 @@ export const getHrmsEmployeeByEmpNo = async (req, res) => {
       return errorResponse(res, 'Employee not found in HRMS', 404);
     }
 
-    // Resolve IDs to names
-    let division = '-';
-    let department = '-';
-    let group = '-';
-
-    if (employee.division_id) {
-      const divDoc = await Division.findById(employee.division_id);
-      if (divDoc) division = divDoc.name;
-    }
-
-    if (employee.department_id) {
-      const deptDoc = await Department.findById(employee.department_id);
-      if (deptDoc) department = deptDoc.name;
-    }
-
-    if (employee.employee_group_id) {
-      const groupDoc = await Group.findById(employee.employee_group_id);
-      if (groupDoc) group = groupDoc.name;
-    }
+    const { division, department, group } = await resolveHrmsOrgNamesFindById(employee, Division, Department, Group);
 
     const result = {
       _id: employee._id,
