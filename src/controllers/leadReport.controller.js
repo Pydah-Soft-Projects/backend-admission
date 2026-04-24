@@ -616,20 +616,35 @@ export const getDuplicateLeadsReport = async (req, res) => {
 
             let csv = [];
             const skipIndices = [2, 5, 6]; // School, Activity, Created
-            
+
+            function csvQuote(val) {
+              return '"' + String(val ?? '').replace(/"/g, '""') + '"';
+            }
+
             tables.forEach((table) => {
               const rows = table.querySelectorAll('tr');
               for (let i = 0; i < rows.length; i++) {
                 const row = [], cols = rows[i].querySelectorAll('td, th');
                 for (let j = 0; j < cols.length; j++) {
                   if (skipIndices.includes(j)) continue;
-                  
-                  let text = cols[j].innerText.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim();
-                  const input = cols[j].querySelector('input');
-                  if (input) {
-                    text = input.value;
+
+                  const cell = cols[j];
+                  if (cell.classList && cell.classList.contains('phones-col')) {
+                    const phoneInputs = cell.querySelectorAll('input.phone-input');
+                    if (phoneInputs.length) {
+                      phoneInputs.forEach((inp) => row.push(csvQuote(inp.value)));
+                    } else {
+                      row.push(csvQuote('S: Student mobile'));
+                      row.push(csvQuote('F: Father mobile'));
+                      row.push(csvQuote('A: Alternate mobile'));
+                    }
+                    continue;
                   }
-                  row.push('"' + text.replace(/"/g, '""') + '"');
+
+                  let text = cell.innerText.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim();
+                  const input = cell.querySelector('input');
+                  if (input) text = input.value;
+                  row.push(csvQuote(text));
                 }
                 csv.push(row.join(','));
               }
@@ -697,7 +712,7 @@ export const getDuplicateLeadsReport = async (req, res) => {
                     <th class="id-cell">Enquiry #</th>
                     <th>Student Name</th>
                     <th class="school-col">${(groupParam.toLowerCase() === '10th') ? 'School' : 'College'}</th>
-                    <th>Phones Found & Update Info</th>
+                    <th class="phones-col">Phones Found & Update Info</th>
                     <th>Status</th>
                     <th class="activity-col">Last Activity</th>
                     <th class="created-col">Created</th>
@@ -713,7 +728,7 @@ export const getDuplicateLeadsReport = async (req, res) => {
                         ${r.isExactNameMatch ? '<span class="match-tag">EXACT NAME MATCH</span>' : ''}
                       </td>
                       <td class="school-col">${r.inter_college || 'N/A'}</td>
-                      <td>
+                      <td class="phones-col">
                         <div class="phone-val">
                           <span>S:</span>
                           <div class="phone-input-group">
