@@ -49,7 +49,7 @@ export const createBulkSmsJob = async (req, res) => {
     if (req.user.roleName === 'PRO') {
       return errorResponse(res, 'SMS bulk jobs are not available for PRO users', 403);
     }
-    const { source, templateId, items } = req.body || {};
+    const { source, templateId, items, reportContext: rawContext } = req.body || {};
     if (!source || !VALID_SOURCES.has(String(source))) {
       return errorResponse(res, 'Invalid or missing source', 400);
     }
@@ -74,6 +74,7 @@ export const createBulkSmsJob = async (req, res) => {
       userId,
       source: String(source),
       templateId,
+      reportContext: rawContext,
       items: items.map((it) => ({
         leadId: it.leadId,
         leadName: it.leadName,

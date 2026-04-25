@@ -73,6 +73,37 @@ async function runWithConcurrencyItems(items, concurrency, worker) {
 
 export const MAX_SMS_BULK_JOB_ITEMS = 2000;
 
+/**
+ * Safe JSON for `sms_bulk_jobs.report_context` (user-specific audience for reports).
+ */
+function normalizeReportContextForInsert(source, raw) {
+  if (String(source) !== 'user_specific_leads' || raw == null) {
+    return null;
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const studentGroup =
+    raw.studentGroup != null && String(raw.studentGroup).trim() !== '' ? String(raw.studentGroup).trim().slice(0, 200) : null;
+  const district = raw.district != null && String(raw.district).trim() !== '' ? String(raw.district).trim().slice(0, 200) : null;
+  const su = Array.isArray(raw.selectedUsers) ? raw.selectedUsers : [];
+  const selectedUsers = su
+    .map((u) => {
+      const id = u?.id != null ? String(u.id).trim() : '';
+      if (id.length !== 36) return null;
+      const name = u?.name != null ? String(u.name).trim().slice(0, 300) : '';
+      return { id, name: name || id };
+    })
+    .filter(Boolean)
+    .slice(0, 500);
+  const out = { version: 1, studentGroup, district, selectedUsers };
+  const json = JSON.stringify(out);
+  if (json.length > 65000) {
+    return JSON.stringify({ version: 1, studentGroup, district, selectedUsers: selectedUsers.slice(0, 50), _truncated: true });
+  }
+  return out;
+}
+
 export function scheduleProcessSmsBulkJob(jobId) {
   setImmediate(() => {
     processSmsBulkJob(jobId).catch((err) => {
@@ -300,8 +331,9 @@ export async function processSmsBulkJob(jobId) {
  * @param {string} p.source
  * @param {string} p.templateId
  * @param {Array<{ leadId: string, leadName?: string, contactNumbers: string[], variables: object[] }>} p.items
+ * @param {object} [p.reportContext] – optional, stored for `user_specific_leads` (selected users, student group, etc.)
  */
-export async function createSmsBulkJobRecord({ pool, userId, source, templateId, items }) {
+export async function createSmsBulkJobRecord({ pool, userId, source, templateId, items, reportContext: rawContext }) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error('At least one recipient row is required');
   }
@@ -318,11 +350,20 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
     variables: it.variables,
     sort_order: idx,
   }));
+  const reportContext = normalizeReportContextForInsert(source, rawContext);
   await pool.execute(
     `INSERT INTO sms_bulk_jobs (
-      id, created_by, source, template_id, template_name, status, total_items, done_count, success_count, fail_count
-    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
-    [jobId, userId, source, template.id, template.name, insItems.length]
+      id, created_by, source, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
+    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
+    [
+      jobId,
+      userId,
+      source,
+      reportContext == null ? null : JSON.stringify(reportContext),
+      template.id,
+      template.name,
+      insItems.length,
+    ]
   );
   for (const it of insItems) {
     await pool.execute(
@@ -345,9 +386,22 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
 }
 
 export async function formatJobRow(row) {
+  let reportContext = null;
+  if (row.report_context != null && row.report_context !== '') {
+    if (typeof row.report_context === 'string') {
+      try {
+        reportContext = JSON.parse(row.report_context);
+      } catch {
+        reportContext = null;
+      }
+    } else if (typeof row.report_context === 'object') {
+      reportContext = row.report_context;
+    }
+  }
   return {
     id: row.id,
     source: row.source,
+    reportContext,
     templateId: row.template_id,
     templateName: row.template_name,
     status: row.status,
