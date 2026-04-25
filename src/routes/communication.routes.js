@@ -14,6 +14,11 @@ import {
   deleteTemplate,
   hardDeleteTemplate,
 } from '../controllers/template.controller.js';
+import {
+  createBulkSmsJob,
+  getBulkSmsJob,
+  listBulkSmsJobs,
+} from '../controllers/smsBulkJob.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
@@ -34,6 +39,11 @@ router.post('/lead/:leadId/call', logCallCommunication);
 router.post('/lead/:leadId/sms', sendSmsCommunication);
 router.get('/lead/:leadId/history', getLeadCommunications);
 router.get('/lead/:leadId/stats', getLeadCommunicationStats);
+
+// Super Admin: large bulk SMS (background + reports)
+router.post('/sms-bulk/jobs', isSuperAdmin, createBulkSmsJob);
+router.get('/sms-bulk/jobs', isSuperAdmin, listBulkSmsJobs);
+router.get('/sms-bulk/jobs/:id', isSuperAdmin, getBulkSmsJob);
 
 export default router;
 

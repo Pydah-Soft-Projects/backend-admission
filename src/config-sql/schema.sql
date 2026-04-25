@@ -1011,3 +1011,54 @@ CREATE TABLE IF NOT EXISTS lead_location_staging (
     INDEX idx_lead_loc_stg_enquiry (enquiry_number),
     INDEX idx_lead_loc_stg_name (name(128))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
+-- SMS BULK JOBS (background send + superadmin reports)
+-- ============================================
+CREATE TABLE IF NOT EXISTS sms_bulk_jobs (
+    id CHAR(36) PRIMARY KEY,
+    created_by CHAR(36) NOT NULL,
+    source VARCHAR(40) NOT NULL,
+    template_id CHAR(36) NULL,
+    template_name VARCHAR(255) NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    total_items INT NOT NULL DEFAULT 0,
+    done_count INT NOT NULL DEFAULT 0,
+    success_count INT NOT NULL DEFAULT 0,
+    fail_count INT NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME NULL,
+    completed_at DATETIME NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE SET NULL,
+    INDEX idx_sms_bulk_jobs_created_by (created_by),
+    INDEX idx_sms_bulk_jobs_status (status),
+    INDEX idx_sms_bulk_jobs_created_at (created_at DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS sms_bulk_job_items (
+    id CHAR(36) PRIMARY KEY,
+    job_id CHAR(36) NOT NULL,
+    sort_order INT NOT NULL DEFAULT 0,
+    lead_id CHAR(36) NOT NULL,
+    lead_name VARCHAR(500) NULL,
+    contact_numbers JSON NOT NULL,
+    template_id CHAR(36) NOT NULL,
+    variables JSON,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'success', 'failed', 'skipped')),
+    response_text TEXT,
+    error_message TEXT,
+    provider_message_ids JSON,
+    communication_ids JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    started_at DATETIME NULL,
+    completed_at DATETIME NULL,
+    FOREIGN KEY (job_id) REFERENCES sms_bulk_jobs(id) ON DELETE CASCADE,
+    FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE,
+    FOREIGN KEY (template_id) REFERENCES message_templates(id) ON DELETE RESTRICT,
+    INDEX idx_sms_bulk_job_items_job (job_id, sort_order),
+    INDEX idx_sms_bulk_job_items_lead (lead_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

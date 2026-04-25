@@ -2,7 +2,7 @@
 
 This document describes the GitHub Actions CI/CD pipeline for **backend-admission** and how to configure deployment.
 
-
+ssh -i ./admissions-key ec2-user@43.205.136.200
 
 ## Pipeline Overview
 
