@@ -261,22 +261,164 @@ async function processOneJobItem(pool, userId, jobId, row) {
   }
 }
 
+/**
+ * @param {import('mysql2/promise').Pool} pool
+ * @param {string} jobId
+ */
+export async function reconcileJobCountersFromItems(pool, jobId) {
+  const [agg] = await pool.execute(
+    `SELECT
+       COUNT(*) AS n,
+       COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),0) AS succ,
+       COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),0) AS fl,
+       COALESCE(SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END),0) AS skp
+     FROM sms_bulk_job_items WHERE job_id = ?`,
+    [jobId]
+  );
+  const row = agg[0] || { n: 0, succ: 0, fl: 0, skp: 0 };
+  const n = Number(row.n) || 0;
+  const succ = Number(row.succ) || 0;
+  const fl = Number(row.fl) || 0;
+  const skp = Number(row.skp) || 0;
+  const done = succ + fl + skp;
+  await pool.execute(
+    `UPDATE sms_bulk_jobs SET
+       success_count = ?,
+       fail_count = ?,
+       done_count = ?
+     WHERE id = ?`,
+    [succ + skp, fl, done, jobId]
+  );
+  return { n, successCount: succ + skp, failCount: fl, doneCount: done };
+}
+
+/**
+ * Only when no pending/processing: finish as completed, or as failed (missing rows), or not yet.
+ * @returns {Promise<'completed'|'not_yet'|'failed'|'inconsistent'|'noop'>}
+ */
+export async function tryMarkJobCompleteIfFullyProcessed(pool, jobId) {
+  const [jobRows] = await pool.execute('SELECT * FROM sms_bulk_jobs WHERE id = ?', [jobId]);
+  if (jobRows.length === 0) {
+    return 'noop';
+  }
+  const job = jobRows[0];
+  if (String(job.status) === 'cancelled') {
+    return 'noop';
+  }
+  const [wRow] = await pool.execute(
+    `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
+    [jobId]
+  );
+  const w = Number(wRow[0]?.c) || 0;
+  if (w > 0) {
+    return 'not_yet';
+  }
+  const [nItemRow] = await pool.execute(`SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ?`, [jobId]);
+  const nItem = Number(nItemRow[0]?.c) || 0;
+  const totalExpected = Number(job.total_items) || 0;
+  if (nItem < totalExpected) {
+    const msg = `Inconsistent job: only ${nItem} line item(s) in the database, but total_items is ${totalExpected}. Cannot mark complete.`;
+    await pool.execute(
+      `UPDATE sms_bulk_jobs SET status = 'failed', last_error = ?, completed_at = NOW() WHERE id = ? AND status != 'cancelled'`,
+      [msg, jobId]
+    );
+    return 'failed';
+  }
+  if (nItem > totalExpected) {
+    const msg = 'Line item count exceeds total_items; please contact support to repair this job row.';
+    await pool.execute(
+      `UPDATE sms_bulk_jobs SET status = 'failed', last_error = ?, completed_at = NOW() WHERE id = ? AND status != 'cancelled'`,
+      [msg, jobId]
+    );
+    return 'failed';
+  }
+  const [nTerm] = await pool.execute(
+    `SELECT COUNT(*) AS c FROM sms_bulk_job_items
+     WHERE job_id = ? AND status IN ('success','failed','skipped')`,
+    [jobId]
+  );
+  if (Number(nTerm[0]?.c) < nItem) {
+    return 'inconsistent';
+  }
+  await reconcileJobCountersFromItems(pool, jobId);
+  if (nItem === 0) {
+    await pool.execute(
+      `UPDATE sms_bulk_jobs SET status = 'failed', last_error = 'No line items', completed_at = NOW() WHERE id = ?`,
+      [jobId]
+    );
+    return 'failed';
+  }
+  await pool.execute(
+    `UPDATE sms_bulk_jobs SET
+       status = 'completed',
+       last_error = NULL,
+       completed_at = NOW()
+     WHERE id = ? AND status NOT IN ('cancelled', 'failed')`,
+    [jobId]
+  );
+  return 'completed';
+}
+
+/**
+ * "Completed" in DB can be wrong: pending rows still exist. Re-open the job so the worker can continue.
+ * @param {import('mysql2/promise').Pool} pool
+ * @param {string} jobId
+ * @returns {Promise<boolean>} true if job was re-opened
+ */
+export async function reopenCompletedIfPendingWorkRemains(pool, jobId) {
+  const [rows] = await pool.execute('SELECT id, status FROM sms_bulk_jobs WHERE id = ?', [jobId]);
+  if (rows.length === 0) {
+    return false;
+  }
+  if (String(rows[0].status) !== 'completed') {
+    return false;
+  }
+  const [wRow] = await pool.execute(
+    `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
+    [jobId]
+  );
+  if (Number(wRow[0]?.c) < 1) {
+    return false;
+  }
+  const [r] = await pool.execute(
+    `UPDATE sms_bulk_jobs
+     SET status = 'running', completed_at = NULL, last_error = NULL
+     WHERE id = ? AND status = 'completed'`,
+    [jobId]
+  );
+  const n = typeof r.affectedRows === 'bigint' ? Number(r.affectedRows) : r.affectedRows || 0;
+  return n > 0;
+}
+
 export async function processSmsBulkJob(jobId) {
   if (runningJobIds.has(jobId)) {
     return;
   }
   const pool = getPool();
-  const [jobRows] = await pool.execute('SELECT * FROM sms_bulk_jobs WHERE id = ?', [jobId]);
-  if (jobRows.length === 0) {
+  const [jobRows0] = await pool.execute('SELECT * FROM sms_bulk_jobs WHERE id = ?', [jobId]);
+  if (jobRows0.length === 0) {
     return;
   }
-  const job = jobRows[0];
-  if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+  let job = jobRows0[0];
+  if (String(job.status) === 'failed' || String(job.status) === 'cancelled') {
     return;
+  }
+  if (String(job.status) === 'completed') {
+    const reopened = await reopenCompletedIfPendingWorkRemains(pool, jobId);
+    if (reopened) {
+      const [j2] = await pool.execute('SELECT * FROM sms_bulk_jobs WHERE id = ?', [jobId]);
+      if (j2.length > 0) {
+        job = j2[0];
+      }
+    } else {
+      // Repair a bogus "completed" (wrong counters / not enough line rows) or re-sync done counts
+      await tryMarkJobCompleteIfFullyProcessed(pool, jobId);
+      return;
+    }
   }
   runningJobIds.add(jobId);
   try {
-    if (job.status === 'queued') {
+    if (String(job.status) === 'queued') {
       await pool.execute(`UPDATE sms_bulk_jobs SET status = 'running', started_at = NOW() WHERE id = ? AND status = 'queued'`, [jobId]);
     }
     await releaseStuckProcessingItems(pool, jobId);
@@ -285,20 +427,27 @@ export async function processSmsBulkJob(jobId) {
       [jobId]
     );
     if (itemRows.length === 0) {
-      const [active] = await pool.execute(
+      const [wRow2] = await pool.execute(
         `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
         [jobId]
       );
+      if (Number(wRow2[0]?.c) > 0) {
+        setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
+        return;
+      }
       const [jc] = await pool.execute(`SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ?`, [jobId]);
-      if (jc[0]?.c === 0) {
+      if (Number(jc[0]?.c) === 0) {
         await pool.execute(
-          `UPDATE sms_bulk_jobs SET status = 'failed', completed_at = NOW(), last_error = 'No line items' WHERE id = ?`,
+          `UPDATE sms_bulk_jobs SET status = 'failed', last_error = 'No line items', completed_at = NOW() WHERE id = ?`,
           [jobId]
         );
-      } else if (active[0]?.c > 0) {
-        setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
       } else {
-        await pool.execute(`UPDATE sms_bulk_jobs SET status = 'completed', completed_at = NOW() WHERE id = ? AND status != 'cancelled'`, [jobId]);
+        const outcome = await tryMarkJobCompleteIfFullyProcessed(pool, jobId);
+        if (outcome === 'inconsistent') {
+          setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
+        } else if (outcome === 'not_yet') {
+          setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
+        }
       }
       return;
     }
@@ -309,7 +458,18 @@ export async function processSmsBulkJob(jobId) {
       [jobId]
     );
     if (p[0].c === 0) {
-      await pool.execute(`UPDATE sms_bulk_jobs SET status = 'completed', completed_at = NOW() WHERE id = ? AND status != 'cancelled'`, [jobId]);
+      const outcome = await tryMarkJobCompleteIfFullyProcessed(pool, jobId);
+      if (outcome === 'inconsistent' || outcome === 'not_yet') {
+        const [pend2] = await pool.execute(
+          `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status = 'pending'`,
+          [jobId]
+        );
+        if (Number(pend2[0].c) > 0) {
+          scheduleProcessSmsBulkJob(jobId);
+        } else {
+          setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
+        }
+      }
     } else {
       const [pend] = await pool.execute(
         `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status = 'pending'`,
@@ -400,6 +560,13 @@ export async function formatJobRow(row) {
       reportContext = row.report_context;
     }
   }
+  const workRemaining = row.work_remaining != null ? Number(row.work_remaining) : undefined;
+  const st = String(row.status);
+  const done = Number(row.done_count) || 0;
+  const tot = Number(row.total_items) || 0;
+  const wr = workRemaining == null || Number.isNaN(workRemaining) ? 0 : workRemaining;
+  const displayStatus =
+    st === 'completed' && (wr > 0 || done < tot) ? 'incomplete' : st;
   return {
     id: row.id,
     source: row.source,
@@ -407,6 +574,8 @@ export async function formatJobRow(row) {
     templateId: row.template_id,
     templateName: row.template_name,
     status: row.status,
+    displayStatus,
+    workRemaining,
     totalItems: row.total_items,
     doneCount: row.done_count,
     successCount: row.success_count,

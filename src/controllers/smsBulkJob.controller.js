@@ -5,6 +5,7 @@ import {
   createSmsBulkJobRecord,
   formatItemRow,
   formatJobRow,
+  reopenCompletedIfPendingWorkRemains,
   scheduleProcessSmsBulkJob,
 } from '../services/smsBulkJob.service.js';
 
@@ -34,8 +35,14 @@ export const resumeBulkSmsJob = async (req, res) => {
     if (!isOwner && !hasElevatedAdminPrivileges(req.user.roleName)) {
       return errorResponse(res, 'Forbidden', 403);
     }
+    const reopened = await reopenCompletedIfPendingWorkRemains(pool, id);
     scheduleProcessSmsBulkJob(id);
-    return successResponse(res, { requeued: true, jobId: id }, 'Bulk SMS job processor requeued', 200);
+    return successResponse(
+      res,
+      { requeued: true, jobId: id, reopened: reopened },
+      reopened ? 'Job re-opened and worker scheduled' : 'Bulk SMS job processor requeued',
+      200
+    );
   } catch (e) {
     console.error('resumeBulkSmsJob', e);
     return errorResponse(res, e.message || 'Failed to resume job', 500);
@@ -118,8 +125,10 @@ export const getBulkSmsJob = async (req, res) => {
       `SELECT * FROM sms_bulk_job_items WHERE job_id = ? ORDER BY sort_order ASC`,
       [id]
     );
+    const workRemaining = items.filter((r) => r.status === 'pending' || r.status === 'processing').length;
+    const jRow = { ...job, work_remaining: workRemaining };
     const out = {
-      job: await formatJobRow(job),
+      job: await formatJobRow(jRow),
       items: await Promise.all(items.map((r) => formatItemRow(r))),
     };
     return successResponse(res, out);
@@ -146,15 +155,29 @@ export const listBulkSmsJobs = async (req, res) => {
     const total = countRows[0]?.c ?? 0;
     const [jobs] = isSuper
       ? await pool.execute(
-          `SELECT * FROM sms_bulk_jobs ORDER BY created_at DESC LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
+          `SELECT j.*, 
+            (SELECT COUNT(*) FROM sms_bulk_job_items i 
+              WHERE i.job_id = j.id AND i.status IN ('pending','processing')
+            ) AS work_remaining
+            FROM sms_bulk_jobs j
+            ORDER BY j.created_at DESC
+            LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
         )
       : await pool.execute(
-          `SELECT * FROM sms_bulk_jobs WHERE created_by = ? ORDER BY created_at DESC LIMIT ${Number(limit)} OFFSET ${Number(
-            offset
-          )}`,
+          `SELECT j.*, 
+            (SELECT COUNT(*) FROM sms_bulk_job_items i 
+              WHERE i.job_id = j.id AND i.status IN ('pending','processing')
+            ) AS work_remaining
+            FROM sms_bulk_jobs j
+            WHERE j.created_by = ?
+            ORDER BY j.created_at DESC
+            LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
           [userId]
     );
-    const data = { items: await Promise.all(jobs.map((j) => formatJobRow(j))), pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    const data = {
+      items: await Promise.all(jobs.map((j) => formatJobRow(j))),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
     return successResponse(res, data);
   } catch (e) {
     console.error('listBulkSmsJobs', e);
