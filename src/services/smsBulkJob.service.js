@@ -3,8 +3,54 @@ import { getPool } from '../config-sql/database.js';
 import { findTemplate, executeSmsSendForLead } from './communicationSmsDispatch.js';
 
 const SMS_JOB_CONCURRENCY = 4;
+/** If one lead blocks (DB/network), the whole job used to wait forever. Fail this item and continue. */
+const SMS_ITEM_MAX_MS = Math.min(180_000, Math.max(30_000, Number.parseInt(process.env.SMS_BULK_ITEM_TIMEOUT_MS, 10) || 120_000));
+/** Items left in `processing` (e.g. crash) become retryable. */
+const STUCK_PROCESSING_RESET_MIN = Math.max(1, Number.parseInt(process.env.SMS_BULK_STUCK_PROCESSING_MIN, 10) || 5);
 
 const runningJobIds = new Set();
+
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(`Timed out after ${ms}ms (${label})`));
+    }, ms);
+    Promise.resolve(promise)
+      .then(
+        (v) => {
+          clearTimeout(t);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(t);
+          reject(e);
+        }
+      );
+  });
+}
+
+/**
+ * Reset rows stuck in `processing` (worker crash, hung I/O) so a later run or this run can re-fetch them.
+ */
+async function releaseStuckProcessingItems(pool, jobId) {
+  const [stuck] = await pool.execute(
+    `SELECT id FROM sms_bulk_job_items
+     WHERE job_id = ? AND status = 'processing'
+     AND (started_at IS NULL OR started_at < DATE_SUB(NOW(), INTERVAL ? MINUTE))`,
+    [jobId, STUCK_PROCESSING_RESET_MIN]
+  );
+  for (const row of stuck) {
+    await pool.execute(
+      `UPDATE sms_bulk_job_items
+       SET status = 'pending', started_at = NULL, error_message = NULL, completed_at = NULL
+       WHERE id = ? AND status = 'processing'`,
+      [row.id]
+    );
+  }
+  if (stuck.length > 0) {
+    console.warn(`[SMS bulk job] ${jobId}: re-queued ${stuck.length} item(s) stuck in processing (>${STUCK_PROCESSING_RESET_MIN}m)`);
+  }
+}
 
 /**
  * @param {object[]} items
@@ -33,6 +79,57 @@ export function scheduleProcessSmsBulkJob(jobId) {
       console.error('[SMS bulk job] Fatal', jobId, err);
     });
   });
+}
+
+/**
+ * Call once after a deploy/restart. The old Node process is gone; in-memory work is lost but DB rows remain.
+ * - Puts all `processing` line items for `running` jobs back to `pending` (they are retried, not skipped).
+ * - Schedules each job that still has `pending` work (`running` or `queued`).
+ * Set `SMS_BULK_STARTUP_RESUME=0` in `.env` to disable. Small delay recommended so the MySQL pool is up.
+ * Note: a lead that already received the SMS in the last run but crashed before the DB update could be sent
+ * again (rare); prefer idempotent templates / accept rare duplicate vs losing the batch.
+ */
+export async function resumeRunningSmsBulkJobsOnStartup() {
+  if (String(process.env.SMS_BULK_STARTUP_RESUME).toLowerCase() === '0' || String(process.env.SMS_BULK_STARTUP_RESUME).toLowerCase() === 'false') {
+    console.log('[SMS bulk job] Startup resume disabled (SMS_BULK_STARTUP_RESUME=0)');
+    return;
+  }
+  let pool;
+  try {
+    pool = getPool();
+  } catch {
+    return;
+  }
+  try {
+    const [r1] = await pool.execute(
+      `UPDATE sms_bulk_job_items i
+       INNER JOIN sms_bulk_jobs j ON j.id = i.job_id
+       SET i.status = 'pending', i.started_at = NULL, i.error_message = NULL, i.completed_at = NULL, i.response_text = NULL
+       WHERE j.status = 'running' AND i.status = 'processing'`
+    );
+    const nOrphan = typeof r1.affectedRows === 'bigint' ? Number(r1.affectedRows) : (r1.affectedRows || 0);
+    if (nOrphan > 0) {
+      console.log(
+        `[SMS bulk job] Startup: re-queued ${nOrphan} in-flight line item(s) (processing → pending after restart)`
+      );
+    }
+    const [jobIds] = await pool.execute(
+      `SELECT j.id
+       FROM sms_bulk_jobs j
+       WHERE j.status IN ('running', 'queued')
+       AND EXISTS (SELECT 1 FROM sms_bulk_job_items i WHERE i.job_id = j.id AND i.status = 'pending')`
+    );
+    for (const row of jobIds) {
+      const id = String(row.id);
+      console.log(`[SMS bulk job] Startup: queue processor for job ${id}`);
+      scheduleProcessSmsBulkJob(id);
+    }
+    if (jobIds.length > 0) {
+      console.log(`[SMS bulk job] Startup: re-scheduled ${jobIds.length} job(s) with pending SMS`);
+    }
+  } catch (e) {
+    console.error('[SMS bulk job] Startup resume failed (non-fatal):', e?.message || e);
+  }
 }
 
 /**
@@ -66,9 +163,13 @@ async function processOneJobItem(pool, userId, jobId, row) {
     return;
   }
   try {
-    const out = await executeSmsSendForLead(pool, userId, leadId, nums, [
-      { templateId, variables: Array.isArray(variables) ? variables : [] },
-    ]);
+    const out = await withTimeout(
+      executeSmsSendForLead(pool, userId, leadId, nums, [
+        { templateId, variables: Array.isArray(variables) ? variables : [] },
+      ]),
+      SMS_ITEM_MAX_MS,
+      'executeSmsSendForLead'
+    );
     const anyOk = out.results.some((r) => r.success);
     const last = out.results[out.results.length - 1];
     const errMsg = anyOk ? null : (last?.error || 'Provider reported failure');
@@ -82,14 +183,14 @@ async function processOneJobItem(pool, userId, jobId, row) {
       }
       return [];
     })();
-    await pool.execute(
+    const [uDone] = await pool.execute(
       `UPDATE sms_bulk_job_items SET
         status = ?,
         response_text = ?,
         error_message = ?,
         communication_ids = ?,
         provider_message_ids = ?,
-        completed_at = NOW() WHERE id = ?`,
+        completed_at = NOW() WHERE id = ? AND status = 'processing'`,
       [
         anyOk ? 'success' : 'failed',
         respText,
@@ -99,23 +200,31 @@ async function processOneJobItem(pool, userId, jobId, row) {
         itemId,
       ]
     );
-    await pool.execute(
-      `UPDATE sms_bulk_jobs SET
-        done_count = done_count + 1,
-        success_count = success_count + ?,
-        fail_count = fail_count + ? WHERE id = ?`,
-      [anyOk ? 1 : 0, anyOk ? 0 : 1, jobId]
-    );
+    if (uDone.affectedRows > 0) {
+      const failC = anyOk ? 0 : 1;
+      const succC = anyOk ? 1 : 0;
+      await pool.execute(
+        `UPDATE sms_bulk_jobs SET
+          done_count = done_count + 1,
+          success_count = success_count + ?,
+          fail_count = fail_count + ? WHERE id = ?`,
+        [succC, failC, jobId]
+      );
+    }
   } catch (e) {
     const msg = (e?.message || 'Unknown error').slice(0, 2000);
-    await pool.execute(
-      `UPDATE sms_bulk_job_items SET status = 'failed', error_message = ?, response_text = NULL, completed_at = NOW() WHERE id = ?`,
+    const [fRows] = await pool.execute(
+      `UPDATE sms_bulk_job_items
+       SET status = 'failed', error_message = ?, response_text = NULL, completed_at = NOW()
+       WHERE id = ? AND status = 'processing'`,
       [msg, itemId]
     );
-    await pool.execute(
-      `UPDATE sms_bulk_jobs SET done_count = done_count + 1, fail_count = fail_count + 1, last_error = ? WHERE id = ?`,
-      [msg, jobId]
-    );
+    if (fRows.affectedRows > 0) {
+      await pool.execute(
+        `UPDATE sms_bulk_jobs SET done_count = done_count + 1, fail_count = fail_count + 1, last_error = ? WHERE id = ?`,
+        [msg, jobId]
+      );
+    }
   }
 }
 
@@ -137,17 +246,24 @@ export async function processSmsBulkJob(jobId) {
     if (job.status === 'queued') {
       await pool.execute(`UPDATE sms_bulk_jobs SET status = 'running', started_at = NOW() WHERE id = ? AND status = 'queued'`, [jobId]);
     }
+    await releaseStuckProcessingItems(pool, jobId);
     const [itemRows] = await pool.execute(
       `SELECT * FROM sms_bulk_job_items WHERE job_id = ? AND status = 'pending' ORDER BY sort_order ASC`,
       [jobId]
     );
     if (itemRows.length === 0) {
+      const [active] = await pool.execute(
+        `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
+        [jobId]
+      );
       const [jc] = await pool.execute(`SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ?`, [jobId]);
       if (jc[0]?.c === 0) {
         await pool.execute(
           `UPDATE sms_bulk_jobs SET status = 'failed', completed_at = NOW(), last_error = 'No line items' WHERE id = ?`,
           [jobId]
         );
+      } else if (active[0]?.c > 0) {
+        setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
       } else {
         await pool.execute(`UPDATE sms_bulk_jobs SET status = 'completed', completed_at = NOW() WHERE id = ? AND status != 'cancelled'`, [jobId]);
       }
@@ -161,6 +277,16 @@ export async function processSmsBulkJob(jobId) {
     );
     if (p[0].c === 0) {
       await pool.execute(`UPDATE sms_bulk_jobs SET status = 'completed', completed_at = NOW() WHERE id = ? AND status != 'cancelled'`, [jobId]);
+    } else {
+      const [pend] = await pool.execute(
+        `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status = 'pending'`,
+        [jobId]
+      );
+      if (Number(pend[0].c) > 0) {
+        scheduleProcessSmsBulkJob(jobId);
+      } else {
+        setTimeout(() => scheduleProcessSmsBulkJob(jobId), 30_000);
+      }
     }
   } finally {
     runningJobIds.delete(jobId);

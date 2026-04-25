@@ -3383,48 +3383,95 @@ export const getUserAnalytics = async (req, res) => {
       );
     });
 
-    let summaryTotals = null;
-    if (isPaginated) {
-      let totalAssignedLeads = 0;
-      let totalCallsDone = 0;
-      let totalSms = 0;
-      for (const u of perfFilteredUsers) {
-        const uid = cohortAnalyticUserKey(u.id);
-        const stats = statsByUserId.get(u.id) || {
-          total_assigned: 0,
-          active_leads: 0,
-          total_converted: 0,
-          statusBreakdown: {},
-        };
-        const totalAssigned = numAgg(stats.total_assigned);
-        const isStudentCounselor = u.role_name === 'Student Counselor';
-        const isPro = String(u.role_name || '').trim().toUpperCase() === 'PRO';
-        const hasBucket = allottedBucketSumMap.has(uid);
-        const bucketSum = hasBucket ? numAgg(allottedBucketSumMap.get(uid)) : null;
-        const leadPart = (isStudentCounselor || isPro) && hasBucket ? bucketSum : totalAssigned;
-        totalAssignedLeads += leadPart;
-        const allottedBag = allottedByCallStatusByUser.get(uid);
-        const allottedCallsVisitsDoneDisplay = sumAllottedCohortBucketsExcludingAssigned(
-          allottedBag,
-          u.role_name
-        );
-        const comms = commMap.get(u.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
-        const callsDisplay =
-          isStudentCounselor || isPro
-            ? allottedBag && Object.keys(allottedBag).length > 0
-              ? allottedCallsVisitsDoneDisplay
-              : numAgg(comms.calls.unique)
-            : numAgg(comms.calls.unique);
-        totalCallsDone += callsDisplay;
-        totalSms += numAgg(comms.sms);
+    /** User performance report: call_back + not_answered + visited (SC); PRO: scheduled_revisit + call_back. */
+    const sumCallbacksRevisitsFromAllottedBag = (allottedBag, roleName) => {
+      if (!allottedBag || typeof allottedBag !== 'object') return 0;
+      const isPro = String(roleName || '').trim().toUpperCase() === 'PRO';
+      if (isPro) {
+        return numAgg(allottedBag['Scheduled Revisit']) + numAgg(allottedBag['Call Back']);
       }
-      summaryTotals = {
-        userCount: perfFilteredUsers.length,
-        totalAssignedLeads,
-        totalCallsDone,
-        totalSms,
-      };
+      return numAgg(allottedBag['Call Back']) + numAgg(allottedBag['Not Answered']) + numAgg(allottedBag['Visited']);
+    };
+
+    let totalUnattendedReclaims = 0;
+    if (aggregateUserIds.length) {
+      const rph2 = aggregateUserIds.map(() => '?').join(',');
+      const [uRows] = await pool.execute(
+        `SELECT COALESCE(SUM(s.cnt), 0) AS t FROM (
+          SELECT LOWER(TRIM(source_user_id)) AS uk, COUNT(DISTINCT lead_id) AS cnt
+          FROM activity_logs
+          WHERE type = 'status_change' AND source_user_id IN (${rph2})
+          ${reclaimLogWhereForBatchMetrics}
+          GROUP BY LOWER(TRIM(source_user_id))
+        ) s`,
+        [...aggregateUserIds, ...reclaimLogParamsForBatchMetrics]
+      );
+      totalUnattendedReclaims = numAgg(uRows[0]?.t);
     }
+
+    /**
+     * Report-level totals for User Performance (interested, callbacks, unattended, etc.).
+     * Must not depend on pagination: expanded-row requests use `userId=…` and skip `page`/`limit`,
+     * and the response must still include the same `summaryTotals` the UI uses in the top cards.
+     */
+    let totalAssignedLeads = 0;
+    let totalCallsDone = 0;
+    let totalSms = 0;
+    let totalInterested = 0;
+    let totalCallbacksRevisits = 0;
+    for (const u of perfFilteredUsers) {
+      const uid = cohortAnalyticUserKey(u.id);
+      const stats = statsByUserId.get(u.id) || {
+        total_assigned: 0,
+        active_leads: 0,
+        total_converted: 0,
+        statusBreakdown: {},
+      };
+      const totalAssigned = numAgg(stats.total_assigned);
+      const isStudentCounselor = u.role_name === 'Student Counselor';
+      const isPro = String(u.role_name || '').trim().toUpperCase() === 'PRO';
+      const hasBucket = allottedBucketSumMap.has(uid);
+      const bucketSum = hasBucket ? numAgg(allottedBucketSumMap.get(uid)) : null;
+      const leadPart = (isStudentCounselor || isPro) && hasBucket ? bucketSum : totalAssigned;
+      totalAssignedLeads += leadPart;
+      const allottedBag = allottedByCallStatusByUser.get(uid);
+      const allottedCallsVisitsDoneDisplay = sumAllottedCohortBucketsExcludingAssigned(
+        allottedBag,
+        u.role_name
+      );
+      const comms = commMap.get(u.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
+      const callsDisplay =
+        isStudentCounselor || isPro
+          ? allottedBag && Object.keys(allottedBag).length > 0
+            ? allottedCallsVisitsDoneDisplay
+            : numAgg(comms.calls.unique)
+          : numAgg(comms.calls.unique);
+      totalCallsDone += callsDisplay;
+      totalSms += numAgg(comms.sms);
+
+      if (isStudentCounselor) {
+        totalInterested += allottedBag
+          ? numAgg(allottedBag['Interested']) + numAgg(allottedBag['CET Applied'] ?? 0)
+          : 0;
+      } else if (isPro) {
+        totalInterested += allottedBag ? numAgg(allottedBag['Interested']) : 0;
+      } else {
+        const sb = stats.statusBreakdown || {};
+        totalInterested += numAgg(sb['Interested']) + numAgg(sb['CET Applied'] ?? 0);
+      }
+      if (isStudentCounselor || isPro) {
+        totalCallbacksRevisits += sumCallbacksRevisitsFromAllottedBag(allottedBag, u.role_name);
+      }
+    }
+    const summaryTotals = {
+      userCount: perfFilteredUsers.length,
+      totalAssignedLeads,
+      totalCallsDone,
+      totalSms,
+      totalInterested,
+      totalCallbacksRevisits,
+      totalUnattended: totalUnattendedReclaims,
+    };
 
     // Compile analytics for each user (one page when paginated)
     const userAnalytics = pageUsers.map((user) => {
@@ -3550,7 +3597,9 @@ export const getUserAnalytics = async (req, res) => {
 
     const payload = {
       users: userAnalytics,
-      ...(pagination ? { pagination, summaryTotals } : {}),
+      /** Always return report totals so Call Reports → User Performance top cards are populated even when `userId=…` disables pagination, or the client omits `page`/`limit`. */
+      summaryTotals,
+      ...(pagination ? { pagination } : {}),
     };
     if (String(bypassCache || '').toLowerCase() !== 'true') {
       if (!analyticsCache.has(cacheKey)) {

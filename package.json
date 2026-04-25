@@ -18,6 +18,8 @@
     "sync:mandal-from-staging:dry": "node src/scripts-sql/syncMandalFromStaging.js --dry-run",
     "db:copy-remote-to-local": "node src/scripts-sql/copyRemoteDbToLocal.js",
     "migrate:user-analytics-indexes": "node src/scripts-sql/addUserAnalyticsPerformanceIndexes.js",
+    "db:diagnose-status-mismatch": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js",
+    "db:diagnose-status-apply": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js --apply",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

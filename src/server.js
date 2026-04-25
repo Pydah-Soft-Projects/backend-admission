@@ -6,6 +6,7 @@ import connectSQLDB from './config-sql/database.js';
 import connectSecondaryDB from './config-sql/database-secondary.js';
 import { warmupHrmsMongo } from './config-mongo/hrms.js';
 import { initLeadReclaimer } from './services/leadReclaimer.service.js';
+import { resumeRunningSmsBulkJobsOnStartup } from './services/smsBulkJob.service.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import leadRoutes from './routes/lead.routes.js';
@@ -154,5 +155,8 @@ app.use(errorHandler);
 // Start server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  setTimeout(() => {
+    resumeRunningSmsBulkJobsOnStartup().catch((e) => console.error('[SMS bulk job] startup:', e));
+  }, 2000);
 });
 

@@ -18,6 +18,7 @@ import {
   createBulkSmsJob,
   getBulkSmsJob,
   listBulkSmsJobs,
+  resumeBulkSmsJob,
 } from '../controllers/smsBulkJob.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -44,6 +45,7 @@ router.get('/lead/:leadId/stats', getLeadCommunicationStats);
 router.post('/sms-bulk/jobs', isSuperAdmin, createBulkSmsJob);
 router.get('/sms-bulk/jobs', isSuperAdmin, listBulkSmsJobs);
 router.get('/sms-bulk/jobs/:id', isSuperAdmin, getBulkSmsJob);
+router.post('/sms-bulk/jobs/:id/resume', resumeBulkSmsJob);
 
 export default router;
 

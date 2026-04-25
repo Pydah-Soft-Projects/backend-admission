@@ -8,6 +8,40 @@ import {
   scheduleProcessSmsBulkJob,
 } from '../services/smsBulkJob.service.js';
 
+/**
+ * Re-queue the background worker (e.g. after a long hang, deploy, or 199/460 "stuck" progress).
+ * Safe to call multiple times; the processor re-loads `pending` rows and resets long-stuck `processing` rows.
+ */
+export const resumeBulkSmsJob = async (req, res) => {
+  try {
+    if (req.user.roleName === 'PRO') {
+      return errorResponse(res, 'Forbidden', 403);
+    }
+    const { id } = req.params;
+    if (!id || id.length !== 36) {
+      return errorResponse(res, 'Invalid job id', 400);
+    }
+    const pool = getPool();
+    const [jobs] = await pool.execute('SELECT id, status, created_by FROM sms_bulk_jobs WHERE id = ?', [id]);
+    if (jobs.length === 0) {
+      return errorResponse(res, 'Job not found', 404);
+    }
+    const job = jobs[0];
+    if (String(job.status) === 'failed' || String(job.status) === 'cancelled') {
+      return errorResponse(res, 'Job is not in a resumable state', 400);
+    }
+    const isOwner = String(job.created_by) === String(req.user.id || req.user._id);
+    if (!isOwner && !hasElevatedAdminPrivileges(req.user.roleName)) {
+      return errorResponse(res, 'Forbidden', 403);
+    }
+    scheduleProcessSmsBulkJob(id);
+    return successResponse(res, { requeued: true, jobId: id }, 'Bulk SMS job processor requeued', 200);
+  } catch (e) {
+    console.error('resumeBulkSmsJob', e);
+    return errorResponse(res, e.message || 'Failed to resume job', 500);
+  }
+};
+
 const VALID_SOURCES = new Set(['send_to_leads', 'user_specific_leads']);
 
 export const createBulkSmsJob = async (req, res) => {
