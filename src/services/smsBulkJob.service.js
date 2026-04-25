@@ -90,7 +90,9 @@ function normalizeReportContextForInsert(source, raw) {
   const selectedUsers = su
     .map((u) => {
       const id = u?.id != null ? String(u.id).trim() : '';
-      if (id.length !== 36) return null;
+      // Leads in this app use UUIDs (36 chars). User roster ids are often MongoDB ObjectId (24 hex) or other strings.
+      if (id.length < 1 || id.length > 200) return null;
+      if (/[\n\r\0]/.test(id)) return null;
       const name = u?.name != null ? String(u.name).trim().slice(0, 300) : '';
       return { id, name: name || id };
     })
