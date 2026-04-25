@@ -4,6 +4,7 @@ import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
 import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import mongoose from 'mongoose';
 import { connectHRMS } from '../config-mongo/hrms.js';
 import {
   analyticsCache,
@@ -11,6 +12,7 @@ import {
   MAX_USER_ANALYTICS_CACHE_ENTRIES,
   clearUserAnalyticsCache,
 } from '../utils/userAnalyticsCache.js';
+import { normalizeEmpNoKey } from './user.controller.js';
 
 const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
@@ -1772,10 +1774,54 @@ function normalizeUserRowId(id) {
   return String(id);
 }
 
-/** Non-blocking enrichment for Super Admin reports; safe to run parallel with aggregate SQL. */
+/** MySQL `hrms_id` may be CHAR(24) or BINARY(12); map keys must match `emp._id.toString()`. */
+function toMongoObjectIdString(v) {
+  if (v == null || v === '') return '';
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(v) && v.length === 12) {
+    return v.toString('hex');
+  }
+  const s = String(v).trim();
+  if (!s) return '';
+  if (!mongoose.Types.ObjectId.isValid(s)) return '';
+  try {
+    return new mongoose.Types.ObjectId(s).toString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Enrich in-memory user rows with HRMS division / department / group / designation.
+ * Uses batched `find({ _id: { $in } })` (four Mongo round trips) instead of N×findById.
+ */
 async function hydrateUserOrgFromHrms(users, pool) {
   if (!users?.length) return;
   try {
+    const userIdsForEmp = users.map((u) => u.id).filter((id) => id != null);
+    if (userIdsForEmp.length === 0) return;
+
+    const [usersWithLinks] = await pool.execute(
+      `SELECT id, emp_no, hrms_id FROM users WHERE id IN (${userIdsForEmp.map(() => '?').join(',')})`,
+      userIdsForEmp
+    );
+    const linkByUserId = new Map();
+    for (const row of usersWithLinks) {
+      linkByUserId.set(normalizeUserRowId(row.id), { emp_no: row.emp_no, hrms_id: row.hrms_id });
+    }
+
+    const empNoSet = new Set();
+    const hrmsIdSet = new Set();
+    for (const row of usersWithLinks) {
+      if (row.emp_no != null && String(row.emp_no).trim() !== '') {
+        empNoSet.add(String(row.emp_no).trim());
+      }
+      if (row.hrms_id != null) {
+        const h = toMongoObjectIdString(row.hrms_id);
+        if (h) hrmsIdSet.add(h);
+      }
+    }
+    if (empNoSet.size === 0 && hrmsIdSet.size === 0) return;
+
     const hrmsConn = await connectHRMS();
     const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
     const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
@@ -1783,60 +1829,84 @@ async function hydrateUserOrgFromHrms(users, pool) {
     const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
     const Designation = hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
 
-    const userIdsForEmp = users.map((u) => u.id).filter((id) => id != null);
-    if (userIdsForEmp.length === 0) return;
-
-    const [usersWithEmp] = await pool.execute(
-      `SELECT id, emp_no FROM users WHERE id IN (${userIdsForEmp.map(() => '?').join(',')})`,
-      userIdsForEmp
-    );
-    const empNoStrings = [
-      ...new Set(
-        usersWithEmp
-          .map((u) => u.emp_no)
-          .filter((e) => e != null && String(e).trim() !== '')
-          .map((e) => String(e).trim())
-      ),
-    ];
-    if (empNoStrings.length === 0) return;
-
-    const empNoNumbers = [
-      ...new Set(
-        empNoStrings.map((s) => Number(s)).filter((n) => Number.isFinite(n) && !Number.isNaN(n))
-      ),
-    ];
-    const empNoOr = [];
-    if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
-    if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
-    const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
-      .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
-
-    const seenEmp = new Set();
-    const hrmsEmployees = [];
-    for (const emp of hrmsEmployeesRaw || []) {
-      const k = String(emp.emp_no ?? '').trim();
-      if (!k || seenEmp.has(k)) continue;
-      seenEmp.add(k);
-      hrmsEmployees.push(emp);
+    const empByMongoId = new Map();
+    const empNoArray = [...empNoSet];
+    if (empNoArray.length > 0) {
+      const empNoNumbers = [
+        ...new Set(empNoArray.map((s) => Number(s)).filter((n) => Number.isFinite(n) && !Number.isNaN(n))),
+      ];
+      const empNoOr = [];
+      if (empNoArray.length) empNoOr.push({ emp_no: { $in: empNoArray } });
+      if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
+      const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
+        .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+      for (const emp of hrmsEmployeesRaw || []) {
+        if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+      }
     }
-    const divIds = [...new Set(hrmsEmployees.map(e => e.division_id).filter(Boolean))];
-    const deptIds = [...new Set(hrmsEmployees.map(e => e.department_id).filter(Boolean))];
-    const groupIds = [...new Set(hrmsEmployees.map(e => e.employee_group_id).filter(Boolean))];
-    const designationIds = [...new Set(hrmsEmployees.map(e => e.designation_id).filter(Boolean))];
+    if (hrmsIdSet.size > 0) {
+      const oids = [...hrmsIdSet].map((id) => new mongoose.Types.ObjectId(id));
+      const byIdRaw = await Employee.find({ _id: { $in: oids } })
+        .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+      for (const emp of byIdRaw || []) {
+        if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+      }
+    }
+
+    const hrmsEmployees = [...empByMongoId.values()];
+    if (hrmsEmployees.length === 0) return;
+
+    const divIds = [...new Set(hrmsEmployees.map((e) => e.division_id).filter(Boolean))];
+    const deptIds = [...new Set(hrmsEmployees.map((e) => e.department_id).filter(Boolean))];
+    const groupIds = [...new Set(hrmsEmployees.map((e) => e.employee_group_id).filter(Boolean))];
+    const designationIds = [...new Set(hrmsEmployees.map((e) => e.designation_id).filter(Boolean))];
 
     const [divisions, departments, groups, designations] = await Promise.all([
-      Division.find({ _id: { $in: divIds } }).select('name'),
-      Department.find({ _id: { $in: deptIds } }).select('name'),
-      Group.find({ _id: { $in: groupIds } }).select('name'),
-      Designation.find({ _id: { $in: designationIds } }).select('name'),
+      divIds.length
+        ? Division.find({ _id: { $in: divIds } })
+            .select('name')
+            .lean()
+        : Promise.resolve([]),
+      deptIds.length
+        ? Department.find({ _id: { $in: deptIds } })
+            .select('name')
+            .lean()
+        : Promise.resolve([]),
+      groupIds.length
+        ? Group.find({ _id: { $in: groupIds } })
+            .select('name')
+            .lean()
+        : Promise.resolve([]),
+      designationIds.length
+        ? Designation.find({ _id: { $in: designationIds } })
+            .select('name')
+            .lean()
+        : Promise.resolve([]),
     ]);
-    const divMap = Object.fromEntries(divisions.map((d) => [d._id.toString(), d.name]));
-    const deptMap = Object.fromEntries(departments.map((d) => [d._id.toString(), d.name]));
-    const groupMap = Object.fromEntries(groups.map((g) => [g._id.toString(), g.name]));
-    const designationMap = Object.fromEntries(designations.map((d) => [d._id.toString(), d.name]));
+
+    const nameMap = (rows) => {
+      const m = new Map();
+      (rows || []).forEach((d) => {
+        if (d?._id) m.set(toMongoObjectIdString(d._id) || d._id.toString(), d.name);
+      });
+      return m;
+    };
+    const divMap = nameMap(divisions);
+    const deptMap = nameMap(departments);
+    const groupMap = nameMap(groups);
+    const desigMap = nameMap(designations);
+
+    const getName = (map, ref) => {
+      if (ref == null) return null;
+      const k = toMongoObjectIdString(ref);
+      if (!k) return null;
+      const n = map.get(k);
+      if (n != null && String(n).trim() !== '') return String(n).trim();
+      return null;
+    };
 
     const extractDesignationName = (emp) => {
-      const byId = emp.designation_id ? designationMap[emp.designation_id.toString()] : null;
+      const byId = getName(desigMap, emp.designation_id);
       if (byId) return byId;
       const dynamicFields = emp.dynamicFields || {};
       if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
@@ -1854,32 +1924,48 @@ async function hydrateUserOrgFromHrms(users, pool) {
       return null;
     };
 
-    const hrmsByEmpNo = new Map(
-      hrmsEmployees.map((emp) => {
-        const key = String(emp.emp_no ?? '').trim();
-        return [
-          key,
-          {
-            division: emp.division_id ? divMap[emp.division_id.toString()] || '-' : '-',
-            department: emp.department_id ? deptMap[emp.department_id.toString()] || '-' : '-',
-            group: emp.employee_group_id ? groupMap[emp.employee_group_id.toString()] || '-' : '-',
-            designation: extractDesignationName(emp),
-          },
-        ];
-      })
-    );
+    const buildPayload = (emp) => ({
+      division: getName(divMap, emp.division_id) || '-',
+      department: getName(deptMap, emp.department_id) || '-',
+      group: getName(groupMap, emp.employee_group_id) || '-',
+      designation: extractDesignationName(emp),
+    });
 
-    const empByUserId = new Map(
-      usersWithEmp.map((u) => [normalizeUserRowId(u.id), String(u.emp_no || '').trim()])
-    );
+    /** Look up by emp_no (raw and normalized) and by HRMS employee Mongo _id (users.hrms_id). */
+    const hrmsLookup = new Map();
+    const byHrId = new Map();
+    for (const emp of hrmsEmployees) {
+      const p = buildPayload(emp);
+      if (emp._id) {
+        byHrId.set(emp._id.toString(), p);
+      }
+      const rawKey = String(emp.emp_no ?? '').trim();
+      if (rawKey) {
+        hrmsLookup.set(rawKey, p);
+        const n = normalizeEmpNoKey(emp.emp_no);
+        if (n && n !== rawKey) hrmsLookup.set(n, p);
+      }
+    }
+
     users.forEach((u) => {
-      const empNo = empByUserId.get(normalizeUserRowId(u.id));
-      const hrms = empNo ? hrmsByEmpNo.get(empNo) : null;
-      if (hrms) {
-        u.division = hrms.division;
-        u.department = hrms.department;
-        u.group = hrms.group;
-        u.designation = hrms.designation || u.designation || null;
+      const link = linkByUserId.get(normalizeUserRowId(u.id));
+      if (!link) return;
+      let p = null;
+      const rawEmp = link.emp_no != null ? String(link.emp_no).trim() : '';
+      if (rawEmp) {
+        p = hrmsLookup.get(rawEmp) || hrmsLookup.get(normalizeEmpNoKey(link.emp_no));
+      }
+      if (!p && link.hrms_id) {
+        const hid = toMongoObjectIdString(link.hrms_id);
+        if (hid) {
+          p = byHrId.get(hid) || null;
+        }
+      }
+      if (p) {
+        u.division = p.division;
+        u.department = p.department;
+        u.group = p.group;
+        u.designation = p.designation != null && String(p.designation).trim() !== '' ? p.designation : u.designation || null;
       }
     });
   } catch (hrmsHydrationError) {
@@ -1894,15 +1980,47 @@ function buildStudentGroupLeadClause(tableAlias, studentGroupRaw) {
   return { clause: ` AND ${tableAlias}.student_group = ?`, params: [sg] };
 }
 
+/** Optional `leads` scope for communications roster: student group and/or exact district. */
+function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw) {
+  const { clause: sgClause, params: sgParams } = buildStudentGroupLeadClause(tableAlias, studentGroupRaw);
+  const d = districtRaw != null ? String(districtRaw).trim() : '';
+  if (!d) return { clause: sgClause, params: sgParams };
+  return {
+    clause: `${sgClause} AND ${tableAlias}.district = ?`,
+    params: [...sgParams, d],
+  };
+}
+
+/** User ids that have at least one current portfolio lead matching optional student group + district. */
+async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, districtRaw) {
+  const d = districtRaw != null ? String(districtRaw).trim() : '';
+  if (!d) return new Set(userIds);
+  if (!userIds.length) return new Set();
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
+  const ph = userIds.map(() => '?').join(',');
+  const [rows] = await pool.execute(
+    `SELECT DISTINCT x.uid AS u_id FROM (
+       SELECT l.assigned_to AS uid FROM leads l
+       WHERE l.assigned_to IN (${ph})${clause}
+       UNION ALL
+       SELECT l.assigned_to_pro AS uid FROM leads l
+       WHERE l.assigned_to_pro IN (${ph}) AND l.assigned_to_pro IS NOT NULL${clause}
+     ) x
+     WHERE x.uid IS NOT NULL`,
+    [...userIds, ...scopeParams, ...userIds, ...scopeParams]
+  );
+  return new Set((rows || []).map((r) => r.u_id).filter((id) => id != null));
+}
+
 /**
- * Distinct **current portfolio** leads per user (`assigned_to` / `assigned_to_pro`), optional `studentGroup`.
+ * Distinct **current portfolio** leads per user (`assigned_to` / `assigned_to_pro`), optional `studentGroup` / `district`.
  * Aligns with Super Admin dashboard “total assigned” (no lead_status window).
  */
-async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, studentGroupRaw) {
+async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, studentGroupRaw, districtRaw) {
   const map = new Map();
   if (!userIds.length) return map;
   const ph = userIds.map(() => '?').join(',');
-  const { clause, params: sgParams } = buildStudentGroupLeadClause('l', studentGroupRaw);
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
   const [rows] = await pool.execute(
     `SELECT user_id, COUNT(DISTINCT lead_id) AS cnt FROM (
        SELECT l.assigned_to AS user_id, l.id AS lead_id
@@ -1915,7 +2033,7 @@ async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, stude
          AND l.assigned_to_pro IS NOT NULL${clause}
      ) x
      GROUP BY user_id`,
-    [...userIds, ...sgParams, ...userIds, ...sgParams]
+    [...userIds, ...scopeParams, ...userIds, ...scopeParams]
   );
   (rows || []).forEach((r) => {
     const uid = r.user_id;
@@ -1925,12 +2043,12 @@ async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, stude
   return map;
 }
 
-/** Distinct non-empty `student_group` values on current portfolio leads per user (same optional SG filter as counts). */
-async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGroupRaw) {
+/** Distinct non-empty `student_group` values on current portfolio leads per user (same scope as counts). */
+async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGroupRaw, districtRaw) {
   const map = new Map();
   if (!userIds.length) return map;
   const ph = userIds.map(() => '?').join(',');
-  const { clause, params: sgParams } = buildStudentGroupLeadClause('l', studentGroupRaw);
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
   const [rows] = await pool.execute(
     `SELECT x.user_id, GROUP_CONCAT(DISTINCT x.sg ORDER BY x.sg SEPARATOR ', ') AS cats
      FROM (
@@ -1944,7 +2062,7 @@ async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGrou
      ) x
      WHERE x.sg IS NOT NULL AND x.sg <> ''
      GROUP BY x.user_id`,
-    [...userIds, ...sgParams, ...userIds, ...sgParams]
+    [...userIds, ...scopeParams, ...userIds, ...scopeParams]
   );
   (rows || []).forEach((r) => {
     const uid = r.user_id;
@@ -1991,6 +2109,8 @@ export const getUserAnalytics = async (req, res) => {
       currentPortfolioOnly,
       /** Communications roster: filter portfolio counts / student-group column by `leads.student_group`. */
       studentGroup: studentGroupQuery,
+      /** Communications roster: only users with ≥1 assigned lead in this `leads.district` (exact match). */
+      district: rosterDistrictQuery,
     } = req.query;
 
     const isRosterOnly =
@@ -2043,6 +2163,8 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly: isRosterOnly,
       currentPortfolioOnly: isCurrentPortfolioOnly,
       studentGroup: studentGroupQuery != null && String(studentGroupQuery).trim() !== '' ? String(studentGroupQuery).trim() : null,
+      rosterDistrict:
+        rosterDistrictQuery != null && String(rosterDistrictQuery).trim() !== '' ? String(rosterDistrictQuery).trim() : null,
     });
 
     if (!isRosterOnly && String(bypassCache || '').toLowerCase() !== 'true') {
@@ -2354,24 +2476,47 @@ export const getUserAnalytics = async (req, res) => {
 
     /** Communications → user-specific leads: names/org from HRMS + portfolio lead counts (no batch1/batch2 analytics). */
     if (isRosterOnly) {
-      await hydrateUserOrgFromHrms(users, pool);
-      const sorted = [...users].sort((a, b) =>
-        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
-      );
-      const rosterIds = sorted.map((u) => u.id).filter(Boolean);
       const studentGroupRoster =
         studentGroupQuery != null && String(studentGroupQuery).trim() !== ''
           ? String(studentGroupQuery).trim()
           : null;
-      const countsByUserId = await fetchActiveLeadCountsForCommunicationsRoster(
-        pool,
-        rosterIds,
-        studentGroupRoster
-      );
-      const studentGroupsByUserId = await fetchCommunicationsRosterStudentGroups(
-        pool,
-        rosterIds,
-        studentGroupRoster
+      const rosterDistrictTrim =
+        rosterDistrictQuery != null && String(rosterDistrictQuery).trim() !== ''
+          ? String(rosterDistrictQuery).trim()
+          : null;
+
+      let rosterUsers = users;
+      if (rosterDistrictTrim) {
+        const allowIds = await fetchUserIdsWithRosterScopeMatch(
+          pool,
+          users.map((u) => u.id).filter((id) => id != null),
+          studentGroupRoster,
+          rosterDistrictTrim
+        );
+        rosterUsers = users.filter((u) => allowIds.has(u.id));
+      }
+      if (!rosterUsers.length) {
+        return successResponse(res, { users: [] }, 'User roster retrieved successfully', 200);
+      }
+
+      const rosterIds = rosterUsers.map((u) => u.id).filter(Boolean);
+      const [, countsByUserId, studentGroupsByUserId] = await Promise.all([
+        hydrateUserOrgFromHrms(rosterUsers, pool),
+        fetchActiveLeadCountsForCommunicationsRoster(
+          pool,
+          rosterIds,
+          studentGroupRoster,
+          rosterDistrictTrim
+        ),
+        fetchCommunicationsRosterStudentGroups(
+          pool,
+          rosterIds,
+          studentGroupRoster,
+          rosterDistrictTrim
+        ),
+      ]);
+      const sorted = [...rosterUsers].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
       let userRows = sorted.map((u) => ({
         id: u.id,
@@ -2388,7 +2533,7 @@ export const getUserAnalytics = async (req, res) => {
         totalAssigned: countsByUserId.get(u.id) ?? 0,
         portfolioStudentGroups: studentGroupsByUserId.get(u.id) || null,
       }));
-      if (studentGroupRoster) {
+      if (studentGroupRoster || rosterDistrictTrim) {
         userRows = userRows.filter((row) => (row.totalAssigned || 0) > 0);
       }
       return successResponse(res, { users: userRows }, 'User roster retrieved successfully', 200);

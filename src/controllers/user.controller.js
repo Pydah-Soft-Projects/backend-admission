@@ -10,7 +10,7 @@ const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'Student Counselor', 'Dat
 /**
  * Align CRM emp_no with HRMS emp_no when HRMS uses leading zeros, strings, or numeric types differently.
  */
-const normalizeEmpNoKey = (value) => {
+export const normalizeEmpNoKey = (value) => {
   const s = String(value ?? '').trim();
   if (!s) return '';
   if (/^\d+$/.test(s)) return String(parseInt(s, 10));
@@ -21,7 +21,7 @@ const normalizeEmpNoKey = (value) => {
  * Same resolution as GET /users/hrms/:empNo and /users/hrms/id/:mongoId — findById on division / department / group.
  * Used for list hydration so table org columns match the view dialog exactly.
  */
-const resolveHrmsOrgNamesFindById = async (employee, Division, Department, Group) => {
+export const resolveHrmsOrgNamesFindById = async (employee, Division, Department, Group) => {
   const [divDoc, deptDoc, groupDoc] = await Promise.all([
     employee.division_id ? Division.findById(employee.division_id) : Promise.resolve(null),
     employee.department_id ? Department.findById(employee.department_id) : Promise.resolve(null),
