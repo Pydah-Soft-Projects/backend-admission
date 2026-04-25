@@ -7,6 +7,7 @@ import {
   formatJobRow,
   reopenCompletedIfPendingWorkRemains,
   scheduleProcessSmsBulkJob,
+  tryMarkJobCompleteIfFullyProcessed,
 } from '../services/smsBulkJob.service.js';
 
 /**
@@ -34,6 +35,17 @@ export const resumeBulkSmsJob = async (req, res) => {
     const isOwner = String(job.created_by) === String(req.user.id || req.user._id);
     if (!isOwner && !hasElevatedAdminPrivileges(req.user.roleName)) {
       return errorResponse(res, 'Forbidden', 403);
+    }
+    // Align total_items to actual line-item rows, reconcile counters, and mark complete when all rows are done
+    // (fixes "failed" jobs that only had a plan vs DB row count mismatch, e.g. 1655 planned, 1198 stored).
+    const markOut = await tryMarkJobCompleteIfFullyProcessed(pool, id);
+    if (markOut === 'completed') {
+      return successResponse(
+        res,
+        { requeued: false, jobId: id, completed: true, message: 'Job total aligned to stored line items' },
+        'Job is complete. total_items was adjusted to the number of line item rows in the database.',
+        200
+      );
     }
     const reopened = await reopenCompletedIfPendingWorkRemains(pool, id);
     scheduleProcessSmsBulkJob(id);

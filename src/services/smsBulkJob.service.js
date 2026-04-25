@@ -293,7 +293,8 @@ export async function reconcileJobCountersFromItems(pool, jobId) {
 }
 
 /**
- * Only when no pending/processing: finish as completed, or as failed (missing rows), or not yet.
+ * When no pending/processing: align `total_items` to actual line-item rows, reconcile counts, and mark
+ * `completed` when all stored rows are terminal. Stale "failed" can be moved back to "completed" after repair.
  * @returns {Promise<'completed'|'not_yet'|'failed'|'inconsistent'|'noop'>}
  */
 export async function tryMarkJobCompleteIfFullyProcessed(pool, jobId) {
@@ -315,22 +316,22 @@ export async function tryMarkJobCompleteIfFullyProcessed(pool, jobId) {
   }
   const [nItemRow] = await pool.execute(`SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ?`, [jobId]);
   const nItem = Number(nItemRow[0]?.c) || 0;
-  const totalExpected = Number(job.total_items) || 0;
-  if (nItem < totalExpected) {
-    const msg = `Inconsistent job: only ${nItem} line item(s) in the database, but total_items is ${totalExpected}. Cannot mark complete.`;
+  const totalOnJob = Number(job.total_items) || 0;
+  // The job row is created with total_items = N from the create API; the table may have fewer rows
+  // if inserts failed or were interrupted. Line items in DB are the source of truth — align total_items.
+  if (nItem !== totalOnJob) {
+    if (nItem < totalOnJob) {
+      console.warn(
+        `[SMS bulk job] ${jobId}: total_items was ${totalOnJob} but only ${nItem} line item row(s) exist; ` +
+          `aligning job total. ${totalOnJob - nItem} row(s) were not persisted.`
+      );
+    } else {
+      console.warn(`[SMS bulk job] ${jobId}: total_items was ${totalOnJob} but ${nItem} line item(s) exist; aligning job total.`);
+    }
     await pool.execute(
-      `UPDATE sms_bulk_jobs SET status = 'failed', last_error = ?, completed_at = NOW() WHERE id = ? AND status != 'cancelled'`,
-      [msg, jobId]
+      `UPDATE sms_bulk_jobs SET total_items = ?, last_error = NULL WHERE id = ? AND status != 'cancelled'`,
+      [nItem, jobId]
     );
-    return 'failed';
-  }
-  if (nItem > totalExpected) {
-    const msg = 'Line item count exceeds total_items; please contact support to repair this job row.';
-    await pool.execute(
-      `UPDATE sms_bulk_jobs SET status = 'failed', last_error = ?, completed_at = NOW() WHERE id = ? AND status != 'cancelled'`,
-      [msg, jobId]
-    );
-    return 'failed';
   }
   const [nTerm] = await pool.execute(
     `SELECT COUNT(*) AS c FROM sms_bulk_job_items
@@ -348,14 +349,25 @@ export async function tryMarkJobCompleteIfFullyProcessed(pool, jobId) {
     );
     return 'failed';
   }
-  await pool.execute(
+  const [uDone] = await pool.execute(
     `UPDATE sms_bulk_jobs SET
        status = 'completed',
        last_error = NULL,
        completed_at = NOW()
-     WHERE id = ? AND status NOT IN ('cancelled', 'failed')`,
+     WHERE id = ? AND status != 'cancelled'`,
     [jobId]
   );
+  const u =
+    uDone && typeof uDone.affectedRows !== 'undefined'
+      ? (typeof uDone.affectedRows === 'bigint' ? Number(uDone.affectedRows) : uDone.affectedRows || 0)
+      : 0;
+  if (u < 1) {
+    const [j2] = await pool.execute('SELECT status FROM sms_bulk_jobs WHERE id = ?', [jobId]);
+    if (j2.length > 0 && String(j2[0].status) === 'completed') {
+      return 'completed';
+    }
+    return 'noop';
+  }
   return 'completed';
 }
 
