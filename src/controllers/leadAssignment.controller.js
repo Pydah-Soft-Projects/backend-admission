@@ -12,7 +12,7 @@ import {
   MAX_USER_ANALYTICS_CACHE_ENTRIES,
   clearUserAnalyticsCache,
 } from '../utils/userAnalyticsCache.js';
-import { normalizeEmpNoKey } from './user.controller.js';
+import { normalizeEmpNoKey, resolveHrmsOrgNamesFindById } from './user.controller.js';
 
 const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
@@ -1790,9 +1790,27 @@ function toMongoObjectIdString(v) {
   }
 }
 
+/** Deduplicate HRMS ref fields for `$in` (Set(ObjectId) is unreliable) and support `{ _id }` shapes. */
+function collectUniqueObjectIdHexStrings(refs) {
+  const seen = new Set();
+  const out = [];
+  for (const r of refs) {
+    if (r == null) continue;
+    let s = '';
+    if (typeof r === 'object' && r && r._id) s = toMongoObjectIdString(r._id);
+    if (!s) s = toMongoObjectIdString(r);
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 /**
  * Enrich in-memory user rows with HRMS division / department / group / designation.
- * Uses batched `find({ _id: { $in } })` (four Mongo round trips) instead of N×findById.
+ * Batched `find` first, then per-employee `resolveHrmsOrgNamesFindById` only when map lookup misses
+ * (same as User Management when $in key shapes differ).
  */
 async function hydrateUserOrgFromHrms(users, pool) {
   if (!users?.length) return;
@@ -1856,53 +1874,80 @@ async function hydrateUserOrgFromHrms(users, pool) {
     const hrmsEmployees = [...empByMongoId.values()];
     if (hrmsEmployees.length === 0) return;
 
-    const divIds = [...new Set(hrmsEmployees.map((e) => e.division_id).filter(Boolean))];
-    const deptIds = [...new Set(hrmsEmployees.map((e) => e.department_id).filter(Boolean))];
-    const groupIds = [...new Set(hrmsEmployees.map((e) => e.employee_group_id).filter(Boolean))];
-    const designationIds = [...new Set(hrmsEmployees.map((e) => e.designation_id).filter(Boolean))];
+    const divIdHexes = collectUniqueObjectIdHexStrings(hrmsEmployees.map((e) => e.division_id));
+    const deptIdHexes = collectUniqueObjectIdHexStrings(hrmsEmployees.map((e) => e.department_id));
+    const groupIdHexes = collectUniqueObjectIdHexStrings(hrmsEmployees.map((e) => e.employee_group_id));
+    const desigIdHexes = collectUniqueObjectIdHexStrings(hrmsEmployees.map((e) => e.designation_id));
+    const objectIdArray = (hexes) => hexes.map((h) => new mongoose.Types.ObjectId(h));
 
     const [divisions, departments, groups, designations] = await Promise.all([
-      divIds.length
-        ? Division.find({ _id: { $in: divIds } })
+      divIdHexes.length
+        ? Division.find({ _id: { $in: objectIdArray(divIdHexes) } })
             .select('name')
             .lean()
         : Promise.resolve([]),
-      deptIds.length
-        ? Department.find({ _id: { $in: deptIds } })
+      deptIdHexes.length
+        ? Department.find({ _id: { $in: objectIdArray(deptIdHexes) } })
             .select('name')
             .lean()
         : Promise.resolve([]),
-      groupIds.length
-        ? Group.find({ _id: { $in: groupIds } })
+      groupIdHexes.length
+        ? Group.find({ _id: { $in: objectIdArray(groupIdHexes) } })
             .select('name')
             .lean()
         : Promise.resolve([]),
-      designationIds.length
-        ? Designation.find({ _id: { $in: designationIds } })
+      desigIdHexes.length
+        ? Designation.find({ _id: { $in: objectIdArray(desigIdHexes) } })
             .select('name')
             .lean()
         : Promise.resolve([]),
     ]);
 
-    const nameMap = (rows) => {
+    const buildNameMap = (rows) => {
       const m = new Map();
       (rows || []).forEach((d) => {
-        if (d?._id) m.set(toMongoObjectIdString(d._id) || d._id.toString(), d.name);
+        if (!d?._id) return;
+        const name = d.name != null && String(d.name).trim() !== '' ? String(d.name).trim() : null;
+        if (name == null) return;
+        const k1 = d._id.toString();
+        m.set(k1, name);
+        const k2 = toMongoObjectIdString(d._id);
+        if (k2 && k2 !== k1) m.set(k2, name);
       });
       return m;
     };
-    const divMap = nameMap(divisions);
-    const deptMap = nameMap(departments);
-    const groupMap = nameMap(groups);
-    const desigMap = nameMap(designations);
+    const divMap = buildNameMap(divisions);
+    const deptMap = buildNameMap(departments);
+    const groupMap = buildNameMap(groups);
+    const desigMap = buildNameMap(designations);
 
     const getName = (map, ref) => {
       if (ref == null) return null;
-      const k = toMongoObjectIdString(ref);
-      if (!k) return null;
-      const n = map.get(k);
-      if (n != null && String(n).trim() !== '') return String(n).trim();
+      if (typeof ref === 'object' && ref && ref._id) {
+        const a = toMongoObjectIdString(ref._id);
+        if (a) {
+          const n1 = map.get(a);
+          if (n1 != null && String(n1).trim() !== '') return String(n1).trim();
+        }
+        const b = String(ref._id);
+        if (b) {
+          const n2 = map.get(b);
+          if (n2 != null && String(n2).trim() !== '') return String(n2).trim();
+        }
+      }
+      const c = toMongoObjectIdString(ref);
+      if (c) {
+        const n3 = map.get(c);
+        if (n3 != null && String(n3).trim() !== '') return String(n3).trim();
+      }
       return null;
+    };
+
+    const orgLookupMiss = (emp) => {
+      if (emp.division_id && getName(divMap, emp.division_id) == null) return true;
+      if (emp.department_id && getName(deptMap, emp.department_id) == null) return true;
+      if (emp.employee_group_id && getName(groupMap, emp.employee_group_id) == null) return true;
+      return false;
     };
 
     const extractDesignationName = (emp) => {
@@ -1931,11 +1976,57 @@ async function hydrateUserOrgFromHrms(users, pool) {
       designation: extractDesignationName(emp),
     });
 
+    const needsOrgPerDoc = hrmsEmployees.filter((emp) => orgLookupMiss(emp));
+    const ORG_FALLBACK_CONC = 10;
+    const byEmpId = new Map();
+    for (const emp of hrmsEmployees) {
+      if (emp?._id) {
+        byEmpId.set(emp._id.toString(), buildPayload(emp));
+      }
+    }
+    for (let i = 0; i < needsOrgPerDoc.length; i += ORG_FALLBACK_CONC) {
+      const batch = needsOrgPerDoc.slice(i, i + ORG_FALLBACK_CONC);
+      // eslint-disable-next-line no-await-in-loop
+      const resolved = await Promise.all(
+        batch.map((emp) => resolveHrmsOrgNamesFindById(emp, Division, Department, Group))
+      );
+      batch.forEach((emp, j) => {
+        if (!emp?._id) return;
+        const cur = byEmpId.get(emp._id.toString());
+        if (!cur) return;
+        const o = resolved[j] || { division: '-', department: '-', group: '-' };
+        if (emp.division_id && getName(divMap, emp.division_id) == null) cur.division = o.division;
+        if (emp.department_id && getName(deptMap, emp.department_id) == null) cur.department = o.department;
+        if (emp.employee_group_id && getName(groupMap, emp.employee_group_id) == null) cur.group = o.group;
+      });
+    }
+
+    const needDes = hrmsEmployees.filter((emp) => {
+      if (!emp?._id || !emp.designation_id) return false;
+      const p = byEmpId.get(emp._id.toString());
+      if (!p || p.designation) return false;
+      if (getName(desigMap, emp.designation_id) != null) return false;
+      return true;
+    });
+    for (let i = 0; i < needDes.length; i += ORG_FALLBACK_CONC) {
+      const batch = needDes.slice(i, i + ORG_FALLBACK_CONC);
+      // eslint-disable-next-line no-await-in-loop
+      const desDocs = await Promise.all(
+        batch.map((e) => Designation.findById(e.designation_id).select('name').lean())
+      );
+      batch.forEach((e, j) => {
+        const cur = byEmpId.get(e._id.toString());
+        if (!cur) return;
+        const n = desDocs[j]?.name;
+        if (n != null && String(n).trim() !== '') cur.designation = String(n).trim();
+      });
+    }
+
     /** Look up by emp_no (raw and normalized) and by HRMS employee Mongo _id (users.hrms_id). */
     const hrmsLookup = new Map();
     const byHrId = new Map();
     for (const emp of hrmsEmployees) {
-      const p = buildPayload(emp);
+      const p = (emp?._id && byEmpId.get(emp._id.toString())) || buildPayload(emp);
       if (emp._id) {
         byHrId.set(emp._id.toString(), p);
       }
