@@ -675,11 +675,23 @@ CREATE TABLE IF NOT EXISTS communications (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
+-- 18a. MESSAGE TEMPLATE GROUPS (optional folder-style grouping for admin UI)
+-- ============================================
+CREATE TABLE IF NOT EXISTS message_template_groups (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_message_template_groups_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
 -- 18. MESSAGE TEMPLATES TABLE
 -- ============================================
 CREATE TABLE IF NOT EXISTS message_templates (
     id CHAR(36) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
+    template_group_id CHAR(36) NULL,
     dlt_template_id VARCHAR(255) NOT NULL,
     language VARCHAR(10) NOT NULL DEFAULT 'en',
     content TEXT NOT NULL,
@@ -694,9 +706,11 @@ CREATE TABLE IF NOT EXISTS message_templates (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (template_group_id) REFERENCES message_template_groups(id) ON DELETE SET NULL,
     INDEX idx_message_templates_dlt_template_id (dlt_template_id),
     INDEX idx_message_templates_language_is_active (language, is_active),
-    INDEX idx_message_templates_name_language (name, language)
+    INDEX idx_message_templates_name_language (name, language),
+    INDEX idx_message_templates_template_group_id (template_group_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================

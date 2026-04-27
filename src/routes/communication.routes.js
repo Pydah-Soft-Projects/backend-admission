@@ -14,6 +14,10 @@ import {
   updateTemplate,
   deleteTemplate,
   hardDeleteTemplate,
+  getTemplateGroups,
+  createTemplateGroup,
+  updateTemplateGroup,
+  deleteTemplateGroup,
 } from '../controllers/template.controller.js';
 import {
   createBulkSmsJob,
@@ -28,6 +32,10 @@ const router = express.Router();
 router.use(protect);
 
 // Template management
+router.get('/templates/groups', isSuperAdmin, getTemplateGroups);
+router.post('/templates/groups', isSuperAdmin, createTemplateGroup);
+router.put('/templates/groups/:id', isSuperAdmin, updateTemplateGroup);
+router.delete('/templates/groups/:id', isSuperAdmin, deleteTemplateGroup);
 router.get('/templates/active', getActiveTemplates);
 router.get('/templates', isSuperAdmin, getTemplates);
 router.post('/templates', isSuperAdmin, createTemplate);

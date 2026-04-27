@@ -46,6 +46,8 @@ const formatTemplate = (templateData) => {
     id: templateData.id,
     _id: templateData.id, // Keep _id for backward compatibility
     name: templateData.name,
+    templateGroupId: templateData.template_group_id || null,
+    templateGroupName: templateData.template_group_name || null,
     dltTemplateId: templateData.dlt_template_id,
     language: templateData.language,
     content: templateData.content,
@@ -63,32 +65,169 @@ const formatTemplate = (templateData) => {
   };
 };
 
+const assertTemplateGroupExists = async (pool, groupId) => {
+  if (!groupId || String(groupId).trim() === '') return null;
+  const id = String(groupId).trim();
+  const [rows] = await pool.execute('SELECT id FROM message_template_groups WHERE id = ?', [id]);
+  if (rows.length === 0) {
+    throw new Error('Template group not found');
+  }
+  return id;
+};
+
+export const getTemplateGroups = async (req, res) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.execute(
+      'SELECT id, name, created_at, updated_at FROM message_template_groups ORDER BY name ASC'
+    );
+    const list = (rows || []).map((r) => ({
+      id: r.id,
+      name: r.name,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }));
+    return successResponse(res, list, 'Template groups retrieved successfully');
+  } catch (error) {
+    console.error('Error fetching template groups:', error);
+    return errorResponse(res, error.message || 'Failed to fetch template groups', 500);
+  }
+};
+
+export const createTemplateGroup = async (req, res) => {
+  try {
+    const { name } = req.body;
+    const trimmed = name != null ? String(name).trim() : '';
+    if (!trimmed) {
+      return errorResponse(res, 'Group name is required', 400);
+    }
+    const pool = getPool();
+    const groupId = uuidv4();
+    try {
+      await pool.execute(
+        'INSERT INTO message_template_groups (id, name, created_at, updated_at) VALUES (?, ?, NOW(), NOW())',
+        [groupId, trimmed]
+      );
+    } catch (e) {
+      if (e && (e.code === 'ER_DUP_ENTRY' || String(e.message || '').includes('Duplicate'))) {
+        return errorResponse(res, 'A group with this name already exists', 409);
+      }
+      throw e;
+    }
+    const [created] = await pool.execute(
+      'SELECT id, name, created_at, updated_at FROM message_template_groups WHERE id = ?',
+      [groupId]
+    );
+    const r = created[0];
+    return successResponse(
+      res,
+      { id: r.id, name: r.name, createdAt: r.created_at, updatedAt: r.updated_at },
+      'Template group created successfully',
+      201
+    );
+  } catch (error) {
+    console.error('Error creating template group:', error);
+    return errorResponse(res, error.message || 'Failed to create template group', 500);
+  }
+};
+
+export const updateTemplateGroup = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const groupId = id != null ? String(id).trim() : '';
+    if (!groupId) {
+      return errorResponse(res, 'Group id is required', 400);
+    }
+    const { name } = req.body;
+    const trimmed = name != null ? String(name).trim() : '';
+    if (!trimmed) {
+      return errorResponse(res, 'Group name is required', 400);
+    }
+    const pool = getPool();
+    const [exists] = await pool.execute('SELECT id FROM message_template_groups WHERE id = ?', [groupId]);
+    if (!exists.length) {
+      return errorResponse(res, 'Template group not found', 404);
+    }
+    try {
+      await pool.execute(
+        'UPDATE message_template_groups SET name = ?, updated_at = NOW() WHERE id = ?',
+        [trimmed, groupId]
+      );
+    } catch (e) {
+      if (e && (e.code === 'ER_DUP_ENTRY' || String(e.message || '').includes('Duplicate'))) {
+        return errorResponse(res, 'A group with this name already exists', 409);
+      }
+      throw e;
+    }
+    const [updated] = await pool.execute(
+      'SELECT id, name, created_at, updated_at FROM message_template_groups WHERE id = ?',
+      [groupId]
+    );
+    const r = updated[0];
+    return successResponse(
+      res,
+      { id: r.id, name: r.name, createdAt: r.created_at, updatedAt: r.updated_at },
+      'Template group updated successfully'
+    );
+  } catch (error) {
+    console.error('Error updating template group:', error);
+    return errorResponse(res, error.message || 'Failed to update template group', 500);
+  }
+};
+
+export const deleteTemplateGroup = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const groupId = id != null ? String(id).trim() : '';
+    if (!groupId) {
+      return errorResponse(res, 'Group id is required', 400);
+    }
+    const pool = getPool();
+    const [result] = await pool.execute('DELETE FROM message_template_groups WHERE id = ?', [groupId]);
+    if (!result.affectedRows) {
+      return errorResponse(res, 'Template group not found', 404);
+    }
+    return successResponse(res, { id: groupId }, 'Template group deleted successfully');
+  } catch (error) {
+    console.error('Error deleting template group:', error);
+    return errorResponse(res, error.message || 'Failed to delete template group', 500);
+  }
+};
+
 export const getTemplates = async (req, res) => {
   try {
-    const { language, isActive, search } = req.query;
+    const { language, isActive, search, templateGroupId } = req.query;
     const pool = getPool();
 
     const conditions = [];
     const params = [];
 
     if (language) {
-      conditions.push('language = ?');
+      conditions.push('t.language = ?');
       params.push(language.toLowerCase());
     }
     if (isActive !== undefined) {
-      conditions.push('is_active = ?');
+      conditions.push('t.is_active = ?');
       params.push(isActive === 'true');
     }
     if (search) {
       const searchTerm = search.trim();
-      conditions.push('(name LIKE ? OR dlt_template_id LIKE ?)');
+      conditions.push('(t.name LIKE ? OR t.dlt_template_id LIKE ?)');
       params.push(`%${searchTerm}%`, `%${searchTerm}%`);
+    }
+    if (templateGroupId && String(templateGroupId).trim() !== '') {
+      conditions.push('t.template_group_id = ?');
+      params.push(String(templateGroupId).trim());
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const [templates] = await pool.execute(
-      `SELECT * FROM message_templates ${whereClause} ORDER BY is_active DESC, updated_at DESC`,
+      `SELECT t.*, g.name AS template_group_name
+       FROM message_templates t
+       LEFT JOIN message_template_groups g ON t.template_group_id = g.id
+       ${whereClause}
+       ORDER BY t.is_active DESC, t.updated_at DESC`,
       params
     );
 
@@ -106,18 +245,22 @@ export const getActiveTemplates = async (req, res) => {
     const { language } = req.query;
     const pool = getPool();
 
-    const conditions = ['is_active = ?'];
+    const conditions = ['t.is_active = ?'];
     const params = [true];
 
     if (language) {
-      conditions.push('language = ?');
+      conditions.push('t.language = ?');
       params.push(language.toLowerCase());
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
     const [templates] = await pool.execute(
-      `SELECT * FROM message_templates ${whereClause} ORDER BY name ASC`,
+      `SELECT t.*, g.name AS template_group_name
+       FROM message_templates t
+       LEFT JOIN message_template_groups g ON t.template_group_id = g.id
+       ${whereClause}
+       ORDER BY t.name ASC`,
       params
     );
 
@@ -140,6 +283,7 @@ export const createTemplate = async (req, res) => {
       description,
       isUnicode,
       variables,
+      templateGroupId,
     } = req.body;
 
     if (!name?.trim() || !dltTemplateId?.trim() || !content?.trim()) {
@@ -152,14 +296,22 @@ export const createTemplate = async (req, res) => {
     const templateId = uuidv4();
     const userId = req.user?.id || req.user?._id;
 
+    let groupIdResolved = null;
+    try {
+      groupIdResolved = await assertTemplateGroupExists(pool, templateGroupId);
+    } catch (e) {
+      return errorResponse(res, e.message || 'Invalid template group', 400);
+    }
+
     await pool.execute(
       `INSERT INTO message_templates (
-        id, name, dlt_template_id, language, content, description, is_unicode,
+        id, name, template_group_id, dlt_template_id, language, content, description, is_unicode,
         variable_count, variables, is_active, created_by, updated_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         templateId,
         name.trim(),
+        groupIdResolved,
         dltTemplateId.trim(),
         language.trim().toLowerCase(),
         content.trim(),
@@ -175,7 +327,10 @@ export const createTemplate = async (req, res) => {
 
     // Fetch created template
     const [templates] = await pool.execute(
-      'SELECT * FROM message_templates WHERE id = ?',
+      `SELECT t.*, g.name AS template_group_name
+       FROM message_templates t
+       LEFT JOIN message_template_groups g ON t.template_group_id = g.id
+       WHERE t.id = ?`,
       [templateId]
     );
 
@@ -200,6 +355,7 @@ export const updateTemplate = async (req, res) => {
       isUnicode,
       variables,
       isActive,
+      templateGroupId,
     } = req.body;
 
     const pool = getPool();
@@ -249,6 +405,21 @@ export const updateTemplate = async (req, res) => {
       updateValues.push(Boolean(isActive));
     }
 
+    if (templateGroupId !== undefined) {
+      if (templateGroupId === null || templateGroupId === '') {
+        updateFields.push('template_group_id = ?');
+        updateValues.push(null);
+      } else {
+        try {
+          const gid = await assertTemplateGroupExists(pool, templateGroupId);
+          updateFields.push('template_group_id = ?');
+          updateValues.push(gid);
+        } catch (e) {
+          return errorResponse(res, e.message || 'Invalid template group', 400);
+        }
+      }
+    }
+
     if (content !== undefined) {
       if (!content?.trim()) {
         return errorResponse(res, 'Content cannot be empty', 400);
@@ -285,7 +456,10 @@ export const updateTemplate = async (req, res) => {
 
     // Fetch updated template
     const [updatedTemplates] = await pool.execute(
-      'SELECT * FROM message_templates WHERE id = ?',
+      `SELECT t.*, g.name AS template_group_name
+       FROM message_templates t
+       LEFT JOIN message_template_groups g ON t.template_group_id = g.id
+       WHERE t.id = ?`,
       [id]
     );
 
