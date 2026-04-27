@@ -13,7 +13,7 @@ export const getDailyCallReports = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { startDate, endDate, userId, division, department, group } = req.query;
+    const { startDate, endDate, userId, division, department, group, studentGroup: studentGroupQuery } = req.query;
     const pageNum = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 500);
     const offsetNum = (pageNum - 1) * limitNum;
@@ -50,14 +50,30 @@ export const getDailyCallReports = async (req, res) => {
 
     const pool = getPool();
 
-    // Build WHERE conditions — only count calls that record an outcome (same path that updates call_status for counsellors)
-    const conditions = ['type = ?', 'call_outcome IS NOT NULL', "TRIM(call_outcome) <> ''"];
+    /** `leads.student_group` (MySQL) — restrict calls to rows tied to a lead in this cohort. Not HRMS employee group. */
+    const studentGroupRaw = studentGroupQuery != null ? String(studentGroupQuery).trim() : '';
+    const leadJoinSqlParts = [];
+    const leadJoinParams = [];
+    if (studentGroupRaw) {
+      if (studentGroupRaw === 'Inter') {
+        leadJoinSqlParts.push(
+          `INNER JOIN leads lead_sg ON lead_sg.id = c.lead_id AND (lead_sg.student_group = 'Inter' OR lead_sg.student_group LIKE 'Inter-%')`
+        );
+      } else {
+        leadJoinSqlParts.push('INNER JOIN leads lead_sg ON lead_sg.id = c.lead_id AND lead_sg.student_group = ?');
+        leadJoinParams.push(studentGroupRaw);
+      }
+    }
+    const fromSql = `communications c ${leadJoinSqlParts.join(' ')}`;
+
+    // Build WHERE — only outcome calls (same path that updates call_status for counsellors)
+    const conditions = ['c.type = ?', 'c.call_outcome IS NOT NULL', "TRIM(c.call_outcome) <> ''"];
     const params = ['call'];
 
     if (hasDates) {
       const startStr = start.toISOString().slice(0, 19).replace('T', ' ');
       const endStr = end.toISOString().slice(0, 19).replace('T', ' ');
-      conditions.push('sent_at >= ?', 'sent_at <= ?');
+      conditions.push('c.sent_at >= ?', 'c.sent_at <= ?');
       params.push(startStr, endStr);
     }
 
@@ -65,7 +81,7 @@ export const getDailyCallReports = async (req, res) => {
       if (!userId || typeof userId !== 'string' || userId.length !== 36) {
         return errorResponse(res, 'Invalid user ID', 400);
       }
-      conditions.push('sent_by = ?');
+      conditions.push('c.sent_by = ?');
       params.push(userId);
     } else if (division || department || group) {
       // Filter by HRMS organizational units
@@ -101,7 +117,7 @@ export const getDailyCallReports = async (req, res) => {
           );
           const filteredUserIds = filteredUsers.map(u => u.id);
           if (filteredUserIds.length > 0) {
-            conditions.push(`sent_by IN (${filteredUserIds.map(() => '?').join(',')})`);
+            conditions.push(`c.sent_by IN (${filteredUserIds.map(() => '?').join(',')})`);
             params.push(...filteredUserIds);
           } else {
             return successResponse(res, {
@@ -123,15 +139,16 @@ export const getDailyCallReports = async (req, res) => {
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    const execParams = [...leadJoinParams, ...params];
 
     const [totalGroupedRowsResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM (
-         SELECT sent_by, DATE(sent_at) as date
-         FROM communications
+         SELECT c.sent_by, DATE(c.sent_at) as date
+         FROM ${fromSql}
          ${whereClause}
-         GROUP BY sent_by, DATE(sent_at)
+         GROUP BY c.sent_by, DATE(c.sent_at)
        ) grouped_calls`,
-      params
+      execParams
     );
     const totalGroupedRowsRaw = totalGroupedRowsResult?.[0]?.total ?? 0;
     const totalGroupedRows = typeof totalGroupedRowsRaw === 'bigint'
@@ -141,29 +158,29 @@ export const getDailyCallReports = async (req, res) => {
     // Aggregate calls by user and date (paginated)
     const [callReports] = await pool.execute(
       `SELECT 
-        sent_by as user_id,
-        DATE(sent_at) as date,
+        c.sent_by as user_id,
+        DATE(c.sent_at) as date,
         COUNT(*) as call_count,
-        SUM(COALESCE(duration_seconds, 0)) as total_duration
-       FROM communications
+        SUM(COALESCE(c.duration_seconds, 0)) as total_duration
+       FROM ${fromSql}
        ${whereClause}
-       GROUP BY sent_by, DATE(sent_at)
-       ORDER BY date DESC, sent_by ASC
+       GROUP BY c.sent_by, DATE(c.sent_at)
+       ORDER BY date DESC, c.sent_by ASC
        LIMIT ${limitNum} OFFSET ${offsetNum}`,
-      params
+      execParams
     );
 
     // Aggregate full-range summary (not paginated)
     const [summaryRows] = await pool.execute(
       `SELECT
-        sent_by as user_id,
+        c.sent_by as user_id,
         COUNT(*) as total_calls,
-        SUM(COALESCE(duration_seconds, 0)) as total_duration,
-        COUNT(DISTINCT DATE(sent_at)) as days
-       FROM communications
+        SUM(COALESCE(c.duration_seconds, 0)) as total_duration,
+        COUNT(DISTINCT DATE(c.sent_at)) as days
+       FROM ${fromSql}
        ${whereClause}
-       GROUP BY sent_by`,
-      params
+       GROUP BY c.sent_by`,
+      execParams
     );
 
     // Get user details for both paginated rows and full summary rows

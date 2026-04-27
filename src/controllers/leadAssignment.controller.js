@@ -2083,6 +2083,35 @@ function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw) 
   };
 }
 
+/**
+ * Users with ≥1 current portfolio lead in this `leads.student_group` (MySQL only).
+ * `Inter` matches `Inter` and `Inter-%` (same as lead list / reports elsewhere).
+ */
+async function fetchUserIdsWithPortfolioStudentGroup(pool, userIds, studentGroupRaw) {
+  const sg = studentGroupRaw != null ? String(studentGroupRaw).trim() : '';
+  if (!sg || !userIds.length) return new Set(userIds);
+  const ph = userIds.map(() => '?').join(',');
+  let groupSql;
+  const groupParams = [];
+  if (sg === 'Inter') {
+    groupSql = "(student_group = 'Inter' OR student_group LIKE 'Inter-%')";
+  } else {
+    groupSql = 'student_group = ?';
+    groupParams.push(sg);
+  }
+  const [rows] = await pool.execute(
+    `SELECT DISTINCT uid FROM (
+       SELECT assigned_to AS uid FROM leads
+       WHERE assigned_to IN (${ph}) AND ${groupSql}
+       UNION
+       SELECT assigned_to_pro AS uid FROM leads
+       WHERE assigned_to_pro IN (${ph}) AND assigned_to_pro IS NOT NULL AND ${groupSql}
+     ) x WHERE uid IS NOT NULL`,
+    [...userIds, ...groupParams, ...userIds, ...groupParams]
+  );
+  return new Set((rows || []).map((r) => r.uid).filter(Boolean));
+}
+
 /** User ids that have at least one current portfolio lead matching optional student group + district. */
 async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, districtRaw) {
   const d = districtRaw != null ? String(districtRaw).trim() : '';
@@ -2194,6 +2223,7 @@ export const getUserAnalytics = async (req, res) => {
       perfSearch,
       perfDepartment,
       perfGroup,
+      perfDivision,
       perfRole,
       /** When true/1, return only roster fields + active lead counts (communications UI); skips heavy analytics SQL. */
       rosterOnly,
@@ -2251,6 +2281,7 @@ export const getUserAnalytics = async (req, res) => {
       perfSearch,
       perfDepartment,
       perfGroup,
+      perfDivision,
       perfRole,
       rosterOnly: isRosterOnly,
       currentPortfolioOnly: isCurrentPortfolioOnly,
@@ -2635,8 +2666,9 @@ export const getUserAnalytics = async (req, res) => {
     const perfSearchNorm = String(perfSearch || '').trim().toLowerCase();
     const perfDeptNorm = String(perfDepartment || '').trim();
     const perfGroupNorm = String(perfGroup || '').trim();
+    const perfDivNorm = String(perfDivision || '').trim();
     const perfRoleAppliedInSql = Boolean(!userId && perfRoleNorm);
-    const needsPostHydratePerfFilter = Boolean(perfSearchNorm || perfDeptNorm || perfGroupNorm);
+    const needsPostHydratePerfFilter = Boolean(perfSearchNorm || perfDeptNorm || perfGroupNorm || perfDivNorm);
 
     let perfFilteredUsers;
     let batch1Results;
@@ -2653,13 +2685,14 @@ export const getUserAnalytics = async (req, res) => {
     } else {
       await hydrateUserOrgFromHrms(users, pool);
       perfFilteredUsers = users;
-      if (perfSearchNorm || perfDeptNorm || perfGroupNorm || (perfRoleNorm && !perfRoleAppliedInSql)) {
+      if (perfSearchNorm || perfDeptNorm || perfGroupNorm || perfDivNorm || (perfRoleNorm && !perfRoleAppliedInSql)) {
         perfFilteredUsers = users.filter((u) => {
           const name = String(u.name || '').toLowerCase();
           const email = String(u.email || '').toLowerCase();
           if (perfSearchNorm && !name.includes(perfSearchNorm) && !email.includes(perfSearchNorm)) return false;
           if (perfDeptNorm && String(u.department || '').trim() !== perfDeptNorm) return false;
           if (perfGroupNorm && String(u.group || '').trim() !== perfGroupNorm) return false;
+          if (perfDivNorm && String(u.division || '').trim() !== perfDivNorm) return false;
           if (perfRoleNorm && !perfRoleAppliedInSql && String(u.role_name || '').trim() !== perfRoleNorm) {
             return false;
           }
@@ -2671,6 +2704,21 @@ export const getUserAnalytics = async (req, res) => {
       );
       const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
       batch1Results = await runBatch1(batch1IdsElse);
+    }
+
+    /** Reports → User Performance: restrict to counsellors/PROs with a portfolio lead in this `studentGroup` (MySQL). */
+    const portfolioStudentGroupNorm =
+      studentGroupQuery != null && String(studentGroupQuery).trim() !== ''
+        ? String(studentGroupQuery).trim()
+        : '';
+    if (portfolioStudentGroupNorm) {
+      const perfIds = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+      if (perfIds.length) {
+        const allowPortfolio = await fetchUserIdsWithPortfolioStudentGroup(pool, perfIds, portfolioStudentGroupNorm);
+        perfFilteredUsers = perfFilteredUsers.filter((u) => allowPortfolio.has(u.id));
+      } else {
+        perfFilteredUsers = [];
+      }
     }
 
     /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
