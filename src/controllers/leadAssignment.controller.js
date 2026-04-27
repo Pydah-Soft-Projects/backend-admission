@@ -47,6 +47,26 @@ const canonicalCounselorCallStatusForReports = (label) => {
   return hit || t;
 };
 
+/**
+ * SQL fragment: YYYY-MM-DD for cohort rows from `activity_logs` `a` + `leads` `l`,
+ * using slot dates with legacy `target_date` fallback.
+ */
+const SQL_COHORT_ASSIGNMENT_TARGET_YMD = `CASE
+    WHEN a.target_user_id IS NOT NULL AND a.target_user_id = l.assigned_to THEN
+      IF(l.counsellor_target_date IS NULL,
+        IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+        DATE_FORMAT(l.counsellor_target_date, '%Y-%m-%d'))
+    WHEN a.target_user_id IS NOT NULL AND a.target_user_id = l.assigned_to_pro THEN
+      IF(l.pro_target_date IS NULL,
+        IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+        DATE_FORMAT(l.pro_target_date, '%Y-%m-%d'))
+    ELSE COALESCE(
+      IF(l.counsellor_target_date IS NULL, NULL, DATE_FORMAT(l.counsellor_target_date, '%Y-%m-%d')),
+      IF(l.pro_target_date IS NULL, NULL, DATE_FORMAT(l.pro_target_date, '%Y-%m-%d')),
+      IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d'))
+    )
+  END`;
+
 /** Same labels as Super Admin reports `PRO_VISIT_STATUS_COLUMNS` (field visit workflow). */
 const PRO_VISIT_STATUS_CANONICAL = [
   'Assigned',
@@ -343,11 +363,11 @@ export const assignLeads = async (req, res) => {
       if (isProRole) {
         // PRO field workflow: new PRO assignment always starts at visit_status Assigned (clears blank/legacy values).
         updateQuery = `UPDATE leads SET 
-          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
+          assigned_to_pro = ?, pro_assigned_at = NOW(), pro_assigned_by = ?, lead_status = ?, pro_target_date = ?${setAcademicYear}, visit_status = 'Assigned', updated_at = NOW()
          WHERE id = ? AND assigned_to_pro IS NULL`;
       } else {
         updateQuery = `UPDATE leads SET 
-          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, target_date = ?${setAcademicYear}, call_status = 'Assigned', updated_at = NOW()
+          assigned_to = ?, assigned_at = NOW(), assigned_by = ?, lead_status = ?, counsellor_target_date = ?${setAcademicYear}, call_status = 'Assigned', updated_at = NOW()
          WHERE id = ?`;
       }
 
@@ -381,6 +401,7 @@ export const assignLeads = async (req, res) => {
         const td = String(targetDate).trim().slice(0, 10);
         if (/^\d{4}-\d{2}-\d{2}$/.test(td)) {
           assignmentMeta.targetDate = td;
+          assignmentMeta.targetDateSlot = isProRole ? 'pro' : 'counsellor';
         }
       }
       await pool.execute(
@@ -958,8 +979,6 @@ export const removeAssignments = async (req, res) => {
 
     const isPro = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
     const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
-    const assignmentAtCol = isPro ? 'pro_assigned_at' : 'assigned_at';
-    const assignmentByCol = isPro ? 'pro_assigned_by' : 'assigned_by';
 
     const conditions = [`${assignmentCol} = ?`];
     const params = [userId];
@@ -1017,17 +1036,27 @@ export const removeAssignments = async (req, res) => {
     const leadIds = leadsToUnassign.map((l) => l.id);
     const placeholders = leadIds.map(() => '?').join(',');
 
-    await pool.execute(
-      `UPDATE leads SET 
-        ${assignmentCol} = NULL, 
-        ${assignmentAtCol} = NULL, 
-        ${assignmentByCol} = NULL, 
-        lead_status = 'New', 
-        target_date = NULL,
+    const bulkUnassignSql = isPro
+      ? `UPDATE leads SET 
+        assigned_to_pro = NULL, 
+        pro_assigned_at = NULL, 
+        pro_assigned_by = NULL, 
+        pro_target_date = NULL,
+        lead_status = CASE WHEN assigned_to IS NOT NULL THEN lead_status ELSE 'New' END,
+        target_date = CASE WHEN assigned_to IS NOT NULL THEN target_date ELSE NULL END,
         updated_at = NOW() 
-      WHERE id IN (${placeholders})`,
-      leadIds
-    );
+      WHERE id IN (${placeholders})`
+      : `UPDATE leads SET 
+        assigned_to = NULL, 
+        assigned_at = NULL, 
+        assigned_by = NULL, 
+        counsellor_target_date = NULL,
+        lead_status = CASE WHEN assigned_to_pro IS NOT NULL THEN lead_status ELSE 'New' END,
+        target_date = CASE WHEN assigned_to_pro IS NOT NULL THEN target_date ELSE NULL END,
+        updated_at = NOW() 
+      WHERE id IN (${placeholders})`;
+
+    await pool.execute(bulkUnassignSql, leadIds);
 
     for (const lead of leadsToUnassign) {
       const activityLogId = uuidv4();
@@ -1140,6 +1169,49 @@ export const getUserLeadAnalytics = async (req, res) => {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const recentThreshold = sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' ');
 
+    const upcomingTargetSql = isProRole
+      ? `SELECT eff AS target_date, COUNT(*) AS count
+         FROM (
+           SELECT DATE(COALESCE(
+             IF(assigned_to_pro = ?, pro_target_date, NULL),
+             IF(assigned_to = ?, counsellor_target_date, NULL),
+             target_date
+           )) AS eff
+           FROM leads
+           WHERE ${whereClause}
+         ) t
+         WHERE eff IS NOT NULL AND eff >= CURDATE()
+         GROUP BY eff
+         ORDER BY eff ASC
+         LIMIT 60`
+      : isStudentCounselor
+        ? `SELECT eff AS target_date, COUNT(*) AS count
+           FROM (
+             SELECT DATE(COALESCE(
+               IF(assigned_to = ?, counsellor_target_date, NULL),
+               target_date
+             )) AS eff
+             FROM leads
+             WHERE ${whereClause}
+           ) t
+           WHERE eff IS NOT NULL AND eff >= CURDATE()
+           GROUP BY eff
+           ORDER BY eff ASC
+           LIMIT 60`
+        : `SELECT eff AS target_date, COUNT(*) AS count
+           FROM (
+             SELECT DATE(COALESCE(counsellor_target_date, pro_target_date, target_date)) AS eff
+             FROM leads
+             WHERE ${whereClause}
+           ) t
+           WHERE eff IS NOT NULL AND eff >= CURDATE()
+           GROUP BY eff
+           ORDER BY eff ASC
+           LIMIT 60`;
+
+    const upcomingTargetParams =
+      isProRole ? [...params, userId, userId] : isStudentCounselor ? [...params, userId] : params;
+
     // Run independent analytics queries in parallel to reduce API latency.
     const [
       totalLeadsResultWrap,
@@ -1196,17 +1268,7 @@ export const getUserLeadAnalytics = async (req, res) => {
         `SELECT COUNT(*) as total FROM leads WHERE ${whereClause} AND updated_at >= ?`,
         [...params, recentThreshold]
       ),
-      pool.execute(
-        `SELECT DATE(target_date) as target_date, COUNT(*) as count
-         FROM leads
-         WHERE ${whereClause}
-           AND target_date IS NOT NULL
-           AND DATE(target_date) >= CURDATE()
-         GROUP BY DATE(target_date)
-         ORDER BY DATE(target_date) ASC
-         LIMIT 60`,
-        params
-      ),
+      pool.execute(upcomingTargetSql, upcomingTargetParams),
     ]);
 
     const totalLeadsResult = totalLeadsResultWrap[0];
@@ -3026,7 +3088,7 @@ export const getUserAnalytics = async (req, res) => {
                    DATE(a.created_at) AS assigned_day,
                    COALESCE(
                      NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
-                     IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+                     (${SQL_COHORT_ASSIGNMENT_TARGET_YMD}),
                      IF(
                        l.academic_year IS NOT NULL AND l.academic_year BETWEEN 2000 AND 2100,
                        DATE_FORMAT(
@@ -3201,7 +3263,7 @@ export const getUserAnalytics = async (req, res) => {
             l.mandal,
             COALESCE(
               NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
-              IF(l.target_date IS NULL, NULL, DATE_FORMAT(l.target_date, '%Y-%m-%d')),
+              (${SQL_COHORT_ASSIGNMENT_TARGET_YMD}),
               IF(
                 l.academic_year IS NOT NULL AND l.academic_year BETWEEN 2000 AND 2100,
                 DATE_FORMAT(

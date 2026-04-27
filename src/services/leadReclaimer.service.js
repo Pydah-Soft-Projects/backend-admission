@@ -100,13 +100,16 @@ let reclaimerTimeoutId = null;
 let reclaimSchedule = { hour: 23, minute: 11 };
 
 /**
- * Reclaims leads that have reached their target date and are still assigned.
+ * Reclaims **per slot** when that slot’s target date is due (counsellor vs PRO).
+ * Uses `counsellor_target_date` / `pro_target_date`; legacy `target_date` is cleared when a slot is reclaimed.
  *
- * Rules:
- * - Not Interested / Wrong Data -> reclaim and increment cycle
- * - Assigned -> reclaim but keep same cycle
+ * Rules (unchanged intent):
+ * - Pipeline `lead_status` must be `Not Interested`, `Wrong Data`, or `Assigned`
+ * - Only slots whose date is `<=` cutoff AND non-null are cleared
+ * - When **no** assignees remain: `lead_status` → `New`; cycle increments only for NI/Wrong Data
+ * - When one assignee remains: keep `lead_status`; no cycle increment
  *
- * @param {string} [asOfDateYmd] - `YYYY-MM-DD` in Asia/Kolkata; leads with target_date on or before this date are considered due. Defaults to IST "today" when omitted.
+ * @param {string} [asOfDateYmd] - `YYYY-MM-DD` in Asia/Kolkata; defaults to IST "today" when omitted.
  */
 export const reclaimExpiredLeads = async (asOfDateYmd) => {
   let pool;
@@ -117,22 +120,23 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
         ? asOfDateYmd
         : formatDateIST(new Date());
     safeConsoleLog(
-      `[LeadReclaimer] Starting automated lead reclamation (cutoff target_date <= ${cutoff} IST calendar)...`
+      `[LeadReclaimer] Starting automated lead reclamation (cutoff slot target dates <= ${cutoff} IST calendar)...`
     );
 
-    // 1. Find leads to reclaim:
-    // - status is 'Not Interested' OR 'Wrong Data' OR still 'Assigned'
-    // - target_date is on or before the IST cutoff date
-    // - currently assigned to someone
     const [leadsToReclaim] = await pool.execute(
       `
-      SELECT id, lead_status, assigned_to, assigned_to_pro, cycle_number 
-      FROM leads 
-      WHERE (target_date <= ?) 
-        AND (lead_status IN ('Not Interested', 'Wrong Data', 'Assigned'))
-        AND (assigned_to IS NOT NULL OR assigned_to_pro IS NOT NULL)
+      SELECT id, lead_status, cycle_number,
+        assigned_to, assigned_to_pro,
+        counsellor_target_date, pro_target_date, target_date
+      FROM leads
+      WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned')
+        AND (
+          (assigned_to IS NOT NULL AND counsellor_target_date IS NOT NULL AND counsellor_target_date <= ?)
+          OR
+          (assigned_to_pro IS NOT NULL AND pro_target_date IS NOT NULL AND pro_target_date <= ?)
+        )
     `,
-      [cutoff]
+      [cutoff, cutoff]
     );
 
     if (leadsToReclaim.length === 0) {
@@ -140,36 +144,27 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
       return 0;
     }
 
-    safeConsoleLog(`[LeadReclaimer] Found ${leadsToReclaim.length} leads to reclaim.`);
+    safeConsoleLog(`[LeadReclaimer] Found ${leadsToReclaim.length} lead row(s) with at least one due slot.`);
 
     let reclaimedCount = 0;
     const reclaimedByPreviousAssignee = new Map();
 
-    for (const lead of leadsToReclaim) {
-      const currentCycle = lead.cycle_number || 1;
-      const oldStatus = String(lead.lead_status || '').trim();
-      const shouldIncrementCycle = oldStatus === 'Not Interested' || oldStatus === 'Wrong Data';
-      const newCycle = shouldIncrementCycle ? currentCycle + 1 : currentCycle;
-      const previousAssignee = lead.assigned_to || lead.assigned_to_pro || null;
-      
-      // Update the lead record
-      await pool.execute(`
-        UPDATE leads 
-        SET 
-          assigned_to = NULL, 
-          assigned_at = NULL, 
-          assigned_by = NULL,
-          assigned_to_pro = NULL,
-          pro_assigned_at = NULL,
-          pro_assigned_by = NULL,
-          lead_status = 'New',
-          target_date = NULL,
-          cycle_number = ?,
-          updated_at = NOW()
-        WHERE id = ?
-      `, [newCycle, lead.id]);
+    const bumpReclaimedCount = (userId) => {
+      if (!userId) return;
+      reclaimedByPreviousAssignee.set(userId, (reclaimedByPreviousAssignee.get(userId) || 0) + 1);
+    };
 
-      // Create activity log
+    const insertReclaimLog = async ({
+      leadId,
+      oldStatus,
+      newStatus,
+      comment,
+      previousAssignee,
+      currentCycle,
+      newCycle,
+      cycleIncremented,
+      reclaimedRole,
+    }) => {
       const activityLogId = uuidv4();
       await pool.execute(
         `INSERT INTO activity_logs (
@@ -177,32 +172,114 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           activityLogId,
-          lead.id,
+          leadId,
           'status_change',
           oldStatus,
-          'New',
-          shouldIncrementCycle
-            ? `Automated Reassignment: Cycle ${newCycle}. Reclaimed due to '${oldStatus}' status and target date reached.`
-            : `Automated Reassignment: Cycle ${newCycle} unchanged. Reclaimed due to 'Assigned' status at target date.`,
-          '00000000-0000-0000-0000-000000000000', // Special identifier for automated tasks
+          newStatus,
+          comment,
+          '00000000-0000-0000-0000-000000000000',
           JSON.stringify({
             reclamation: {
               previousCycle: currentCycle,
-              newCycle: newCycle,
+              newCycle,
               previousAssignee,
               oldStatus,
-              cycleIncremented: shouldIncrementCycle,
+              cycleIncremented,
+              reclaimedRole,
             },
           }),
         ]
       );
+    };
 
-      reclaimedCount++;
-      if (previousAssignee) {
-        reclaimedByPreviousAssignee.set(
-          previousAssignee,
-          (reclaimedByPreviousAssignee.get(previousAssignee) || 0) + 1
+    for (const lead of leadsToReclaim) {
+      const currentCycle = lead.cycle_number || 1;
+      const oldStatus = String(lead.lead_status || '').trim();
+      const slotYmd = (v) => {
+        if (v == null || v === '') return null;
+        if (v instanceof Date) return v.toISOString().slice(0, 10);
+        const s = String(v).trim();
+        return s.length >= 10 ? s.slice(0, 10) : s;
+      };
+      const hadSc = lead.assigned_to != null && String(lead.assigned_to).trim() !== '';
+      const hadPro = lead.assigned_to_pro != null && String(lead.assigned_to_pro).trim() !== '';
+      const scYmd = slotYmd(lead.counsellor_target_date);
+      const proYmd = slotYmd(lead.pro_target_date);
+      const scDue = hadSc && scYmd != null && scYmd <= cutoff;
+      const proDue = hadPro && proYmd != null && proYmd <= cutoff;
+
+      if (!scDue && !proDue) continue;
+
+      const stillScAfter = hadSc && !scDue;
+      const stillProAfter = hadPro && !proDue;
+      const fullyUnassigned = !stillScAfter && !stillProAfter;
+      const shouldIncrementCycle =
+        fullyUnassigned && (oldStatus === 'Not Interested' || oldStatus === 'Wrong Data');
+      const newCycle = shouldIncrementCycle ? currentCycle + 1 : currentCycle;
+      const newLeadStatus = fullyUnassigned ? 'New' : oldStatus;
+
+      const setParts = [];
+      const params = [];
+
+      if (scDue) {
+        setParts.push(
+          'assigned_to = NULL',
+          'assigned_at = NULL',
+          'assigned_by = NULL',
+          'counsellor_target_date = NULL'
         );
+      }
+      if (proDue) {
+        setParts.push(
+          'assigned_to_pro = NULL',
+          'pro_assigned_at = NULL',
+          'pro_assigned_by = NULL',
+          'pro_target_date = NULL'
+        );
+      }
+      setParts.push('lead_status = ?', 'cycle_number = ?');
+      params.push(newLeadStatus, newCycle);
+
+      if (scDue || proDue) {
+        setParts.push('target_date = NULL');
+      }
+      setParts.push('updated_at = NOW()');
+
+      await pool.execute(`UPDATE leads SET ${setParts.join(', ')} WHERE id = ?`, [...params, lead.id]);
+
+      const baseCommentPartial = shouldIncrementCycle
+        ? `Automated slot reclaim; cycle ${newCycle}. Pipeline was '${oldStatus}'.`
+        : `Automated slot reclaim; cycle ${newCycle} unchanged. Pipeline was '${oldStatus}'.`;
+
+      if (scDue) {
+        await insertReclaimLog({
+          leadId: lead.id,
+          oldStatus,
+          newStatus: newLeadStatus,
+          comment: `${baseCommentPartial} Counsellor slot cleared (target date reached).`,
+          previousAssignee: lead.assigned_to,
+          currentCycle,
+          newCycle,
+          cycleIncremented: shouldIncrementCycle,
+          reclaimedRole: 'counsellor',
+        });
+        bumpReclaimedCount(lead.assigned_to);
+        reclaimedCount += 1;
+      }
+      if (proDue) {
+        await insertReclaimLog({
+          leadId: lead.id,
+          oldStatus,
+          newStatus: newLeadStatus,
+          comment: `${baseCommentPartial} PRO slot cleared (target date reached).`,
+          previousAssignee: lead.assigned_to_pro,
+          currentCycle,
+          newCycle,
+          cycleIncremented: shouldIncrementCycle,
+          reclaimedRole: 'PRO',
+        });
+        bumpReclaimedCount(lead.assigned_to_pro);
+        reclaimedCount += 1;
       }
     }
 

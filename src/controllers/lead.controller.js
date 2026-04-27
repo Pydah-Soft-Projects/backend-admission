@@ -71,12 +71,24 @@ function upsertLeadUpdateColumn(updateFields, updateValues, column, value) {
   }
 }
 
+const leadSqlDateToYmd = (v) => {
+  if (v == null || v === '') return undefined;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  const s = String(v).trim();
+  if (!s) return undefined;
+  return s.length >= 10 ? s.slice(0, 10) : undefined;
+};
+
 // Helper function to format lead data from SQL to camelCase
 const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null, viewerOptions = {}) => {
   if (!leadData) return null;
   const viewerRole = viewerOptions.viewerRoleName;
   const callStatus = leadData.call_status ?? null;
   const visitStatus = leadData.visit_status ?? null;
+  const counsellorTargetYmd = leadSqlDateToYmd(leadData.counsellor_target_date);
+  const proTargetYmd = leadSqlDateToYmd(leadData.pro_target_date);
+  const legacyTargetYmd = leadSqlDateToYmd(leadData.target_date);
+  const primaryTargetYmd = legacyTargetYmd ?? counsellorTargetYmd ?? proTargetYmd;
   return {
     id: leadData.id,
     _id: leadData.id, // Keep _id for backward compatibility
@@ -124,8 +136,12 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     nextScheduledCall: leadData.next_scheduled_call,
     cycle_number: leadData.cycle_number != null ? Number(leadData.cycle_number) : undefined,
     cycleNumber: leadData.cycle_number != null ? Number(leadData.cycle_number) : undefined,
-    target_date: leadData.target_date || undefined,
-    targetDate: leadData.target_date || undefined,
+    counsellor_target_date: counsellorTargetYmd,
+    counsellorTargetDate: counsellorTargetYmd,
+    pro_target_date: proTargetYmd,
+    proTargetDate: proTargetYmd,
+    target_date: primaryTargetYmd,
+    targetDate: primaryTargetYmd,
     academicYear: leadData.academic_year != null ? leadData.academic_year : undefined,
     studentGroup: leadData.student_group || undefined,
     needsManualUpdate: leadData.needs_manual_update != null ? Number(leadData.needs_manual_update) : 0,
