@@ -141,47 +141,93 @@ export const getDailyCallReports = async (req, res) => {
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
     const execParams = [...leadJoinParams, ...params];
 
-    const [totalGroupedRowsResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM (
-         SELECT c.sent_by, DATE(c.sent_at) as date
+    /**
+     * With a date window: one row per user for the whole range (cumulative calls/duration).
+     * Without dates ("overall"): keep legacy per-user per-day rows for drill-down.
+     */
+    let totalGroupedRows;
+    let callReports;
+    let summaryRows;
+
+    if (hasDates) {
+      const [totalUsersResult] = await pool.execute(
+        `SELECT COUNT(*) as total FROM (
+           SELECT c.sent_by
+           FROM ${fromSql}
+           ${whereClause}
+           GROUP BY c.sent_by
+         ) grouped_users`,
+        execParams
+      );
+      const totalUsersRaw = totalUsersResult?.[0]?.total ?? 0;
+      totalGroupedRows = typeof totalUsersRaw === 'bigint' ? Number(totalUsersRaw) : Number(totalUsersRaw || 0);
+
+      [callReports] = await pool.execute(
+        `SELECT 
+          c.sent_by as user_id,
+          COUNT(*) as call_count,
+          SUM(COALESCE(c.duration_seconds, 0)) as total_duration,
+          COUNT(DISTINCT DATE(c.sent_at)) as days_with_activity
+         FROM ${fromSql}
+         ${whereClause}
+         GROUP BY c.sent_by
+         ORDER BY call_count DESC, user_id ASC
+         LIMIT ${limitNum} OFFSET ${offsetNum}`,
+        execParams
+      );
+
+      [summaryRows] = await pool.execute(
+        `SELECT
+          c.sent_by as user_id,
+          COUNT(*) as total_calls,
+          SUM(COALESCE(c.duration_seconds, 0)) as total_duration,
+          COUNT(DISTINCT DATE(c.sent_at)) as days
+         FROM ${fromSql}
+         ${whereClause}
+         GROUP BY c.sent_by`,
+        execParams
+      );
+    } else {
+      const [totalGroupedRowsResult] = await pool.execute(
+        `SELECT COUNT(*) as total FROM (
+           SELECT c.sent_by, DATE(c.sent_at) as date
+           FROM ${fromSql}
+           ${whereClause}
+           GROUP BY c.sent_by, DATE(c.sent_at)
+         ) grouped_calls`,
+        execParams
+      );
+      const totalGroupedRowsRaw = totalGroupedRowsResult?.[0]?.total ?? 0;
+      totalGroupedRows = typeof totalGroupedRowsRaw === 'bigint'
+        ? Number(totalGroupedRowsRaw)
+        : Number(totalGroupedRowsRaw || 0);
+
+      [callReports] = await pool.execute(
+        `SELECT 
+          c.sent_by as user_id,
+          DATE(c.sent_at) as date,
+          COUNT(*) as call_count,
+          SUM(COALESCE(c.duration_seconds, 0)) as total_duration
          FROM ${fromSql}
          ${whereClause}
          GROUP BY c.sent_by, DATE(c.sent_at)
-       ) grouped_calls`,
-      execParams
-    );
-    const totalGroupedRowsRaw = totalGroupedRowsResult?.[0]?.total ?? 0;
-    const totalGroupedRows = typeof totalGroupedRowsRaw === 'bigint'
-      ? Number(totalGroupedRowsRaw)
-      : Number(totalGroupedRowsRaw || 0);
+         ORDER BY date DESC, c.sent_by ASC
+         LIMIT ${limitNum} OFFSET ${offsetNum}`,
+        execParams
+      );
 
-    // Aggregate calls by user and date (paginated)
-    const [callReports] = await pool.execute(
-      `SELECT 
-        c.sent_by as user_id,
-        DATE(c.sent_at) as date,
-        COUNT(*) as call_count,
-        SUM(COALESCE(c.duration_seconds, 0)) as total_duration
-       FROM ${fromSql}
-       ${whereClause}
-       GROUP BY c.sent_by, DATE(c.sent_at)
-       ORDER BY date DESC, c.sent_by ASC
-       LIMIT ${limitNum} OFFSET ${offsetNum}`,
-      execParams
-    );
-
-    // Aggregate full-range summary (not paginated)
-    const [summaryRows] = await pool.execute(
-      `SELECT
-        c.sent_by as user_id,
-        COUNT(*) as total_calls,
-        SUM(COALESCE(c.duration_seconds, 0)) as total_duration,
-        COUNT(DISTINCT DATE(c.sent_at)) as days
-       FROM ${fromSql}
-       ${whereClause}
-       GROUP BY c.sent_by`,
-      execParams
-    );
+      [summaryRows] = await pool.execute(
+        `SELECT
+          c.sent_by as user_id,
+          COUNT(*) as total_calls,
+          SUM(COALESCE(c.duration_seconds, 0)) as total_duration,
+          COUNT(DISTINCT DATE(c.sent_at)) as days
+         FROM ${fromSql}
+         ${whereClause}
+         GROUP BY c.sent_by`,
+        execParams
+      );
+    }
 
     // Get user details for both paginated rows and full summary rows
     const userIds = [...new Set([
@@ -206,17 +252,33 @@ export const getDailyCallReports = async (req, res) => {
     // Format response
     const formattedReports = (callReports || []).map((report) => {
       const userId = report.user_id || 'unknown';
+      const callCount = report.call_count || 0;
+      const totalDuration = report.total_duration || 0;
+      if (hasDates) {
+        return {
+          date: '',
+          rangeAggregate: true,
+          daysWithActivity: Number(report.days_with_activity || 0),
+          userId,
+          userName: userMap[userId]?.name || 'Unknown',
+          userEmail: userMap[userId]?.email || '',
+          callCount,
+          totalDuration,
+          averageDuration: callCount > 0 ? Math.round(totalDuration / callCount) : 0,
+        };
+      }
       const dateStr = report.date instanceof Date
         ? report.date.toISOString().slice(0, 10)
         : report.date;
       return {
         date: dateStr || '',
+        rangeAggregate: false,
         userId,
         userName: userMap[userId]?.name || 'Unknown',
         userEmail: userMap[userId]?.email || '',
-        callCount: report.call_count || 0,
-        totalDuration: report.total_duration || 0,
-        averageDuration: (report.call_count || 0) > 0 ? Math.round((report.total_duration || 0) / report.call_count) : 0,
+        callCount,
+        totalDuration,
+        averageDuration: callCount > 0 ? Math.round(totalDuration / callCount) : 0,
       };
     });
 

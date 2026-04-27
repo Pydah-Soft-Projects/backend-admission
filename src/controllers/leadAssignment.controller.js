@@ -3547,6 +3547,10 @@ export const getUserAnalytics = async (req, res) => {
       const interestedPlusCetAllotted = allottedCallStatusBag
         ? numAgg(allottedCallStatusBag['Interested']) + numAgg(allottedCallStatusBag['CET Applied'])
         : 0;
+      /** Student Counselor: period-allotted cohort leads currently in Visited (call_status), same buckets as expanded table. */
+      const visitedCumulativeCounsellor = isStudentCounselor
+        ? numAgg(allottedCallStatusBag?.['Visited'])
+        : undefined;
       /** PRO: Interested on period-allotted cohort by current visit_status (no CET Applied in visit workflow). */
       const interestedProAllotted = allottedCallStatusBag ? numAgg(allottedCallStatusBag['Interested']) : 0;
       /** Other roles: cumulative pipeline status_change events (activity log) for Interested + CET Applied. */
@@ -3575,6 +3579,8 @@ export const getUserAnalytics = async (req, res) => {
           : isPro
             ? interestedProAllotted
             : interestedPlusCetActivity,
+        /** Student Counselor only: cumulative Visited count on period-allotted cohort (`call_status`). */
+        visitedCumulative: visitedCumulativeCounsellor,
         admittedLeads: numAgg(stats.statusBreakdown['Admitted']),
         conversionRate: totalAssigned > 0 ? parseFloat(((stats.total_converted / totalAssigned) * 100).toFixed(2)) : 0,
         statusBreakdown: stats.statusBreakdown,

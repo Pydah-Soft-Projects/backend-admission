@@ -18,6 +18,8 @@ const queryCache = new Map();
 const CACHE_TTL = {
   leadsCountMs: Number(process.env.LEADS_COUNT_CACHE_MS || 15000),
   filterOptionsMs: Number(process.env.LEADS_FILTER_OPTIONS_CACHE_MS || 120000),
+  /** Dedicated student-group list: one DISTINCT query; longer TTL than full filter-options bundle. */
+  studentGroupFilterMs: Number(process.env.LEADS_STUDENT_GROUP_FILTER_CACHE_MS || 600000),
 };
 
 const stableStringify = (value) => {
@@ -2158,6 +2160,69 @@ export const getFilterOptions = async (req, res) => {
   } catch (error) {
     console.error('Error getting filter options:', error);
     return errorResponse(res, error.message || 'Failed to get filter options', 500);
+  }
+};
+
+/**
+ * @desc    Student group values only (for dropdowns). One DISTINCT query + cache — avoids waiting on the full
+ *          `/filters/options` bundle (11 parallel lead-table scans), which was blocking Call Reports student-group UI.
+ * @route   GET /api/leads/filters/student-groups
+ * @access  Private
+ */
+export const getStudentGroupFilterOptions = async (req, res) => {
+  try {
+    const pool = getPool();
+
+    const adminLike = hasElevatedAdminPrivileges(req.user.roleName) || req.user.roleName === 'Admin';
+    const userId = req.user.id || req.user._id;
+
+    const accessConditions = [];
+    if (!adminLike) {
+      if (req.user.roleName === 'PRO') {
+        accessConditions.push('(assigned_to_pro = ? OR assigned_to = ?)');
+      } else {
+        accessConditions.push('assigned_to = ?');
+      }
+    }
+
+    const studentGroupCondition = [
+      ...accessConditions,
+      'student_group IS NOT NULL AND student_group != ""',
+    ];
+    const params = !adminLike
+      ? req.user.roleName === 'PRO'
+        ? [userId, userId]
+        : [userId]
+      : [];
+
+    const whereClause =
+      studentGroupCondition.length > 0 ? `WHERE ${studentGroupCondition.join(' AND ')}` : '';
+
+    const cacheKey = `filter-options:student-groups:v1:${stableStringify({
+      roleName: req.user.roleName,
+      userId: adminLike ? 'admin-like' : String(userId),
+    })}`;
+
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return successResponse(res, cached, 'Student group filter options retrieved successfully', 200);
+    }
+
+    const [studentGroupsRows] = await pool.execute(
+      `SELECT DISTINCT student_group FROM leads ${whereClause} ORDER BY student_group ASC`,
+      params
+    );
+
+    const studentGroupOptions = ['10th', 'Inter', 'Inter-MPC', 'Inter-BIPC', 'Degree', 'Diploma'];
+    const studentGroupsFromDb = (studentGroupsRows || []).map((r) => r.student_group).filter(Boolean);
+    const studentGroups = [...new Set([...studentGroupOptions, ...studentGroupsFromDb])].sort();
+
+    const payload = { studentGroups };
+    setCached(cacheKey, payload, CACHE_TTL.studentGroupFilterMs);
+    return successResponse(res, payload, 'Student group filter options retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error getting student group filter options:', error);
+    return errorResponse(res, error.message || 'Failed to get student group filter options', 500);
   }
 };
 

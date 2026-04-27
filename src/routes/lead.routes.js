@@ -10,6 +10,7 @@ import {
   getDeleteJobStatus,
   getAllLeadIds,
   getFilterOptions,
+  getStudentGroupFilterOptions,
   getPublicFilterOptions,
   exportLeads,
 } from '../controllers/lead.controller.js';
@@ -71,7 +72,9 @@ router.patch('/:id/phone', updateLeadPhone);
 router.use(protect);
 router.use(requireTimeTrackingEnabled);
 
-// Filter options route (available to all authenticated users)
+// Filter options: lightweight student groups only (single DISTINCT + long cache; use for Call Reports, etc.)
+router.get('/filters/student-groups', getStudentGroupFilterOptions);
+// Full filter options bundle (many parallel DISTINCT scans on `leads` — slower cold load)
 router.get('/filters/options', getFilterOptions);
 
 // Get all lead IDs route (for bulk operations)
