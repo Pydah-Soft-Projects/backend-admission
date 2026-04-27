@@ -1,7 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
-import { sendSmsThroughBulkSmsApps } from '../services/bulkSms.service.js';
+import { sendSmsThroughBulkSmsApps, getBulkSmsAccountInfo } from '../services/bulkSms.service.js';
 import {
   ensureLeadAndNumbers,
   executeSmsSendForLead,
@@ -491,5 +491,20 @@ export const sendTestTemplateSms = async (req, res) => {
   } catch (error) {
     console.error('Error sending test template SMS:', error);
     return errorResponse(res, error.message || 'Failed to send test SMS', 500);
+  }
+};
+
+/** Super Admin: BulkSMSApps balance + configured display name (API key server-side only). */
+export const getBulkSmsAccountStatus = async (req, res) => {
+  try {
+    const info = await getBulkSmsAccountInfo();
+    return successResponse(res, info, 'Bulk SMS account status retrieved', 200);
+  } catch (error) {
+    console.error('getBulkSmsAccountStatus', error);
+    return errorResponse(
+      res,
+      error?.message || 'Failed to fetch Bulk SMS balance',
+      502
+    );
   }
 };

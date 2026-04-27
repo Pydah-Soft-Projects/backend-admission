@@ -2,6 +2,11 @@ import axios from 'axios';
 
 const BULK_SMS_API_KEY = process.env.BULK_SMS_API_KEY || '';
 const BULK_SMS_SENDER_ID = process.env.BULK_SMS_SENDER_ID || 'PYDAHK';
+/** Portal login name (e.g. pydahsoft) — shown in UI only; not sent to balance API. */
+const BULK_SMS_ACCOUNT_USERNAME =
+  process.env.BULK_SMS_ACCOUNT_USERNAME || process.env.BULKSMS_USERNAME || '';
+const BULK_SMS_BALANCE_URL =
+  process.env.BULK_SMS_BALANCE_URL || 'https://www.bulksmsapps.com/api/apicheckbalancev2.aspx';
 const BULK_SMS_ENGLISH_API_URL =
   process.env.BULK_SMS_ENGLISH_API_URL || 'https://www.bulksmsapps.com/api/apismsv2.aspx';
 const BULK_SMS_UNICODE_API_URL =
@@ -70,6 +75,129 @@ const extractMessageIds = (responseText) => {
   }
 
   return Array.from(ids);
+};
+
+/** Strip query secrets if provider echoes them inside HTML. */
+const redactSensitiveInText = (str) =>
+  String(str || '')
+    .replace(/apikey=[^&\s"'<>]+/gi, 'apikey=***')
+    .replace(/password=[^&\s"'<>]+/gi, 'password=***');
+
+/**
+ * BulkSMSApps balance API often returns a short text line plus ASP.NET HTML, e.g.
+ * "111070 credit balance <BR> <!DOCTYPE html>..."
+ */
+const parseCreditsFromBalanceResponse = (raw) => {
+  const textBeforeFirstTag = raw.split('<')[0].replace(/\s+/g, ' ').trim();
+  const creditPhrase =
+    textBeforeFirstTag.match(/(\d[\d,\s]*)\s*credit\s*balance/i) ||
+    raw.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/gi, ' ').replace(/\s+/g, ' ').trim()
+      .match(/(\d[\d,\s]*)\s*credit\s*balance/i);
+
+  if (creditPhrase) {
+    const n = Number(String(creditPhrase[1]).replace(/[\s,]/g, ''));
+    if (Number.isFinite(n) && n >= 0) {
+      return {
+        balanceCredits: n,
+        balanceRaw: `${n} credit balance`.trim(),
+      };
+    }
+  }
+
+  const compact = textBeforeFirstTag.replace(/,/g, '');
+  const simpleNum = compact.match(/^(-?\d+(?:\.\d+)?)\s*$/);
+  if (simpleNum) {
+    const n = Number(simpleNum[1]);
+    if (Number.isFinite(n)) {
+      return { balanceCredits: n, balanceRaw: textBeforeFirstTag };
+    }
+  }
+
+  const flat = raw.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/gi, ' ').replace(/\s+/g, ' ').trim();
+  const errProbe = (textBeforeFirstTag || flat).slice(0, 400);
+  if (/invalid|authentication|unauthor|wrong\s*api|api\s*key|^error\b|failed|denied/i.test(errProbe)) {
+    return { balanceCredits: null, balanceRaw: errProbe.slice(0, 200), providerMessage: errProbe.slice(0, 300) };
+  }
+
+  const firstNum = textBeforeFirstTag.match(/-?\d+(?:\.\d+)?/);
+  if (firstNum && textBeforeFirstTag.length <= 80) {
+    const n = Number(firstNum[0]);
+    if (Number.isFinite(n)) {
+      return { balanceCredits: n, balanceRaw: textBeforeFirstTag };
+    }
+  }
+
+  return {
+    balanceCredits: null,
+    balanceRaw: textBeforeFirstTag.slice(0, 120) || flat.slice(0, 120),
+    providerMessage: 'Could not parse credit balance from provider response.',
+  };
+};
+
+/**
+ * Check account SMS credits (BulkSMSApps HTTP API v2).
+ * @see https://www.bulksmsapps.com/api/apicheckbalancev2.aspx?apikey=...
+ */
+export const getBulkSmsAccountInfo = async () => {
+  const username = BULK_SMS_ACCOUNT_USERNAME.trim() || null;
+  const senderId = BULK_SMS_SENDER_ID;
+
+  if (!BULK_SMS_API_KEY) {
+    return {
+      configured: false,
+      username,
+      senderId,
+      balanceCredits: null,
+      balanceRaw: null,
+      providerMessage: 'Bulk SMS API key is not configured on the server (BULK_SMS_API_KEY).',
+    };
+  }
+
+  const response = await axios.get(BULK_SMS_BALANCE_URL, {
+    params: { apikey: BULK_SMS_API_KEY },
+    timeout: 15000,
+    headers: { Accept: 'text/plain' },
+  });
+
+  const raw =
+    typeof response.data === 'string'
+      ? response.data.trim()
+      : String(response.data ?? '').trim();
+
+  if (!raw) {
+    return {
+      configured: true,
+      username,
+      senderId,
+      balanceCredits: null,
+      balanceRaw: null,
+      providerMessage: 'Empty response from balance API',
+    };
+  }
+
+  const parsed = parseCreditsFromBalanceResponse(raw);
+  const safeRaw = parsed.balanceRaw != null ? redactSensitiveInText(parsed.balanceRaw) : null;
+  const safeMsg = parsed.providerMessage != null ? redactSensitiveInText(parsed.providerMessage) : null;
+
+  if (parsed.providerMessage && parsed.balanceCredits === null) {
+    return {
+      configured: true,
+      username,
+      senderId,
+      balanceCredits: null,
+      balanceRaw: safeRaw,
+      providerMessage: safeMsg,
+    };
+  }
+
+  return {
+    configured: true,
+    username,
+    senderId,
+    balanceCredits: parsed.balanceCredits,
+    balanceRaw: safeRaw,
+    providerMessage: null,
+  };
 };
 
 export const sendSmsThroughBulkSmsApps = async ({
@@ -179,5 +307,6 @@ export const sendPasswordResetSuccess = async (mobileNumber, name, username, new
 export default {
   sendSmsThroughBulkSmsApps,
   sendOTP,
-  sendPasswordResetSuccess
+  sendPasswordResetSuccess,
+  getBulkSmsAccountInfo,
 };

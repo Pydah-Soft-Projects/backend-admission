@@ -5,6 +5,7 @@ import {
   sendTestTemplateSms,
   getLeadCommunications,
   getLeadCommunicationStats,
+  getBulkSmsAccountStatus,
 } from '../controllers/communication.controller.js';
 import {
   getTemplates,
@@ -34,6 +35,7 @@ router.put('/templates/:id', isSuperAdmin, updateTemplate);
 router.delete('/templates/:id', isSuperAdmin, deleteTemplate);
 router.delete('/templates/:id/hard', isSuperAdmin, hardDeleteTemplate);
 router.post('/templates/:id/test-sms', isSuperAdmin, sendTestTemplateSms);
+router.get('/sms/account', isSuperAdmin, getBulkSmsAccountStatus);
 
 // Lead communications
 router.post('/lead/:leadId/call', logCallCommunication);
