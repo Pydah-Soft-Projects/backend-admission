@@ -34,6 +34,111 @@ export const resolveHrmsOrgNamesFindById = async (employee, Division, Department
   };
 };
 
+/**
+ * Mutates each user row that has `emp_no` and/or `hrms_id` to set `division`, `department`, `group` from HRMS.
+ * Rows must be plain objects (same shape as `formatUser` output for getUsers, or assignable list rows with emp_no/hrms_id).
+ */
+async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'users') {
+  if (!formattedUsers?.length) return;
+  const empNoStrings = [
+    ...new Set(
+      formattedUsers
+        .filter((u) => u.emp_no != null && String(u.emp_no).trim() !== '')
+        .map((u) => String(u.emp_no).trim())
+    ),
+  ];
+  const hrmsIdStrings = [
+    ...new Set(
+      formattedUsers
+        .map((u) => (u.hrms_id != null ? String(u.hrms_id).trim() : ''))
+        .filter((s) => s && mongoose.Types.ObjectId.isValid(s))
+    ),
+  ];
+
+  if (empNoStrings.length === 0 && hrmsIdStrings.length === 0) return;
+
+  try {
+    const hrmsConn = await connectHRMS();
+    const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
+    const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
+    const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
+    const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+    const empByMongoId = new Map();
+
+    if (empNoStrings.length > 0) {
+      const empNoNumbers = [
+        ...new Set(
+          empNoStrings
+            .map((s) => Number(s))
+            .filter((n) => Number.isFinite(n) && !Number.isNaN(n))
+        ),
+      ];
+      const empNoOr = [];
+      if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
+      if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
+      const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
+        .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+
+      for (const emp of hrmsEmployeesRaw || []) {
+        if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+      }
+    }
+
+    if (hrmsIdStrings.length > 0) {
+      const oids = hrmsIdStrings.map((id) => new mongoose.Types.ObjectId(id));
+      const byIdRaw = await Employee.find({ _id: { $in: oids } })
+        .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
+      for (const emp of byIdRaw || []) {
+        if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
+      }
+    }
+
+    const hrmsEmployees = [...empByMongoId.values()];
+
+    if (hrmsEmployees.length > 0) {
+      const orgRows = await Promise.all(
+        hrmsEmployees.map(async (emp) => ({
+          emp,
+          org: await resolveHrmsOrgNamesFindById(emp, Division, Department, Group),
+        }))
+      );
+
+      const hrmsRowByEmployeeId = Object.fromEntries(
+        orgRows.map(({ emp, org }) => [emp._id.toString(), org])
+      );
+      const hrmsMap = {};
+      for (const { emp, org } of orgRows) {
+        const rawKey = String(emp.emp_no ?? '').trim();
+        const normKey = normalizeEmpNoKey(emp.emp_no);
+        if (rawKey) hrmsMap[rawKey] = org;
+        if (normKey && normKey !== rawKey) hrmsMap[normKey] = org;
+      }
+
+      formattedUsers.forEach((user) => {
+        const rawKey = user.emp_no != null ? String(user.emp_no).trim() : '';
+        const normKey = normalizeEmpNoKey(user.emp_no);
+        let hrmsRow =
+          (rawKey && hrmsMap[rawKey]) ||
+          (normKey && hrmsMap[normKey]) ||
+          null;
+        if (!hrmsRow && user.hrms_id) {
+          const hid = String(user.hrms_id).trim();
+          if (mongoose.Types.ObjectId.isValid(hid)) {
+            hrmsRow = hrmsRowByEmployeeId[hid] || null;
+          }
+        }
+        if (hrmsRow) {
+          user.division = hrmsRow.division;
+          user.department = hrmsRow.department;
+          user.group = hrmsRow.group;
+        }
+      });
+    }
+  } catch (hrmsError) {
+    console.error(`HRMS hydration error (${logContext}):`, hrmsError);
+  }
+}
+
 const sanitizePermissions = (permissions = {}) => {
   if (!permissions || typeof permissions !== 'object') {
     return {};
@@ -92,105 +197,7 @@ export const getUsers = async (req, res) => {
 
     const formattedUsers = users.map(formatUser);
 
-    // Hydrate users with HRMS organizational details if linked
-    const empNoStrings = [
-      ...new Set(
-        formattedUsers
-          .filter((u) => u.emp_no != null && String(u.emp_no).trim() !== '')
-          .map((u) => String(u.emp_no).trim())
-      ),
-    ];
-    // Student Counselors (and some other roles) are often linked via HRMS Mongo _id only; emp_no may be empty.
-    const hrmsIdStrings = [
-      ...new Set(
-        formattedUsers
-          .map((u) => (u.hrms_id != null ? String(u.hrms_id).trim() : ''))
-          .filter((s) => s && mongoose.Types.ObjectId.isValid(s))
-      ),
-    ];
-
-    if (empNoStrings.length > 0 || hrmsIdStrings.length > 0) {
-      try {
-        const hrmsConn = await connectHRMS();
-        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
-        const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
-        const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
-        const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
-        const empByMongoId = new Map();
-
-        if (empNoStrings.length > 0) {
-          const empNoNumbers = [
-            ...new Set(
-              empNoStrings
-                .map((s) => Number(s))
-                .filter((n) => Number.isFinite(n) && !Number.isNaN(n))
-            ),
-          ];
-          const empNoOr = [];
-          if (empNoStrings.length) empNoOr.push({ emp_no: { $in: empNoStrings } });
-          if (empNoNumbers.length) empNoOr.push({ emp_no: { $in: empNoNumbers } });
-          const hrmsEmployeesRaw = await Employee.find(empNoOr.length === 1 ? empNoOr[0] : { $or: empNoOr })
-            .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
-
-          for (const emp of hrmsEmployeesRaw || []) {
-            if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
-          }
-        }
-
-        if (hrmsIdStrings.length > 0) {
-          const oids = hrmsIdStrings.map((id) => new mongoose.Types.ObjectId(id));
-          const byIdRaw = await Employee.find({ _id: { $in: oids } })
-            .select('emp_no division_id department_id employee_group_id designation_id dynamicFields');
-          for (const emp of byIdRaw || []) {
-            if (emp?._id) empByMongoId.set(emp._id.toString(), emp);
-          }
-        }
-
-        const hrmsEmployees = [...empByMongoId.values()];
-
-        if (hrmsEmployees.length > 0) {
-          const orgRows = await Promise.all(
-            hrmsEmployees.map(async (emp) => ({
-              emp,
-              org: await resolveHrmsOrgNamesFindById(emp, Division, Department, Group),
-            }))
-          );
-
-          const hrmsRowByEmployeeId = Object.fromEntries(
-            orgRows.map(({ emp, org }) => [emp._id.toString(), org])
-          );
-          const hrmsMap = {};
-          for (const { emp, org } of orgRows) {
-            const rawKey = String(emp.emp_no ?? '').trim();
-            const normKey = normalizeEmpNoKey(emp.emp_no);
-            if (rawKey) hrmsMap[rawKey] = org;
-            if (normKey && normKey !== rawKey) hrmsMap[normKey] = org;
-          }
-
-          formattedUsers.forEach((user) => {
-            const rawKey = user.emp_no != null ? String(user.emp_no).trim() : '';
-            const normKey = normalizeEmpNoKey(user.emp_no);
-            let hrmsRow =
-              (rawKey && hrmsMap[rawKey]) ||
-              (normKey && hrmsMap[normKey]) ||
-              null;
-            if (!hrmsRow && user.hrms_id) {
-              const hid = String(user.hrms_id).trim();
-              if (mongoose.Types.ObjectId.isValid(hid)) {
-                hrmsRow = hrmsRowByEmployeeId[hid] || null;
-              }
-            }
-            if (hrmsRow) {
-              user.division = hrmsRow.division;
-              user.department = hrmsRow.department;
-              user.group = hrmsRow.group;
-            }
-          });
-        }
-      } catch (hrmsError) {
-        console.error('HRMS hydration error in getUsers:', hrmsError);
-      }
-    }
+    await hydrateUserRowsFromHrms(formattedUsers, 'getUsers');
 
     // Resolve manager id to a small object so list/card views match detail modal lookups
     const userById = Object.fromEntries(formattedUsers.map((u) => [String(u._id), u]));
@@ -218,20 +225,34 @@ export const getAssignableUsers = async (req, res) => {
   try {
     const pool = getPool();
     const [users] = await pool.execute(
-      `SELECT id, name, email, role_name, is_active
+      `SELECT id, hrms_id, emp_no, name, email, role_name, is_active
        FROM users
        WHERE is_active = 1
          AND role_name IN ('Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO')
        ORDER BY name ASC`
     );
 
-    const payload = (users || []).map((u) => ({
+    const formattedUsers = (users || []).map((u) => ({
       id: u.id,
       _id: u.id,
+      hrms_id: u.hrms_id,
+      emp_no: u.emp_no,
       name: u.name,
       email: u.email,
       roleName: u.role_name,
       isActive: u.is_active === 1 || u.is_active === true,
+    }));
+
+    await hydrateUserRowsFromHrms(formattedUsers, 'getAssignableUsers');
+
+    const payload = formattedUsers.map((u) => ({
+      id: u.id,
+      _id: u.id,
+      name: u.name,
+      email: u.email,
+      roleName: u.roleName,
+      isActive: u.isActive,
+      department: u.department,
     }));
 
     return successResponse(res, payload, 'Assignable users retrieved successfully', 200);
