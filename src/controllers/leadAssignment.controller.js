@@ -1458,12 +1458,25 @@ export const getOverviewAnalytics = async (req, res) => {
       }
     }
     const leadWhere = leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')}` : '';
-    const leadWhereAnd = (suffix) =>
-      leadFilters.length > 0 ? `WHERE ${leadFilters.join(' AND ')} AND ${suffix}` : `WHERE ${suffix}`;
 
-    // Get basic counts, funnel metrics, and lead status breakdown in a single query
-    const [countsResult] = await pool.execute(
-      `SELECT 
+    const leadsCreatedWhere = leadFilters.length > 0
+      ? `${leadWhere} AND created_at >= ? AND created_at <= ?`
+      : 'WHERE created_at >= ? AND created_at <= ?';
+
+    const [
+      countsPack,
+      userRolePack,
+      leadStatusPack,
+      joiningStatusPack,
+      admissionStatusPack,
+      admissionsTotalPack,
+      leadsCreatedPack,
+      statusChangesPack,
+      joiningTrendPack,
+      admissionsPack,
+    ] = await Promise.all([
+      pool.execute(
+        `SELECT 
         COUNT(*) as totalLeads,
         SUM(CASE WHEN lead_status = 'Confirmed' THEN 1 ELSE 0 END) as confirmedLeads,
         SUM(CASE WHEN lead_status = 'Admitted' THEN 1 ELSE 0 END) as admittedLeads,
@@ -1477,8 +1490,57 @@ export const getOverviewAnalytics = async (req, res) => {
         THEN 1 ELSE 0 END) as callOrVisitDone,
         SUM(CASE WHEN lead_status IN ('Interested', 'CET Applied') THEN 1 ELSE 0 END) as interestedLeads
       FROM leads ${leadWhere}`,
-      leadParams
-    );
+        leadParams
+      ),
+      pool.execute(
+        `SELECT role_name, COUNT(*) as count 
+       FROM users 
+       WHERE role_name IN ('Student Counselor', 'PRO', 'Data Entry User', 'Sub Super Admin')
+       GROUP BY role_name`
+      ),
+      pool.execute(`SELECT lead_status, COUNT(*) as count FROM leads ${leadWhere} GROUP BY lead_status`, leadParams),
+      pool.execute('SELECT status, COUNT(*) as count FROM joinings GROUP BY status').catch(() => [[{ status: 'draft', count: 0 }]]),
+      pool.execute('SELECT status, COUNT(*) as count FROM admissions GROUP BY status').catch(() => [[{ status: 'active', count: 0 }]]),
+      pool.execute('SELECT COUNT(*) as total FROM admissions').catch(() => [[{ total: 0 }]]),
+      pool.execute(
+        `SELECT DATE(created_at) as date, COUNT(*) as count 
+       FROM leads 
+       ${leadsCreatedWhere}
+       GROUP BY DATE(created_at)
+       ORDER BY date ASC`,
+        [...leadParams, startDateStr, endDateStr]
+      ),
+      pool.execute(
+        `SELECT DATE(created_at) as date, new_status as status, COUNT(*) as count
+       FROM activity_logs
+       WHERE type = 'status_change' AND created_at >= ? AND created_at <= ?
+       GROUP BY DATE(created_at), new_status
+       ORDER BY date ASC`,
+        [startDateStr, endDateStr]
+      ),
+      pool
+        .execute(
+          `SELECT DATE(updated_at) as date, status, COUNT(*) as count
+       FROM joinings
+       WHERE updated_at >= ? AND updated_at <= ?
+       GROUP BY DATE(updated_at), status
+       ORDER BY date ASC`,
+          [startDateStr, endDateStr]
+        )
+        .catch(() => [[]]),
+      pool
+        .execute(
+          `SELECT DATE(admission_date) as date, COUNT(*) as count
+       FROM admissions
+       WHERE admission_date >= ? AND admission_date <= ?
+       GROUP BY DATE(admission_date)
+       ORDER BY date ASC`,
+          [startDateStr, endDateStr]
+        )
+        .catch(() => [[]]),
+    ]);
+
+    const countsResult = countsPack[0];
     const countRow = countsResult[0];
     const toCount = (v) => {
       if (v == null) return 0;
@@ -1496,13 +1558,7 @@ export const getOverviewAnalytics = async (req, res) => {
     const callOrVisitDone = toCount(countRow.callOrVisitDone);
     const interestedLeads = toCount(countRow.interestedLeads);
 
-    // Get user role counts
-    const [userRoleCountsAgg] = await pool.execute(
-      `SELECT role_name, COUNT(*) as count 
-       FROM users 
-       WHERE role_name IN ('Student Counselor', 'PRO', 'Data Entry User', 'Sub Super Admin')
-       GROUP BY role_name`
-    );
+    const userRoleCountsAgg = userRolePack[0];
     const userRoleCounts = {
       counselors: 0,
       pros: 0,
@@ -1516,68 +1572,15 @@ export const getOverviewAnalytics = async (req, res) => {
       if (item.role_name === 'Sub Super Admin') userRoleCounts.subAdmins = item.count;
     });
 
-    // Get lead status breakdown
-    const [leadStatusAgg] = await pool.execute(
-      `SELECT lead_status, COUNT(*) as count FROM leads ${leadWhere} GROUP BY lead_status`,
-      leadParams
-    );
-
-    // Get joining status breakdown (NOTE: Requires joinings table - will be updated when joining controller is migrated)
-    const [joiningStatusAgg] = await pool.execute(
-      'SELECT status, COUNT(*) as count FROM joinings GROUP BY status'
-    ).catch(() => [[{ status: 'draft', count: 0 }]]); // Fallback if table doesn't exist yet
-
-    // Get admission status breakdown (NOTE: Requires admissions table - will be updated when admission controller is migrated)
-    const [admissionStatusAgg] = await pool.execute(
-      'SELECT status, COUNT(*) as count FROM admissions GROUP BY status'
-    ).catch(() => [[{ status: 'active', count: 0 }]]); // Fallback if table doesn't exist yet
-
-    const [admissionsTotalResult] = await pool.execute('SELECT COUNT(*) as total FROM admissions')
-      .catch(() => [{ total: 0 }]);
-    const admissionsTotal = admissionsTotalResult[0].total;
-
-    // Get leads created by date
-    const leadsCreatedWhere = leadFilters.length > 0
-      ? `${leadWhere} AND created_at >= ? AND created_at <= ?`
-      : 'WHERE created_at >= ? AND created_at <= ?';
-    const [leadsCreatedAgg] = await pool.execute(
-      `SELECT DATE(created_at) as date, COUNT(*) as count 
-       FROM leads 
-       ${leadsCreatedWhere}
-       GROUP BY DATE(created_at)
-       ORDER BY date ASC`,
-      [...leadParams, startDateStr, endDateStr]
-    );
-
-    // Get status changes by date
-    const [statusChangesAgg] = await pool.execute(
-      `SELECT DATE(created_at) as date, new_status as status, COUNT(*) as count
-       FROM activity_logs
-       WHERE type = 'status_change' AND created_at >= ? AND created_at <= ?
-       GROUP BY DATE(created_at), new_status
-       ORDER BY date ASC`,
-      [startDateStr, endDateStr]
-    );
-
-    // Get joining trends (NOTE: Requires joinings table)
-    const [joiningTrendAgg] = await pool.execute(
-      `SELECT DATE(updated_at) as date, status, COUNT(*) as count
-       FROM joinings
-       WHERE updated_at >= ? AND updated_at <= ?
-       GROUP BY DATE(updated_at), status
-       ORDER BY date ASC`,
-      [startDateStr, endDateStr]
-    ).catch(() => [[]]); // Fallback if table doesn't exist yet
-
-    // Get admissions by date (NOTE: Requires admissions table)
-    const [admissionsAgg] = await pool.execute(
-      `SELECT DATE(admission_date) as date, COUNT(*) as count
-       FROM admissions
-       WHERE admission_date >= ? AND admission_date <= ?
-       GROUP BY DATE(admission_date)
-       ORDER BY date ASC`,
-      [startDateStr, endDateStr]
-    ).catch(() => [[]]); // Fallback if table doesn't exist yet
+    const leadStatusAgg = leadStatusPack[0];
+    const joiningStatusAgg = joiningStatusPack[0];
+    const admissionStatusAgg = admissionStatusPack[0];
+    const admissionsTotalResult = admissionsTotalPack[0];
+    const admissionsTotal = admissionsTotalResult[0]?.total ?? 0;
+    const leadsCreatedAgg = leadsCreatedPack[0];
+    const statusChangesAgg = statusChangesPack[0];
+    const joiningTrendAgg = joiningTrendPack[0] || [];
+    const admissionsAgg = admissionsPack[0] || [];
 
     const leadStatusBreakdown = leadStatusAgg.reduce((acc, item) => {
       const key = item.lead_status || 'Unknown';
@@ -2669,6 +2672,18 @@ export const getUserAnalytics = async (req, res) => {
     const perfDivNorm = String(perfDivision || '').trim();
     const perfRoleAppliedInSql = Boolean(!userId && perfRoleNorm);
     const needsPostHydratePerfFilter = Boolean(perfSearchNorm || perfDeptNorm || perfGroupNorm || perfDivNorm);
+    /** Super Admin overview: HRMS only needed for visible rows — avoids slow Mongo when cohort is large (502/timeouts behind nginx). */
+    const explicitUserIds = userId ? String(userId).split(',').map((id) => id.trim()).filter(Boolean) : [];
+    const deferHrmsHydrateToPage =
+      isCurrentPortfolioOnly &&
+      !isRosterOnly &&
+      explicitUserIds.length === 0 &&
+      pageQuery != null &&
+      pageQuery !== '' &&
+      limitQuery != null &&
+      limitQuery !== '' &&
+      !needsPostHydratePerfFilter &&
+      !includeAssignmentDetailsForWork;
 
     let perfFilteredUsers;
     let batch1Results;
@@ -2678,10 +2693,14 @@ export const getUserAnalytics = async (req, res) => {
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
       const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
-      [, batch1Results] = await Promise.all([
-        hydrateUserOrgFromHrms(users, pool),
-        runBatch1(batch1Ids),
-      ]);
+      if (deferHrmsHydrateToPage) {
+        batch1Results = await runBatch1(batch1Ids);
+      } else {
+        [, batch1Results] = await Promise.all([
+          hydrateUserOrgFromHrms(users, pool),
+          runBatch1(batch1Ids),
+        ]);
+      }
     } else {
       await hydrateUserOrgFromHrms(users, pool);
       perfFilteredUsers = users;
@@ -2722,7 +2741,6 @@ export const getUserAnalytics = async (req, res) => {
     }
 
     /** When expanding rows by userId, always return full analytics for those ids (ignore pagination). */
-    const explicitUserIds = userId ? String(userId).split(',').map((id) => id.trim()).filter(Boolean) : [];
     const allowPagination = explicitUserIds.length === 0;
     const pageNum =
       allowPagination && pageQuery != null && pageQuery !== ''
@@ -2756,6 +2774,10 @@ export const getUserAnalytics = async (req, res) => {
       const start = (safePage - 1) * limitNum;
       pageUsers = perfFilteredUsers.slice(start, start + limitNum);
       pagination = { page: safePage, limit: limitNum, total, pages };
+    }
+
+    if (deferHrmsHydrateToPage && pageUsers.length > 0) {
+      await hydrateUserOrgFromHrms(pageUsers, pool);
     }
 
     if (!pageUsers.length) {
@@ -2851,10 +2873,32 @@ export const getUserAnalytics = async (req, res) => {
 
     const aggregateUserPlaceholders = aggregateUserIds.map(() => '?').join(',');
 
-    /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
-    const batch2Promise = Promise.all([
-      pool.execute(
-        `SELECT 
+    /**
+     * Current-portfolio mode: aggregate SMS/calls only for rows tied to leads the user still owns.
+     * Without this, `communications` is scanned for all history for every counsellor → timeouts/502 behind nginx on large DBs.
+     */
+    const commDateClauseAliased = activityDateClause
+      ? activityDateClause.replace(/\bsent_at\b/g, 'c.sent_at')
+      : '';
+    const commAggSql = isCurrentPortfolioOnly
+      ? `SELECT 
+          c.sent_by as user_id, 
+          c.type, 
+          COUNT(*) as count,
+          SUM(CASE WHEN c.type = 'call' THEN c.duration_seconds ELSE 0 END) as total_duration,
+          COUNT(DISTINCT c.lead_id) as unique_leads
+        FROM communications c
+        INNER JOIN leads l ON l.id = c.lead_id
+          AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
+        WHERE c.sent_by IN (${aggregateUserPlaceholders})
+          ${commDateClauseAliased}
+          AND (
+            c.type <> 'call'
+            OR (c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> '')
+          )
+          ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+        GROUP BY c.sent_by, c.type`
+      : `SELECT 
           sent_by as user_id, 
           type, 
           COUNT(*) as count,
@@ -2866,9 +2910,14 @@ export const getUserAnalytics = async (req, res) => {
             type <> 'call'
             OR (call_outcome IS NOT NULL AND TRIM(call_outcome) <> '')
           )
-        GROUP BY sent_by, type`,
-        [...aggregateUserIds, ...activityDateParams]
-      ),
+        GROUP BY sent_by, type`;
+    const commAggParams = isCurrentPortfolioOnly
+      ? [...aggregateUserIds, ...activityDateParams, ...(useAcademicYear ? [yearNum] : [])]
+      : [...aggregateUserIds, ...activityDateParams];
+
+    /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
+    const batch2Promise = Promise.all([
+      pool.execute(commAggSql, commAggParams),
       pool.execute(
         `SELECT
           c.sent_by as user_id,
