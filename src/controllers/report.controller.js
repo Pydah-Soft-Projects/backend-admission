@@ -643,22 +643,7 @@ export const getLeadsAbstract = async (req, res) => {
       }
     }
 
-    // 1) Pre-aggregate leads by district - single scan, uses idx_leads_academic_year
-    const [leadDistrictAgg] = await pool.execute(
-      `SELECT TRIM(district) AS district, COUNT(*) AS cnt
-       FROM leads
-       WHERE ${leadWhere} AND district IS NOT NULL AND district != ''
-       GROUP BY TRIM(district)`,
-      leadParams
-    ).catch(() => [[]]);
-
-    const districtCountMap = new Map();
-    (leadDistrictAgg || []).forEach((r) => {
-      const key = norm(r.district);
-      if (key) districtCountMap.set(key, (districtCountMap.get(key) || 0) + Number(r.cnt || 0));
-    });
-
-    // 2) Fetch districts for state (or all if no state)
+    // 1) Master districts for state (or all)
     const districtWhere = stateId && stateId !== ''
       ? 'state_id = ? AND is_active = 1'
       : 'is_active = 1';
@@ -668,19 +653,44 @@ export const getLeadsAbstract = async (req, res) => {
       districtQueryParams
     ).catch(() => [[]]);
 
+    // 2) Pre-aggregate leads by district string (total + unassigned), map to master via fuzzy match
+    const [leadDistrictAgg] = await pool.execute(
+      `SELECT TRIM(district) AS district,
+              COUNT(*) AS cnt,
+              SUM(CASE WHEN assigned_to IS NULL THEN 1 ELSE 0 END) AS unassigned_cnt
+       FROM leads
+       WHERE ${leadWhere} AND district IS NOT NULL AND district != ''
+       GROUP BY TRIM(district)`,
+      leadParams
+    ).catch(() => [[]]);
+
     const masterDistrictNamesNorm = (districtRows || []).map((d) => norm(d.name));
     const districtTotals = new Map();
-    (districtRows || []).forEach((d) => districtTotals.set(norm(d.name), 0));
-    for (const [leadKey, cnt] of districtCountMap) {
+    const districtUnassignedTotals = new Map();
+    (districtRows || []).forEach((d) => {
+      const n = norm(d.name);
+      districtTotals.set(n, 0);
+      districtUnassignedTotals.set(n, 0);
+    });
+    (leadDistrictAgg || []).forEach((r) => {
+      const leadKey = norm(r.district);
+      if (!leadKey) return;
+      const cnt = Number(r.cnt || 0);
+      const unc = Number(r.unassigned_cnt ?? 0);
       const best = findBestMatch(leadKey, masterDistrictNamesNorm, 0.85);
       if (best && districtTotals.has(best)) {
         districtTotals.set(best, districtTotals.get(best) + cnt);
+        districtUnassignedTotals.set(best, districtUnassignedTotals.get(best) + unc);
       }
-    }
+    });
     const districtBreakdown = (districtRows || []).map((d) => {
       const name = d.name || '';
-      const count = districtTotals.get(norm(name)) || 0;
-      return { id: d.id, name, count: Number(count) };
+      const n = norm(name);
+      const count = Number(districtTotals.get(n) || 0);
+      let unassigned = Number(districtUnassignedTotals.get(n) || 0);
+      if (unassigned > count) unassigned = count;
+      const assigned = count - unassigned;
+      return { id: d.id, name, count, assignedCount: assigned, unassignedCount: unassigned };
     }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
 
     const maxDistrict = districtBreakdown.length > 0 ? districtBreakdown[0].name : null;
@@ -700,18 +710,14 @@ export const getLeadsAbstract = async (req, res) => {
         const mandalLeadParams = [...leadParams, districtName];
         const mandalLeadWhere = `${leadWhere} AND district = ? AND mandal IS NOT NULL AND mandal != ''`;
         const [leadMandalAgg] = await pool.execute(
-          `SELECT TRIM(mandal) AS mandal, COUNT(*) AS cnt
+          `SELECT TRIM(mandal) AS mandal,
+                  COUNT(*) AS cnt,
+                  SUM(CASE WHEN assigned_to IS NULL THEN 1 ELSE 0 END) AS unassigned_cnt
            FROM leads
            WHERE ${mandalLeadWhere}
            GROUP BY TRIM(mandal)`,
           mandalLeadParams
         ).catch(() => [[]]);
-
-        const mandalCountMap = new Map();
-        (leadMandalAgg || []).forEach((r) => {
-          const key = norm(r.mandal);
-          if (key) mandalCountMap.set(key, (mandalCountMap.get(key) || 0) + Number(r.cnt || 0));
-        });
 
         const [mandalRows] = await pool.execute(
           'SELECT id, name FROM mandals WHERE district_id = ? AND is_active = 1 ORDER BY name ASC',
@@ -720,17 +726,31 @@ export const getLeadsAbstract = async (req, res) => {
 
         const masterMandalNamesNorm = (mandalRows || []).map((m) => norm(m.name));
         const mandalTotals = new Map();
-        (mandalRows || []).forEach((m) => mandalTotals.set(norm(m.name), 0));
-        for (const [leadKey, cnt] of mandalCountMap) {
+        const mandalUnassignedTotals = new Map();
+        (mandalRows || []).forEach((m) => {
+          const n = norm(m.name);
+          mandalTotals.set(n, 0);
+          mandalUnassignedTotals.set(n, 0);
+        });
+        (leadMandalAgg || []).forEach((r) => {
+          const leadKey = norm(r.mandal);
+          if (!leadKey) return;
+          const cnt = Number(r.cnt || 0);
+          const unc = Number(r.unassigned_cnt ?? 0);
           const best = findBestMatch(leadKey, masterMandalNamesNorm, 0.85);
           if (best && mandalTotals.has(best)) {
             mandalTotals.set(best, mandalTotals.get(best) + cnt);
+            mandalUnassignedTotals.set(best, mandalUnassignedTotals.get(best) + unc);
           }
-        }
+        });
         mandalBreakdown = (mandalRows || []).map((m) => {
           const name = m.name || '';
-          const count = mandalTotals.get(norm(name)) || 0;
-          return { id: m.id, name, count: Number(count) };
+          const n = norm(name);
+          const count = Number(mandalTotals.get(n) || 0);
+          let unassigned = Number(mandalUnassignedTotals.get(n) || 0);
+          if (unassigned > count) unassigned = count;
+          const assigned = count - unassigned;
+          return { id: m.id, name, count, assignedCount: assigned, unassignedCount: unassigned };
         }).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
 
         maxMandal = mandalBreakdown.length > 0 ? mandalBreakdown[0].name : null;
