@@ -6,8 +6,14 @@ import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 
 // Helper functions for short code generation (from service)
-const generateShortCode = (length = 6) => {
-  return crypto.randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length);
+const generateShortCode = (length = 4) => {
+  const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  const bytes = crypto.randomBytes(length);
+  for (let i = 0; i < length; i++) {
+    result += charset[bytes[i] % charset.length];
+  }
+  return result;
 };
 
 const generateMeaningfulCode = (campaign, medium) => {
@@ -197,7 +203,7 @@ export const shortenUtmUrl = async (req, res) => {
         if (useMeaningfulCode && utmCampaign && utmMedium) {
           code = generateMeaningfulCode(utmCampaign, utmMedium);
         } else {
-          code = generateShortCode(6);
+          code = generateShortCode(4);
         }
       }
 
@@ -212,7 +218,13 @@ export const shortenUtmUrl = async (req, res) => {
         if (existing.length === 0) {
           break;
         }
-        finalCode = `${code}-${crypto.randomBytes(2).toString('hex')}`;
+        if (shortCode || useMeaningfulCode) {
+          // If custom or meaningful, append suffix
+          finalCode = `${code}-${crypto.randomBytes(1).toString('hex')}`;
+        } else {
+          // If auto-generated, just generate a fresh short one
+          finalCode = generateShortCode(4);
+        }
         attempts++;
       }
 
@@ -248,7 +260,7 @@ export const shortenUtmUrl = async (req, res) => {
         if (useMeaningfulCode && utmCampaign && utmMedium) {
           code = generateMeaningfulCode(utmCampaign, utmMedium);
         } else {
-          code = generateShortCode(6);
+          code = generateShortCode(4);
         }
       }
 
@@ -263,7 +275,11 @@ export const shortenUtmUrl = async (req, res) => {
         if (existing.length === 0) {
           break;
         }
-        finalCode = `${code}-${crypto.randomBytes(2).toString('hex')}`;
+        if (shortCode || useMeaningfulCode) {
+          finalCode = `${code}-${crypto.randomBytes(1).toString('hex')}`;
+        } else {
+          finalCode = generateShortCode(4);
+        }
         attempts++;
       }
 
