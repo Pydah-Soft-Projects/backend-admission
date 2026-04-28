@@ -74,6 +74,7 @@ const PRO_VISIT_STATUS_CANONICAL = [
   'Not Interested',
   'Not Available',
   'Scheduled Revisit',
+  'Wrong Data',
   'Confirmed',
 ];
 
