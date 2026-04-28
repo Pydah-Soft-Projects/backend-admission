@@ -248,14 +248,9 @@ export const assignLeads = async (req, res) => {
         params.push(state);
       }
 
-      // Add student group filter if provided
       if (studentGroup) {
-        if (studentGroup === 'Inter') {
-          conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-        } else {
-          conditions.push('student_group = ?');
-          params.push(studentGroup);
-        }
+        conditions.push('student_group = ?');
+        params.push(studentGroup);
       }
 
       if (cycleNumber != null && cycleNumber !== '') {
@@ -565,14 +560,9 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
 
-    // Student group filter (optional; align with assign/remove count logic for Inter variants)
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(studentGroup);
     }
 
     // Add mandal filter if provided
@@ -620,12 +610,8 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        baseConditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        baseConditions.push('student_group = ?');
-        baseParams.push(studentGroup);
-      }
+      baseConditions.push('student_group = ?');
+      baseParams.push(studentGroup);
     }
     if (cycleNumber != null && cycleNumber !== '') {
       const cycleBase = parseInt(cycleNumber, 10);
@@ -755,12 +741,8 @@ export const getAssignmentStats = async (req, res) => {
         }
       }
       if (studentGroup) {
-        if (studentGroup === 'Inter') {
-          gc.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-        } else {
-          gc.push('student_group = ?');
-          gp.push(studentGroup);
-        }
+        gc.push('student_group = ?');
+        gp.push(studentGroup);
       }
       if (cycleNumber != null && cycleNumber !== '') {
         const cyc = parseInt(cycleNumber, 10);
@@ -909,12 +891,8 @@ export const getAssignedCountForUser = async (req, res) => {
       }
     }
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(studentGroup);
     }
     if (mandal) {
       conditions.push('mandal = ?');
@@ -997,12 +975,8 @@ export const removeAssignments = async (req, res) => {
       }
     }
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(studentGroup);
     }
     if (mandal) {
       conditions.push('mandal = ?');
@@ -1144,12 +1118,8 @@ export const getUserLeadAnalytics = async (req, res) => {
       }
     }
     if (studentGroup) {
-      if (studentGroup === 'Inter') {
-        conditions.push("(student_group = 'Inter' OR student_group LIKE 'Inter-%')");
-      } else {
-        conditions.push('student_group = ?');
-        params.push(studentGroup);
-      }
+      conditions.push('student_group = ?');
+      params.push(studentGroup);
     }
     if (mandal) {
       conditions.push('mandal = ?');
@@ -2150,20 +2120,13 @@ function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw) 
 
 /**
  * Users with ≥1 current portfolio lead in this `leads.student_group` (MySQL only).
- * `Inter` matches `Inter` and `Inter-%` (same as lead list / reports elsewhere).
  */
 async function fetchUserIdsWithPortfolioStudentGroup(pool, userIds, studentGroupRaw) {
   const sg = studentGroupRaw != null ? String(studentGroupRaw).trim() : '';
   if (!sg || !userIds.length) return new Set(userIds);
   const ph = userIds.map(() => '?').join(',');
-  let groupSql;
-  const groupParams = [];
-  if (sg === 'Inter') {
-    groupSql = "(student_group = 'Inter' OR student_group LIKE 'Inter-%')";
-  } else {
-    groupSql = 'student_group = ?';
-    groupParams.push(sg);
-  }
+  let groupSql = 'student_group = ?';
+  const groupParams = [sg];
   const [rows] = await pool.execute(
     `SELECT DISTINCT uid FROM (
        SELECT assigned_to AS uid FROM leads
@@ -2376,6 +2339,23 @@ export const getUserAnalytics = async (req, res) => {
       shouldIncludeAssignmentDetails && !isCurrentPortfolioOnly;
     const hasOrgFilters = Boolean(division || department || group);
 
+    const portfolioStudentGroupNorm =
+      studentGroupQuery != null && String(studentGroupQuery).trim() !== ''
+        ? String(studentGroupQuery).trim()
+        : '';
+
+    const leadFiltersConditions = [];
+    const leadFiltersParams = [];
+    if (useAcademicYear) {
+      leadFiltersConditions.push('l.academic_year = ?');
+      leadFiltersParams.push(yearNum);
+    }
+    if (portfolioStudentGroupNorm) {
+      leadFiltersConditions.push('l.student_group = ?');
+      leadFiltersParams.push(portfolioStudentGroupNorm);
+    }
+    const leadFiltersSql = leadFiltersConditions.length > 0 ? ` AND ${leadFiltersConditions.join(' AND ')}` : '';
+
     // Set date range for filtering activities (effective range includes server default when both were blank)
     let activityDateConditions = [];
     let activityDateParams = [];
@@ -2417,7 +2397,7 @@ export const getUserAnalytics = async (req, res) => {
            WHERE a.type = 'status_change' AND a.target_user_id IS NOT NULL
              ${logDateClause}
              AND a.target_user_id IN (${ph})
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+             ${leadFiltersSql}
            UNION
            SELECT a.performed_by as user_id, a.lead_id
            FROM activity_logs a
@@ -2425,19 +2405,17 @@ export const getUserAnalytics = async (req, res) => {
            WHERE a.type = 'status_change'
              ${logDateClause}
              AND a.performed_by IN (${ph})
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+             ${leadFiltersSql}
            UNION
            SELECT c.sent_by as user_id, c.lead_id
            FROM communications c
            JOIN leads l ON c.lead_id = l.id
            WHERE c.sent_by IN (${ph})
              ${activityDateClause}
-             ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+             ${leadFiltersSql}
          ) as full_portfolio
          GROUP BY user_id`,
-          useAcademicYear
-            ? [...activityDateParams, ...ids, yearNum, ...activityDateParams, ...ids, yearNum, ...activityDateParams, ...ids, yearNum]
-            : [...activityDateParams, ...ids, ...activityDateParams, ...ids, ...activityDateParams, ...ids]
+          [...activityDateParams, ...ids, ...leadFiltersParams, ...activityDateParams, ...ids, ...leadFiltersParams, ...activityDateParams, ...ids, ...leadFiltersParams]
         ),
         pool.execute(
           `SELECT 
@@ -2449,9 +2427,9 @@ export const getUserAnalytics = async (req, res) => {
          WHERE a.type = 'status_change'
            ${logDateClause.replace('a.created_at', 'a.created_at')}
            AND a.performed_by IN (${ph})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           ${leadFiltersSql}
          GROUP BY a.performed_by, a.new_status`,
-          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+          [...activityDateParams, ...ids, ...leadFiltersParams]
         ),
         pool.execute(
           `SELECT 
@@ -2464,10 +2442,10 @@ export const getUserAnalytics = async (req, res) => {
            AND a.target_user_id IS NOT NULL
            ${logDateClause}
            AND a.target_user_id IN (${ph})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           ${leadFiltersSql}
            AND adm.created_at >= a.created_at
          GROUP BY user_id`,
-          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+          [...activityDateParams, ...ids, ...leadFiltersParams]
         ),
         pool.execute(
           `SELECT 
@@ -2479,12 +2457,12 @@ export const getUserAnalytics = async (req, res) => {
            AND a.target_user_id IS NOT NULL
            ${logDateClause}
            AND a.target_user_id IN (${ph})
-           ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+           ${leadFiltersSql}
            AND l.lead_status NOT IN ('Admitted', 'Closed', 'Cancelled', 'Not Interested')
            AND (l.assigned_to = a.target_user_id 
                 OR l.assigned_to_pro = a.target_user_id)
          GROUP BY user_id`,
-          useAcademicYear ? [...activityDateParams, ...ids, yearNum] : [...activityDateParams, ...ids]
+          [...activityDateParams, ...ids, ...leadFiltersParams]
         ),
       ]);
     };
@@ -2500,8 +2478,8 @@ export const getUserAnalytics = async (req, res) => {
         ];
       }
       const ph = ids.map(() => '?').join(',');
-      const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
-      const paramsBase = useAcademicYear ? [...ids, yearNum] : [...ids];
+      const aySql = leadFiltersSql;
+      const paramsBase = [...ids, ...leadFiltersParams];
       return Promise.all([
         pool.execute(
           `SELECT u.id AS user_id, COUNT(DISTINCT l.id) AS total_handled
@@ -2563,6 +2541,10 @@ export const getUserAnalytics = async (req, res) => {
       assignmentDateConditions.push('l.academic_year = ?');
       assignmentDateParams.push(yearNum);
     }
+    if (portfolioStudentGroupNorm) {
+      assignmentDateConditions.push('l.student_group = ?');
+      assignmentDateParams.push(portfolioStudentGroupNorm);
+    }
     const assignmentDateWhere =
       assignmentDateConditions.length > 0 ? `AND ${assignmentDateConditions.join(' AND ')}` : '';
 
@@ -2572,10 +2554,19 @@ export const getUserAnalytics = async (req, res) => {
      * which may happen after the report activity window. When the report filters by academic year,
      * still restrict to reclaims for leads in that year.
      */
-    const reclaimLogWhereForBatchMetrics = useAcademicYear
-      ? 'AND EXISTS (SELECT 1 FROM leads l_r WHERE l_r.id = activity_logs.lead_id AND l_r.academic_year = ?)'
+    const reclaimLogConditions = [];
+    const reclaimLogParamsForBatchMetrics = [];
+    if (useAcademicYear) {
+      reclaimLogConditions.push('l_r.academic_year = ?');
+      reclaimLogParamsForBatchMetrics.push(yearNum);
+    }
+    if (portfolioStudentGroupNorm) {
+      reclaimLogConditions.push('l_r.student_group = ?');
+      reclaimLogParamsForBatchMetrics.push(portfolioStudentGroupNorm);
+    }
+    const reclaimLogWhereForBatchMetrics = reclaimLogConditions.length > 0
+      ? `AND EXISTS (SELECT 1 FROM leads l_r WHERE l_r.id = activity_logs.lead_id AND ${reclaimLogConditions.join(' AND ')})`
       : '';
-    const reclaimLogParamsForBatchMetrics = useAcademicYear ? [yearNum] : [];
 
     const perfRoleNorm = String(perfRole || '').trim();
 
@@ -2788,10 +2779,6 @@ export const getUserAnalytics = async (req, res) => {
     }
 
     /** Reports → User Performance: restrict to counsellors/PROs with a portfolio lead in this `studentGroup` (MySQL). */
-    const portfolioStudentGroupNorm =
-      studentGroupQuery != null && String(studentGroupQuery).trim() !== ''
-        ? String(studentGroupQuery).trim()
-        : '';
     if (portfolioStudentGroupNorm) {
       const perfIds = perfFilteredUsers.map((u) => u.id).filter(Boolean);
       if (perfIds.length) {
@@ -2958,9 +2945,23 @@ export const getUserAnalytics = async (req, res) => {
             c.type <> 'call'
             OR (c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> '')
           )
-          ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+          ${leadFiltersSql}
         GROUP BY c.sent_by, c.type`
-      : `SELECT 
+      : (leadFiltersSql ? `SELECT 
+          c.sent_by as user_id, 
+          c.type, 
+          COUNT(*) as count,
+          SUM(CASE WHEN c.type = 'call' THEN c.duration_seconds ELSE 0 END) as total_duration,
+          COUNT(DISTINCT c.lead_id) as unique_leads
+        FROM communications c
+        INNER JOIN leads l ON l.id = c.lead_id
+        WHERE c.sent_by IN (${aggregateUserPlaceholders}) ${commDateClauseAliased}
+          AND (
+            c.type <> 'call'
+            OR (c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> '')
+          )
+          ${leadFiltersSql}
+        GROUP BY c.sent_by, c.type` : `SELECT 
           sent_by as user_id, 
           type, 
           COUNT(*) as count,
@@ -2972,9 +2973,9 @@ export const getUserAnalytics = async (req, res) => {
             type <> 'call'
             OR (call_outcome IS NOT NULL AND TRIM(call_outcome) <> '')
           )
-        GROUP BY sent_by, type`;
-    const commAggParams = isCurrentPortfolioOnly
-      ? [...aggregateUserIds, ...activityDateParams, ...(useAcademicYear ? [yearNum] : [])]
+        GROUP BY sent_by, type`);
+    const commAggParams = isCurrentPortfolioOnly || leadFiltersSql
+      ? [...aggregateUserIds, ...activityDateParams, ...leadFiltersParams]
       : [...aggregateUserIds, ...activityDateParams];
 
     /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
@@ -2989,23 +2990,31 @@ export const getUserAnalytics = async (req, res) => {
         WHERE c.type = 'call'
           AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
           AND c.sent_by IN (${selectedUserPlaceholders})
-          ${activityDateClause}
+          ${commDateClauseAliased}
           AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
-          ${useAcademicYear ? 'AND l.academic_year = ?' : ''}
+          ${leadFiltersSql}
         GROUP BY c.sent_by`,
-        useAcademicYear
-          ? [...selectedUserIds, ...activityDateParams, yearNum]
-          : [...selectedUserIds, ...activityDateParams]
+        [...selectedUserIds, ...activityDateParams, ...leadFiltersParams]
       ),
       pool.execute(
-        `SELECT 
+        leadFiltersSql 
+        ? `SELECT 
+          a.performed_by as user_id, 
+          COUNT(*) as total_logs,
+          SUM(CASE WHEN a.type = 'status_change' THEN 1 ELSE 0 END) as status_changes
+        FROM activity_logs a
+        INNER JOIN leads l ON l.id = a.lead_id
+        WHERE a.performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.replace(/\bsent_at\b/g, 'a.created_at')}
+          ${leadFiltersSql}
+        GROUP BY a.performed_by`
+        : `SELECT 
           performed_by as user_id, 
           COUNT(*) as total_logs,
           SUM(CASE WHEN type = 'status_change' THEN 1 ELSE 0 END) as status_changes
         FROM activity_logs 
-        WHERE performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.split('sent_at').join('created_at')}
+        WHERE performed_by IN (${selectedUserPlaceholders}) ${activityDateClause.replace(/\bsent_at\b/g, 'created_at')}
         GROUP BY performed_by`,
-        [...selectedUserIds, ...activityDateParams]
+        leadFiltersSql ? [...selectedUserIds, ...activityDateParams, ...leadFiltersParams] : [...selectedUserIds, ...activityDateParams]
       ),
     ]);
 
@@ -3122,10 +3131,8 @@ export const getUserAnalytics = async (req, res) => {
       cohortTriple = [emptyMysqlResult, emptyMysqlResult, emptyMysqlResult, emptyMysqlResult];
       let currentPortfolioCallPack = emptyMysqlResult;
       if (cohortScopeUserIds.length) {
-        const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
-        const cpParams = useAcademicYear
-          ? [...cohortScopeUserIds, yearNum]
-          : [...cohortScopeUserIds];
+        const aySql = leadFiltersSql;
+        const cpParams = [...cohortScopeUserIds, ...leadFiltersParams];
         const [cpRows] = await pool.execute(
           `SELECT
             c.sent_by AS user_id,
@@ -3191,8 +3198,8 @@ export const getUserAnalytics = async (req, res) => {
 
     if (isCurrentPortfolioOnly) {
       if (cohortScopeUserIds.length) {
-        const aySql = useAcademicYear ? 'AND l.academic_year = ?' : '';
-        const snapParams = useAcademicYear ? [...cohortScopeUserIds, yearNum] : [...cohortScopeUserIds];
+        const aySql = leadFiltersSql;
+        const snapParams = [...cohortScopeUserIds, ...leadFiltersParams];
         const [snapRowsPack] = await pool.execute(
           `SELECT u.id AS user_id,
             TRIM(u.role_name) AS cohort_user_role,

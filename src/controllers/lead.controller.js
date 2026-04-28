@@ -1220,6 +1220,14 @@ export const updateLead = async (req, res) => {
         updateFields.push('alternate_mobile = ?');
         updateValues.push(alternateMobile ? String(alternateMobile).trim() : '');
       }
+      if (isAssignedProOnly && address !== undefined) {
+        updateFields.push('address = ?');
+        updateValues.push(address ? String(address).trim() : '');
+      }
+      if (isAssignedProOnly && village !== undefined) {
+        updateFields.push('village = ?');
+        updateValues.push(village ? String(village).trim() : '');
+      }
     }
 
     const assignedAsCounsellor = currentLead.assigned_to === userId;

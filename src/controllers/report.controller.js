@@ -55,14 +55,8 @@ export const getDailyCallReports = async (req, res) => {
     const leadJoinSqlParts = [];
     const leadJoinParams = [];
     if (studentGroupRaw) {
-      if (studentGroupRaw === 'Inter') {
-        leadJoinSqlParts.push(
-          `INNER JOIN leads lead_sg ON lead_sg.id = c.lead_id AND (lead_sg.student_group = 'Inter' OR lead_sg.student_group LIKE 'Inter-%')`
-        );
-      } else {
-        leadJoinSqlParts.push('INNER JOIN leads lead_sg ON lead_sg.id = c.lead_id AND lead_sg.student_group = ?');
-        leadJoinParams.push(studentGroupRaw);
-      }
+      leadJoinSqlParts.push('INNER JOIN leads lead_sg ON lead_sg.id = c.lead_id AND lead_sg.student_group = ?');
+      leadJoinParams.push(studentGroupRaw);
     }
     const fromSql = `communications c ${leadJoinSqlParts.join(' ')}`;
 
@@ -635,12 +629,8 @@ export const getLeadsAbstract = async (req, res) => {
     let leadWhere = 'academic_year = ?';
     const leadParams = [yearNum];
     if (studentGroup && studentGroup !== '') {
-      if (studentGroup === 'Inter') {
-        leadWhere += " AND (student_group = 'Inter' OR student_group LIKE 'Inter-%')";
-      } else {
-        leadWhere += ' AND student_group = ?';
-        leadParams.push(studentGroup);
-      }
+      leadWhere += ' AND student_group = ?';
+      leadParams.push(studentGroup);
     }
 
     // 1) Master districts for state (or all)
