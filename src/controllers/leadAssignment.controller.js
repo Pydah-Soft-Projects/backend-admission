@@ -273,7 +273,7 @@ export const assignLeads = async (req, res) => {
 
       // Get available unassigned leads matching criteria (LIMIT must be literal, not placeholder)
       const [availableLeads] = await pool.execute(
-        `SELECT id FROM leads ${whereClause} LIMIT ${limitNum}`,
+        `SELECT id FROM leads ${whereClause} ORDER BY created_at DESC LIMIT ${limitNum}`,
         params
       );
 
