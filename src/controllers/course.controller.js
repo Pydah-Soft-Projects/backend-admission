@@ -1,11 +1,16 @@
 import { getPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import {
+  buildCoursesSelectList,
+  resolveCourseLevelFromRow,
+} from '../utils/secondaryCourseLevel.util.js';
 
 // Helper function to format course data from secondary database to camelCase
 // Secondary DB schema: id (int), college_id (int), name, code, total_years, semesters_per_year, 
 // year_semester_config (json), metadata (json), is_active (tinyint), created_at, updated_at
 const formatCourse = (courseData) => {
   if (!courseData) return null;
+  const programLevel = resolveCourseLevelFromRow(courseData);
   return {
     id: String(courseData.id), // Convert int to string for frontend compatibility
     _id: String(courseData.id), // Keep _id for backward compatibility
@@ -13,6 +18,7 @@ const formatCourse = (courseData) => {
     code: courseData.code || null,
     description: courseData.metadata?.description || null, // Extract from metadata if available
     isActive: courseData.is_active === 1 || courseData.is_active === true,
+    level: programLevel || null,
     // Additional fields from secondary DB
     collegeId: courseData.college_id ? String(courseData.college_id) : null,
     totalYears: courseData.total_years || null,
@@ -48,6 +54,18 @@ const formatBranch = (branchData) => {
   };
 };
 
+const formatCollege = (collegeData) => {
+  if (!collegeData) return null;
+  return {
+    id: String(collegeData.id),
+    _id: String(collegeData.id),
+    name: collegeData.name || '',
+    isActive: collegeData.is_active === 1 || collegeData.is_active === true,
+    createdAt: collegeData.created_at,
+    updatedAt: collegeData.updated_at,
+  };
+};
+
 // Note: Create, Update, and Delete operations are disabled since courses/branches are read-only from secondary database
 export const createCourse = async (req, res) => {
   return errorResponse(res, 'Courses are managed in the external system. Cannot create courses from this API.', 403);
@@ -58,9 +76,10 @@ export const listCourses = async (req, res) => {
     const showInactive = req.query.showInactive === 'true';
     const includeBranches = req.query.includeBranches === 'true';
     const pool = getPool();
+    const courseCols = await buildCoursesSelectList(pool);
 
     // Build query for secondary database
-    let query = 'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses';
+    let query = `SELECT ${courseCols} FROM courses`;
     const params = [];
     
     if (!showInactive) {
@@ -145,9 +164,10 @@ export const getCourse = async (req, res) => {
       return errorResponse(res, 'Invalid course ID', 400);
     }
 
+    const courseCols = await buildCoursesSelectList(pool);
     // Get course from secondary database
     const [courses] = await pool.execute(
-      'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses WHERE id = ?',
+      `SELECT ${courseCols} FROM courses WHERE id = ?`,
       [courseIdInt]
     );
 
@@ -248,6 +268,27 @@ export const listBranches = async (req, res) => {
   } catch (error) {
     console.error('List branches error:', error);
     return errorResponse(res, error.message || 'Failed to fetch branches', 500);
+  }
+};
+
+export const listColleges = async (req, res) => {
+  try {
+    const showInactive = req.query.showInactive === 'true';
+    const pool = getPool();
+    let query = 'SELECT id, name, is_active, created_at, updated_at FROM colleges';
+    const params = [];
+
+    if (!showInactive) {
+      query += ' WHERE is_active = ?';
+      params.push(1);
+    }
+    query += ' ORDER BY name ASC';
+
+    const [rows] = await pool.execute(query, params);
+    return successResponse(res, rows.map(formatCollege));
+  } catch (error) {
+    console.error('List colleges error:', error);
+    return errorResponse(res, error.message || 'Failed to fetch colleges', 500);
   }
 };
 

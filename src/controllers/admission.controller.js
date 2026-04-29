@@ -1,7 +1,9 @@
 import { getPool } from '../config-sql/database.js';
+import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { v4 as uuidv4 } from 'uuid';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
+import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -58,9 +60,29 @@ const formatAdmission = async (admissionData, pool) => {
   );
 
   // Parse JSON fields
-  const leadData = typeof admissionData.lead_data === 'string'
+  const leadDataRaw = typeof admissionData.lead_data === 'string'
     ? JSON.parse(admissionData.lead_data)
     : admissionData.lead_data || {};
+  const registrationFormData =
+    leadDataRaw &&
+    typeof leadDataRaw === 'object' &&
+    leadDataRaw._joiningRegistrationExtras &&
+    typeof leadDataRaw._joiningRegistrationExtras === 'object'
+      ? leadDataRaw._joiningRegistrationExtras
+      : {};
+  const leadData =
+    leadDataRaw && typeof leadDataRaw === 'object'
+      ? (() => {
+          const {
+            _joiningRegistrationExtras,
+            _joiningProgramLevel,
+            _joiningManagedCourseId,
+            _joiningManagedBranchId,
+            ...rest
+          } = leadDataRaw;
+          return rest;
+        })()
+      : leadDataRaw;
 
   const reservationOther = typeof admissionData.reservation_other === 'string'
     ? JSON.parse(admissionData.reservation_other)
@@ -76,6 +98,7 @@ const formatAdmission = async (admissionData, pool) => {
     leadId: admissionData.lead_id,
     enquiryNumber: admissionData.enquiry_number,
     leadData,
+    registrationFormData,
     joiningId: admissionData.joining_id,
     admissionNumber: admissionData.admission_number,
     status: admissionData.status,
@@ -197,6 +220,28 @@ const validateAdmissionPayload = (payload = {}) => {
   }
   return errors;
 };
+
+const formatAdmissionListItem = (row) => ({
+  _id: row.id,
+  id: row.id,
+  leadId: row.lead_id,
+  joiningId: row.joining_id,
+  admissionNumber: row.admission_number,
+  status: row.status,
+  courseInfo: {
+    courseId: row.course_id,
+    branchId: row.branch_id,
+    course: row.course || '',
+    branch: row.branch || '',
+    quota: row.quota || '',
+  },
+  studentInfo: {
+    name: row.student_name || row.lead_name || '',
+    phone: row.student_phone || row.lead_phone || '',
+  },
+  updatedAt: row.updated_at,
+  createdAt: row.created_at,
+});
 
 // Helper function to save admission related tables
 const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
@@ -330,11 +375,13 @@ export const listAdmissions = async (req, res) => {
     );
     const total = countResult[0]?.total || 0;
 
-    // Get paginated results
-    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
+    // Get paginated results.
+    // Keep this query narrow (avoid a.*) so MySQL does not sort huge TEXT/BLOB payloads.
     const [admissions] = await pool.execute(
-      `SELECT a.*, l.name as lead_name, l.phone as lead_phone, l.hall_ticket_number as lead_hall_ticket_number,
-              l.enquiry_number as lead_enquiry_number, l.lead_status as lead_lead_status
+      `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
+              a.course_id, a.branch_id, a.course, a.branch, a.quota,
+              a.student_name, a.student_phone, a.created_at, a.updated_at,
+              l.name as lead_name, l.phone as lead_phone
        FROM admissions a
        LEFT JOIN leads l ON a.lead_id = l.id
        ${whereClause}
@@ -343,10 +390,7 @@ export const listAdmissions = async (req, res) => {
       params
     );
 
-    // Format admissions
-    const formattedAdmissions = await Promise.all(
-      admissions.map((a) => formatAdmission(a, pool))
-    );
+    const formattedAdmissions = admissions.map(formatAdmissionListItem);
 
     return successResponse(
       res,
@@ -754,6 +798,13 @@ export const updateAdmissionById = async (req, res) => {
     );
     const formattedAdmission = await formatAdmission(updated[0], pool);
 
+    // Sync to secondary DB
+    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+      leadId: formattedAdmission.leadId,
+      joiningId: formattedAdmission.joiningId,
+      email: formattedAdmission.leadData?.email || ''
+    });
+
     return successResponse(
       res,
       formattedAdmission,
@@ -999,6 +1050,13 @@ export const updateAdmissionByLead = async (req, res) => {
       [admissionId]
     );
     const formattedAdmission = await formatAdmission(updated[0], pool);
+
+    // Sync to secondary DB
+    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+      leadId: formattedAdmission.leadId,
+      joiningId: formattedAdmission.joiningId,
+      email: formattedAdmission.leadData?.email || ''
+    });
 
     return successResponse(
       res,

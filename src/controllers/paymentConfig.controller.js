@@ -1,6 +1,10 @@
 import { getPool } from '../config-sql/database.js';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import {
+  buildCoursesSelectList,
+  resolveCourseLevelFromRow,
+} from '../utils/secondaryCourseLevel.util.js';
 import { encryptSensitiveValue } from '../utils/encryption.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -13,6 +17,7 @@ const maskValue = (value = '') => {
 const formatCourse = (courseData) => {
   if (!courseData) return null;
   const courseId = String(courseData.id); // Convert int to string for payment configs
+  const programLevel = resolveCourseLevelFromRow(courseData);
   return {
     id: courseId,
     _id: courseId, // Keep _id for backward compatibility
@@ -20,6 +25,7 @@ const formatCourse = (courseData) => {
     code: courseData.code || null,
     description: courseData.metadata?.description || null, // Extract from metadata if available
     isActive: courseData.is_active === 1 || courseData.is_active === true,
+    level: programLevel || null,
     // Additional fields from secondary DB
     collegeId: courseData.college_id ? String(courseData.college_id) : null,
     totalYears: courseData.total_years || null,
@@ -79,9 +85,10 @@ export const getPaymentSettings = async (req, res) => {
     const showInactive = req.query.showInactive === 'true';
     const secondaryPool = getSecondaryPool(); // Secondary DB for courses/branches
     const primaryPool = getPool(); // Primary DB for payment configs
+    const courseCols = await buildCoursesSelectList(secondaryPool);
 
     // Get courses from secondary database
-    let courseQuery = 'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses';
+    let courseQuery = `SELECT ${courseCols} FROM courses`;
     const courseParams = [];
     if (!showInactive) {
       courseQuery += ' WHERE is_active = ?';
@@ -191,6 +198,7 @@ export const getCourseFees = async (req, res) => {
     const { courseId } = req.params;
     const secondaryPool = getSecondaryPool(); // Secondary DB for courses/branches
     const primaryPool = getPool(); // Primary DB for payment configs
+    const courseCols = await buildCoursesSelectList(secondaryPool);
 
     // Convert courseId to int for secondary database query
     const courseIdInt = parseInt(courseId);
@@ -200,7 +208,7 @@ export const getCourseFees = async (req, res) => {
 
     // Get course from secondary database
     const [courses] = await secondaryPool.execute(
-      'SELECT id, college_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, created_at, updated_at FROM courses WHERE id = ?',
+      `SELECT ${courseCols} FROM courses WHERE id = ?`,
       [courseIdInt]
     );
 

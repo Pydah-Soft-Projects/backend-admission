@@ -99,6 +99,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     fatherName: leadData.father_name,
     motherName: leadData.mother_name || '',
     fatherPhone: leadData.father_phone,
+    motherPhone: leadData.mother_phone || '',
     hallTicketNumber: leadData.hall_ticket_number || '',
     village: leadData.village,
     address: leadData.address || '',

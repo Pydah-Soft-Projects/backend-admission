@@ -1,4 +1,6 @@
 import { getPool } from '../config-sql/database.js';
+import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -6,6 +8,21 @@ const DEFAULT_GENERAL_RESERVATION = 'oc';
 
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
+
+/** Managed course/branch IDs may come from the student DB; FK columns on joinings/admissions point at primary `courses` / `branches`. */
+const resolvePrimaryCourseBranchFkIds = async (pool, courseId, branchId) => {
+  let fkCourseId = null;
+  let fkBranchId = null;
+  if (courseId != null && String(courseId) !== '') {
+    const [pc] = await pool.execute('SELECT id FROM courses WHERE id = ?', [courseId]);
+    if (pc.length > 0) fkCourseId = pc[0].id;
+  }
+  if (branchId != null && String(branchId) !== '') {
+    const [pb] = await pool.execute('SELECT id FROM branches WHERE id = ?', [branchId]);
+    if (pb.length > 0) fkBranchId = pb[0].id;
+  }
+  return { fkCourseId, fkBranchId };
+};
 
 const ensureLeadExists = async (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -42,8 +59,10 @@ const formatLead = (leadData) => {
     fatherName: leadData.father_name,
     motherName: leadData.mother_name || '',
     fatherPhone: leadData.father_phone,
+    motherPhone: leadData.mother_phone || '',
     hallTicketNumber: leadData.hall_ticket_number || '',
     village: leadData.village,
+    address: leadData.address || '',
     courseInterested: leadData.course_interested,
     district: leadData.district,
     mandal: leadData.mandal,
@@ -52,6 +71,9 @@ const formatLead = (leadData) => {
     quota: leadData.quota || 'Not Applicable',
     leadStatus: leadData.lead_status || 'New',
     admissionNumber: leadData.admission_number,
+    academicYear: leadData.academic_year != null ? Number(leadData.academic_year) : undefined,
+    studentGroup: leadData.student_group || '',
+    uploadBatchId: leadData.upload_batch_id || undefined,
     dynamicFields: typeof leadData.dynamic_fields === 'string'
       ? JSON.parse(leadData.dynamic_fields)
       : leadData.dynamic_fields || {},
@@ -225,7 +247,100 @@ const generateAdmissionNumber = async () => {
     );
   }
 
-  return `${currentYear}${String(sequenceNumber).padStart(5, '0')}`;
+  return `${currentYear}${String(sequenceNumber).padStart(4, '0')}`;
+};
+
+const ensureLeadForApprovedJoining = async ({
+  connection,
+  joining,
+  formattedJoining,
+  joiningLeadData,
+  admissionNumber,
+}) => {
+  if (joining?.lead_id) return joining.lead_id;
+
+  const studentName =
+    formattedJoining?.studentInfo?.name || joiningLeadData?.name || 'Unknown Student';
+  const studentPhone =
+    formattedJoining?.studentInfo?.phone || joiningLeadData?.phone || '0000000000';
+  const fatherName =
+    formattedJoining?.parents?.father?.name || joiningLeadData?.fatherName || 'Not Provided';
+  const fatherPhone =
+    formattedJoining?.parents?.father?.phone ||
+    joiningLeadData?.fatherPhone ||
+    studentPhone;
+  const motherName =
+    formattedJoining?.parents?.mother?.name || joiningLeadData?.motherName || '';
+  const village =
+    formattedJoining?.address?.communication?.villageOrCity ||
+    joiningLeadData?.village ||
+    'Not Provided';
+  const district =
+    formattedJoining?.address?.communication?.district ||
+    joiningLeadData?.district ||
+    'Not Provided';
+  const mandal =
+    formattedJoining?.address?.communication?.mandal ||
+    joiningLeadData?.mandal ||
+    'Not Provided';
+  const quota = formattedJoining?.courseInfo?.quota || joiningLeadData?.quota || 'Not Applicable';
+  const courseInterested =
+    formattedJoining?.courseInfo?.course || joiningLeadData?.courseInterested || '';
+  const state = joiningLeadData?.state || '';
+  const gender = joiningLeadData?.gender || formattedJoining?.studentInfo?.gender || 'Not Specified';
+  const email = joiningLeadData?.email || null;
+  const dynamicFields =
+    joiningLeadData?.dynamicFields && typeof joiningLeadData.dynamicFields === 'object'
+      ? joiningLeadData.dynamicFields
+      : {};
+
+  let enquiryNumber = '';
+  if (joiningLeadData?.enquiryNumber && String(joiningLeadData.enquiryNumber).trim()) {
+    const candidate = String(joiningLeadData.enquiryNumber).trim();
+    const [enquiryConflict] = await connection.execute(
+      'SELECT id FROM leads WHERE enquiry_number = ? LIMIT 1',
+      [candidate]
+    );
+    if (enquiryConflict.length === 0) {
+      enquiryNumber = candidate;
+    }
+  }
+
+  const newLeadId = uuidv4();
+  await connection.execute(
+    `INSERT INTO leads (
+      id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
+      village, district, mandal, state, gender, quota, course_interested, dynamic_fields,
+      lead_status, admission_number, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      newLeadId,
+      enquiryNumber || null,
+      studentName,
+      studentPhone,
+      email,
+      fatherName,
+      motherName,
+      fatherPhone,
+      village,
+      district,
+      mandal,
+      state,
+      gender,
+      quota,
+      courseInterested,
+      JSON.stringify(dynamicFields),
+      'Admitted',
+      admissionNumber,
+    ]
+  );
+
+  await connection.execute('UPDATE joinings SET lead_id = ?, updated_at = NOW() WHERE id = ?', [
+    newLeadId,
+    joining.id,
+  ]);
+
+  return newLeadId;
 };
 
 // Helper function to format joining data from SQL to camelCase
@@ -251,9 +366,49 @@ const formatJoining = async (joiningData, pool) => {
   );
 
   // Parse JSON fields
-  const leadData = typeof joiningData.lead_data === 'string'
+  const leadDataRaw = typeof joiningData.lead_data === 'string'
     ? JSON.parse(joiningData.lead_data)
     : joiningData.lead_data || {};
+
+  let registrationFormData = {};
+  let leadData = leadDataRaw;
+  let storedProgramLevel = '';
+  let managedJoiningCourseId = null;
+  let managedJoiningBranchId = null;
+  if (leadDataRaw && typeof leadDataRaw === 'object') {
+    if (leadDataRaw._joiningProgramLevel != null && String(leadDataRaw._joiningProgramLevel).trim()) {
+      storedProgramLevel = String(leadDataRaw._joiningProgramLevel).trim();
+    }
+    if (leadDataRaw._joiningManagedCourseId != null && String(leadDataRaw._joiningManagedCourseId) !== '') {
+      managedJoiningCourseId = leadDataRaw._joiningManagedCourseId;
+    }
+    if (leadDataRaw._joiningManagedBranchId != null && String(leadDataRaw._joiningManagedBranchId) !== '') {
+      managedJoiningBranchId = leadDataRaw._joiningManagedBranchId;
+    }
+    if (leadDataRaw._joiningRegistrationExtras) {
+      registrationFormData = {
+        ...(typeof leadDataRaw._joiningRegistrationExtras === 'object'
+          ? leadDataRaw._joiningRegistrationExtras
+          : {}),
+      };
+      const {
+        _joiningRegistrationExtras,
+        _joiningProgramLevel,
+        _joiningManagedCourseId: _jmc,
+        _joiningManagedBranchId: _jmb,
+        ...rest
+      } = leadDataRaw;
+      leadData = rest;
+    } else {
+      const {
+        _joiningProgramLevel,
+        _joiningManagedCourseId: _jmc,
+        _joiningManagedBranchId: _jmb,
+        ...rest
+      } = leadDataRaw;
+      leadData = rest;
+    }
+  }
 
   const reservationOther = typeof joiningData.reservation_other === 'string'
     ? JSON.parse(joiningData.reservation_other)
@@ -268,13 +423,15 @@ const formatJoining = async (joiningData, pool) => {
     id: joiningData.id,
     leadId: joiningData.lead_id,
     leadData,
+    registrationFormData,
     status: joiningData.status,
     courseInfo: {
-      courseId: joiningData.course_id,
-      branchId: joiningData.branch_id,
+      courseId: managedJoiningCourseId != null ? managedJoiningCourseId : joiningData.course_id || null,
+      branchId: managedJoiningBranchId != null ? managedJoiningBranchId : joiningData.branch_id || null,
       course: joiningData.course || '',
       branch: joiningData.branch || '',
       quota: joiningData.quota || '',
+      programLevel: storedProgramLevel || undefined,
     },
     paymentSummary: {
       totalFee: Number(joiningData.payment_total_fee) || 0,
@@ -352,6 +509,21 @@ const formatJoining = async (joiningData, pool) => {
       studyingStandard: sib.studying_standard || '',
       institutionName: sib.institution_name || '',
     })),
+    // List query joins `leads` and exposes these aliases (not present on SELECT j.* only).
+    ...(joiningData.lead_id &&
+    (joiningData.lead_name != null ||
+      joiningData.lead_enquiry_number != null ||
+      joiningData.lead_phone != null)
+      ? {
+          lead: {
+            name: joiningData.lead_name || '',
+            phone: joiningData.lead_phone || '',
+            enquiryNumber: joiningData.lead_enquiry_number || '',
+            hallTicketNumber: joiningData.lead_hall_ticket_number || '',
+            leadStatus: joiningData.lead_lead_status || '',
+          },
+        }
+      : {}),
     documents: {
       ssc: joiningData.document_ssc || 'pending',
       inter: joiningData.document_inter || 'pending',
@@ -595,6 +767,11 @@ export const getJoining = async (req, res) => {
             200
           );
         }
+        try {
+          lead = await ensureLeadExists(joiningDoc.lead_id);
+        } catch {
+          lead = null;
+        }
       }
     }
 
@@ -691,8 +868,126 @@ export const getJoining = async (req, res) => {
   }
 };
 
+const STUDENT_PHONE_REG_KEYS = [
+  'student_phone',
+  'phone',
+  'mobile',
+  'phonenumber',
+  'student_mobile',
+  'student_mobileno',
+  'mobile_number',
+  'phone_number',
+  'contact_number',
+  'primary_phone',
+  'student_contact_number',
+];
+
+const STUDENT_DOB_REG_KEYS = [
+  'date_of_birth',
+  'dateofbirth',
+  'dob',
+  'student_dob',
+  'student_date_of_birth',
+  'birth_date',
+  'birthdate',
+];
+
+function pickFromRegistrationFormData(registrationFormData, keys) {
+  if (!registrationFormData || typeof registrationFormData !== 'object') return '';
+  const want = new Set(keys.map((k) => String(k).toLowerCase()));
+  for (const [k, v] of Object.entries(registrationFormData)) {
+    if (!want.has(String(k).toLowerCase())) continue;
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+function normalizePhoneTenDigits(raw) {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (d.length >= 10) return d.slice(-10);
+  return d;
+}
+
+/** Fill structured student phone / DOB from registration JSON when columns would otherwise stay empty. */
+function mergeStudentInfoFromRegistrationFormData(studentInfo, registrationFormData) {
+  const next = { ...studentInfo };
+  let phoneDigits = normalizePhoneTenDigits(next.phone || '');
+  if (phoneDigits.length !== 10) {
+    const fromReg = normalizePhoneTenDigits(
+      pickFromRegistrationFormData(registrationFormData, STUDENT_PHONE_REG_KEYS)
+    );
+    if (fromReg.length === 10) phoneDigits = fromReg;
+  }
+  if (phoneDigits.length === 10) {
+    next.phone = phoneDigits;
+  }
+
+  let dob = String(next.dateOfBirth || '').trim();
+  if (!dob) {
+    dob = String(pickFromRegistrationFormData(registrationFormData, STUDENT_DOB_REG_KEYS) || '').trim();
+  }
+  if (dob) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+      const [y, m, day] = dob.split('-');
+      dob = `${day}-${m}-${y}`;
+    }
+    next.dateOfBirth = dob;
+  }
+
+  return next;
+}
+
+function parseJoiningRegistrationExtras(joiningRow) {
+  try {
+    const ld =
+      typeof joiningRow.lead_data === 'string'
+        ? JSON.parse(joiningRow.lead_data)
+        : joiningRow.lead_data || {};
+    if (ld && typeof ld === 'object' && ld._joiningRegistrationExtras && typeof ld._joiningRegistrationExtras === 'object') {
+      return ld._joiningRegistrationExtras;
+    }
+  } catch {
+    /* ignore */
+  }
+  return {};
+}
+
+/** Phone (10 digits) and DOB (DD-MM-YYYY when possible) from row + `lead_data._joiningRegistrationExtras`. */
+function getEffectiveStudentPhoneAndDob(joiningRow) {
+  const extras = parseJoiningRegistrationExtras(joiningRow);
+  let phoneDigits = normalizePhoneTenDigits(joiningRow.student_phone || '');
+  if (phoneDigits.length !== 10) {
+    phoneDigits = normalizePhoneTenDigits(
+      pickFromRegistrationFormData(extras, STUDENT_PHONE_REG_KEYS)
+    );
+  }
+
+  let dobVal = String(joiningRow.student_date_of_birth || '').trim();
+  if (!dobVal) {
+    dobVal = String(pickFromRegistrationFormData(extras, STUDENT_DOB_REG_KEYS) || '').trim();
+  }
+  if (dobVal && /^\d{4}-\d{2}-\d{2}$/.test(dobVal)) {
+    const [y, m, d] = dobVal.split('-');
+    dobVal = `${d}-${m}-${y}`;
+  }
+  return { phoneDigits, dobVal };
+}
+
 const normalizeJoiningPayload = (payload) => {
   const safePayload = { ...payload };
+  const rawRegForMerge =
+    safePayload.registrationFormData && typeof safePayload.registrationFormData === 'object'
+      ? safePayload.registrationFormData
+      : {};
+  if (safePayload.studentInfo && Object.keys(rawRegForMerge).length > 0) {
+    safePayload.studentInfo = mergeStudentInfoFromRegistrationFormData(
+      safePayload.studentInfo,
+      rawRegForMerge
+    );
+  }
+
   if (safePayload.studentInfo) {
     safePayload.studentInfo.name = sanitizeString(safePayload.studentInfo.name);
     safePayload.studentInfo.phone = sanitizeString(safePayload.studentInfo.phone);
@@ -746,6 +1041,16 @@ const normalizeJoiningPayload = (payload) => {
     if (safePayload.courseInfo.branchId === '') {
       safePayload.courseInfo.branchId = undefined;
     }
+  }
+
+  if (safePayload.registrationFormData && typeof safePayload.registrationFormData === 'object') {
+    const cleaned = {};
+    Object.entries(safePayload.registrationFormData).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') {
+        cleaned[k] = v;
+      }
+    });
+    safePayload.registrationFormData = cleaned;
   }
 
   return safePayload;
@@ -833,6 +1138,7 @@ export const saveJoiningDraft = async (req, res) => {
   try {
     const { leadId } = req.params;
     const payload = normalizeJoiningPayload(req.body || {});
+    const pool = getPool();
 
     // Handle new joining form without lead
     const isNewJoining = leadId === 'new' || !leadId || leadId === 'undefined';
@@ -890,13 +1196,15 @@ export const saveJoiningDraft = async (req, res) => {
       }
     }
 
-    const pool = getPool();
     let courseDoc = null;
     let branchDoc = null;
+    // Managed courses / branches in the app come from the student (secondary) database — same as payment settings.
+    // The primary pool may not contain matching `courses` / `branches` rows, so validate there.
+    const secondaryPool = getSecondaryPool();
 
     if (payload.courseInfo?.branchId && !payload.courseInfo?.courseId) {
-      const [branches] = await pool.execute(
-        'SELECT * FROM branches WHERE id = ?',
+      const [branches] = await secondaryPool.execute(
+        'SELECT * FROM course_branches WHERE id = ?',
         [payload.courseInfo.branchId]
       );
       if (branches.length === 0) {
@@ -907,7 +1215,7 @@ export const saveJoiningDraft = async (req, res) => {
     }
 
     if (payload.courseInfo?.courseId) {
-      const [courses] = await pool.execute(
+      const [courses] = await secondaryPool.execute(
         'SELECT * FROM courses WHERE id = ?',
         [payload.courseInfo.courseId]
       );
@@ -920,8 +1228,8 @@ export const saveJoiningDraft = async (req, res) => {
 
     if (payload.courseInfo?.branchId) {
       if (!branchDoc) {
-        const [branches] = await pool.execute(
-          'SELECT * FROM branches WHERE id = ? AND course_id = ?',
+        const [branches] = await secondaryPool.execute(
+          'SELECT * FROM course_branches WHERE id = ? AND course_id = ?',
           [payload.courseInfo.branchId, payload.courseInfo.courseId || courseDoc?.id]
         );
         if (branches.length === 0) {
@@ -1052,6 +1360,10 @@ export const saveJoiningDraft = async (req, res) => {
     const qualifications = payload.qualifications || {};
     const documents = payload.documents || {};
 
+    // FK columns: only set when a matching row exists in primary DB; managed IDs live in lead_data.
+    const { fkCourseId: joiningFkCourseId, fkBranchId: joiningFkBranchId } =
+      await resolvePrimaryCourseBranchFkIds(pool, courseInfo.courseId, courseInfo.branchId);
+
     // Apply lead defaults if lead exists
     let finalPayload = { ...payload };
     if (lead) {
@@ -1088,12 +1400,104 @@ export const saveJoiningDraft = async (req, res) => {
         }
       }
 
-      // Update lead data snapshot
+      // Update lead data snapshot; preserve registration extras from form builder (unmapped fields)
+      let preservedRegistrationExtras = {};
+      try {
+        const [existingJoiningRows] = await pool.execute(
+          'SELECT lead_data FROM joinings WHERE id = ?',
+          [joiningIdToUse]
+        );
+        if (existingJoiningRows?.[0]?.lead_data) {
+          const parsed =
+            typeof existingJoiningRows[0].lead_data === 'string'
+              ? JSON.parse(existingJoiningRows[0].lead_data)
+              : existingJoiningRows[0].lead_data;
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            parsed._joiningRegistrationExtras &&
+            typeof parsed._joiningRegistrationExtras === 'object'
+          ) {
+            preservedRegistrationExtras = { ...parsed._joiningRegistrationExtras };
+          }
+        }
+      } catch {
+        /* ignore parse errors */
+      }
+
       const leadDataSnapshot = { ...lead };
       delete leadDataSnapshot._id;
       delete leadDataSnapshot.id;
       delete leadDataSnapshot.__v;
-      finalPayload.leadData = leadDataSnapshot;
+
+      const mergedRegistrationExtras = {
+        ...preservedRegistrationExtras,
+        ...(payload.registrationFormData && typeof payload.registrationFormData === 'object'
+          ? payload.registrationFormData
+          : {}),
+      };
+
+      const trimmedProgramLevel =
+        courseInfo.programLevel != null && String(courseInfo.programLevel).trim()
+          ? String(courseInfo.programLevel).trim()
+          : '';
+      finalPayload.leadData = {
+        ...leadDataSnapshot,
+        ...(trimmedProgramLevel ? { _joiningProgramLevel: trimmedProgramLevel } : {}),
+        ...(Object.keys(mergedRegistrationExtras).length > 0
+          ? { _joiningRegistrationExtras: mergedRegistrationExtras }
+          : {}),
+      };
+    } else if (!lead && joiningIdToUse) {
+      let base = {};
+      try {
+        const [rows] = await pool.execute('SELECT lead_data FROM joinings WHERE id = ?', [joiningIdToUse]);
+        if (rows?.[0]?.lead_data) {
+          base =
+            typeof rows[0].lead_data === 'string'
+              ? JSON.parse(rows[0].lead_data)
+              : rows[0].lead_data;
+        }
+      } catch {
+        base = {};
+      }
+      if (!base || typeof base !== 'object') base = {};
+      const prevExtras =
+        base._joiningRegistrationExtras && typeof base._joiningRegistrationExtras === 'object'
+          ? { ...base._joiningRegistrationExtras }
+          : {};
+      const mergedRegistrationExtras = {
+        ...prevExtras,
+        ...(payload.registrationFormData && typeof payload.registrationFormData === 'object'
+          ? payload.registrationFormData
+          : {}),
+      };
+      const { _joiningRegistrationExtras: _strip, ...baseWithout } = base;
+      const trimmedProgramLevelNoLead =
+        courseInfo.programLevel != null && String(courseInfo.programLevel).trim()
+          ? String(courseInfo.programLevel).trim()
+          : '';
+      finalPayload.leadData = {
+        ...baseWithout,
+        ...(trimmedProgramLevelNoLead ? { _joiningProgramLevel: trimmedProgramLevelNoLead } : {}),
+        ...(Object.keys(mergedRegistrationExtras).length > 0
+          ? { _joiningRegistrationExtras: mergedRegistrationExtras }
+          : {}),
+      };
+    }
+
+    const managedCourseRefs = {};
+    if (courseInfo.courseId != null && String(courseInfo.courseId) !== '') {
+      managedCourseRefs._joiningManagedCourseId = courseInfo.courseId;
+    }
+    if (courseInfo.branchId != null && String(courseInfo.branchId) !== '') {
+      managedCourseRefs._joiningManagedBranchId = courseInfo.branchId;
+    }
+    if (Object.keys(managedCourseRefs).length > 0) {
+      finalPayload.leadData = {
+        ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
+        ...managedCourseRefs,
+      };
     }
 
     // Update main joining record
@@ -1159,8 +1563,8 @@ export const saveJoiningDraft = async (req, res) => {
         finalPayload.leadId || lead?.id || null,
         JSON.stringify(finalPayload.leadData || {}),
         'draft',
-        courseInfo.courseId || null,
-        courseInfo.branchId || null,
+        joiningFkCourseId,
+        joiningFkBranchId,
         courseInfo.course || '',
         courseInfo.branch || '',
         courseInfo.quota || '',
@@ -1248,21 +1652,22 @@ export const saveJoiningDraft = async (req, res) => {
 
 const validateBeforeSubmit = (joining) => {
   const errors = [];
+  const { phoneDigits, dobVal } = getEffectiveStudentPhoneAndDob(joining);
+
   if (!joining.student_name) {
     errors.push('Student name is required');
   }
 
-  if (!joining.student_phone || joining.student_phone.length !== 10) {
+  if (!phoneDigits || phoneDigits.length !== 10) {
     errors.push('Student phone number must be 10 digits');
   }
 
-  if (!joining.student_date_of_birth) {
+  if (!dobVal) {
     errors.push('Date of birth is required');
   } else {
-    const dobValue = joining.student_date_of_birth;
-    let formattedDob = dobValue;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(dobValue)) {
-      const [year, month, day] = dobValue.split('-');
+    let formattedDob = dobVal;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dobVal)) {
+      const [year, month, day] = dobVal.split('-');
       formattedDob = `${day}-${month}-${year}`;
     }
     if (!/^\d{2}-\d{2}-\d{4}$/.test(formattedDob)) {
@@ -1308,16 +1713,25 @@ export const submitJoiningForApproval = async (req, res) => {
     }
 
     const previousStatus = joining.status;
+    const { phoneDigits, dobVal } = getEffectiveStudentPhoneAndDob(joining);
 
-    // Update joining status
+    // Persist phone/DOB onto row when they only lived in registration extras (keeps admissions/reporting consistent).
     await pool.execute(
       `UPDATE joinings SET
+        student_phone = ?,
+        student_date_of_birth = ?,
         status = ?,
         submitted_at = NOW(),
         submitted_by = ?,
         updated_at = NOW()
       WHERE id = ?`,
-      ['pending_approval', req.user.id, joining.id]
+      [
+        phoneDigits || joining.student_phone || '',
+        dobVal || joining.student_date_of_birth || '',
+        'pending_approval',
+        req.user.id,
+        joining.id,
+      ]
     );
 
     // Record activity if lead exists
@@ -1355,9 +1769,10 @@ export const submitJoiningForApproval = async (req, res) => {
 };
 
 export const approveJoining = async (req, res) => {
+  const pool = getPool();
+  let connection;
   try {
     const { leadId } = req.params;
-    const pool = getPool();
 
     if (leadId === 'new' || !leadId || leadId === 'undefined') {
       return errorResponse(res, 'Invalid joining identifier', 400);
@@ -1365,21 +1780,19 @@ export const approveJoining = async (req, res) => {
 
     // Find joining by id or leadId
     let joining = null;
-    if (leadId && typeof leadId === 'string' && leadId.length === 36) {
-      const [joinings] = await pool.execute(
-        'SELECT * FROM joinings WHERE id = ? OR lead_id = ?',
-        [leadId, leadId]
-      );
-      if (joinings.length > 0) {
-        joining = joinings[0];
-      }
+    const [joinings] = await pool.execute(
+      'SELECT * FROM joinings WHERE id = ? OR lead_id = ?',
+      [leadId, leadId]
+    );
+    if (joinings.length > 0) {
+      joining = joinings[0];
     }
 
     if (!joining) {
       return errorResponse(res, 'Joining draft not found', 404);
     }
 
-    if (joining.status !== 'pending_approval') {
+    if (joining.status !== 'pending_approval' && joining.status !== 'approved') {
       return errorResponse(
         res,
         'Only submissions awaiting approval can be approved',
@@ -1389,8 +1802,12 @@ export const approveJoining = async (req, res) => {
 
     const previousStatus = joining.status;
 
-    // Update joining status
-    await pool.execute(
+    // Start transaction
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // 1. Update joining status
+    await connection.execute(
       `UPDATE joinings SET
         status = ?,
         approved_at = NOW(),
@@ -1400,22 +1817,53 @@ export const approveJoining = async (req, res) => {
       ['approved', req.user.id, joining.id]
     );
 
-    // Format joining for use
-    const formattedJoining = await formatJoining(joining, pool);
+    // 2. Format joining for use
+    const formattedJoining = await formatJoining(joining, connection);
+    const { fkCourseId: admissionFkCourseId, fkBranchId: admissionFkBranchId } =
+      await resolvePrimaryCourseBranchFkIds(
+        connection,
+        formattedJoining.courseInfo?.courseId,
+        formattedJoining.courseInfo?.branchId
+      );
 
-    // Get lead if exists
+    // 3. Get/Update lead
     let lead = null;
     if (joining.lead_id) {
-      lead = await ensureLeadExists(joining.lead_id);
+      const [leads] = await connection.execute(
+        'SELECT * FROM leads WHERE id = ?',
+        [joining.lead_id]
+      );
+      if (leads.length > 0) {
+        lead = formatLead(leads[0]);
+      }
     }
 
     // Generate admission number
-    let admissionNumber = lead?.admissionNumber;
+    let admissionNumber = lead?.admissionNumber || joining.admission_number;
     if (!admissionNumber) {
       admissionNumber = await generateAdmissionNumber();
     }
 
-    // Update lead if exists
+    const joiningLeadData =
+      typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {};
+
+    if (!joining.lead_id) {
+      const createdLeadId = await ensureLeadForApprovedJoining({
+        connection,
+        joining,
+        formattedJoining,
+        joiningLeadData,
+        admissionNumber,
+      });
+      joining.lead_id = createdLeadId;
+      const [createdLeadRows] = await connection.execute('SELECT * FROM leads WHERE id = ?', [
+        createdLeadId,
+      ]);
+      if (createdLeadRows.length > 0) {
+        lead = formatLead(createdLeadRows[0]);
+      }
+    }
+
     if (lead) {
       // Sync joining data to lead
       const leadUpdates = {};
@@ -1434,7 +1882,6 @@ export const approveJoining = async (req, res) => {
       const interEducation = formattedJoining.educationHistory?.find((e) => e.level === 'inter_diploma');
       if (interEducation?.institutionName) leadUpdates.interCollege = interEducation.institutionName;
 
-      // Update lead
       const updateFields = [];
       const updateParams = [];
       Object.entries(leadUpdates).forEach(([key, value]) => {
@@ -1448,91 +1895,60 @@ export const approveJoining = async (req, res) => {
       updateFields.push('updated_at = NOW()');
       updateParams.push('Admitted', admissionNumber, joining.lead_id);
 
-      await pool.execute(
+      await connection.execute(
         `UPDATE leads SET ${updateFields.join(', ')} WHERE id = ?`,
         updateParams
       );
     }
 
-    // Prepare lead data snapshot
-    const leadDataSnapshot = lead ? { ...lead } : (typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {});
+    // 4. Prepare lead data snapshot
+    const leadDataSnapshot = lead ? { ...lead } : { ...joiningLeadData };
+    
+    // Preserve registration extras and other unmapped fields
+    if (joiningLeadData && typeof joiningLeadData === 'object') {
+      ['_joiningRegistrationExtras', '_joiningProgramLevel', '_joiningManagedCourseId', '_joiningManagedBranchId'].forEach(key => {
+        if (joiningLeadData[key] != null) {
+          leadDataSnapshot[key] = joiningLeadData[key];
+        }
+      });
+    }
     delete leadDataSnapshot._id;
     delete leadDataSnapshot.id;
     delete leadDataSnapshot.__v;
+    leadDataSnapshot.admissionNumber = admissionNumber;
 
-    // Check if admission already exists
-    const [existingAdmissions] = await pool.execute(
-      'SELECT * FROM admissions WHERE joining_id = ?',
+    // 5. Upsert admission (Primary DB)
+    const [existingAdmissions] = await connection.execute(
+      'SELECT id FROM admissions WHERE joining_id = ?',
       [joining.id]
     );
 
     const admissionId = existingAdmissions.length > 0 ? existingAdmissions[0].id : uuidv4();
 
-    // Upsert admission
     if (existingAdmissions.length > 0) {
-      // Update existing admission
-      await pool.execute(
+      await connection.execute(
         `UPDATE admissions SET
-          lead_id = ?,
-          enquiry_number = ?,
-          lead_data = ?,
-          admission_number = ?,
-          course_id = ?,
-          branch_id = ?,
-          course = ?,
-          branch = ?,
-          quota = ?,
-          student_name = ?,
-          student_phone = ?,
-          student_gender = ?,
-          student_date_of_birth = ?,
-          student_notes = ?,
-          student_aadhaar_number = ?,
-          father_name = ?,
-          father_phone = ?,
-          father_aadhaar_number = ?,
-          mother_name = ?,
-          mother_phone = ?,
-          mother_aadhaar_number = ?,
-          reservation_general = ?,
-          reservation_other = ?,
-          address_door_street = ?,
-          address_landmark = ?,
-          address_village_city = ?,
-          address_mandal = ?,
-          address_district = ?,
-          address_pin_code = ?,
-          qualification_ssc = ?,
-          qualification_inter_diploma = ?,
-          qualification_ug = ?,
-          qualification_mediums = ?,
-          qualification_other_medium_label = ?,
-          document_ssc = ?,
-          document_inter = ?,
-          document_ug_pg_cmm = ?,
-          document_transfer_certificate = ?,
-          document_study_certificate = ?,
-          document_aadhaar_card = ?,
-          document_photos = ?,
-          document_income_certificate = ?,
-          document_caste_certificate = ?,
-          document_cet_rank_card = ?,
-          document_cet_hall_ticket = ?,
-          document_allotment_letter = ?,
-          document_joining_report = ?,
-          document_bank_passbook = ?,
-          document_ration_card = ?,
-          status = ?,
-          updated_by = ?,
-          updated_at = NOW()
+          lead_id = ?, enquiry_number = ?, lead_data = ?, admission_number = ?,
+          course_id = ?, branch_id = ?, course = ?, branch = ?, quota = ?,
+          student_name = ?, student_phone = ?, student_gender = ?, student_date_of_birth = ?, student_notes = ?, student_aadhaar_number = ?,
+          father_name = ?, father_phone = ?, father_aadhaar_number = ?,
+          mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?,
+          reservation_general = ?, reservation_other = ?,
+          address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?,
+          qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
+          document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?, document_transfer_certificate = ?, document_study_certificate = ?,
+          document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?, document_caste_certificate = ?,
+          document_cet_rank_card = ?, document_cet_hall_ticket = ?, document_allotment_letter = ?, document_joining_report = ?,
+          document_bank_passbook = ?, document_ration_card = ?,
+          status = ?, updated_by = ?, updated_at = NOW()
         WHERE id = ?`,
         [
           joining.lead_id || null,
           lead?.enquiryNumber || leadDataSnapshot.enquiryNumber || '',
           JSON.stringify(leadDataSnapshot),
           admissionNumber,
-          formattedJoining.courseInfo?.courseId || null,
-          formattedJoining.courseInfo?.branchId || null,
+          admissionFkCourseId,
+          admissionFkBranchId,
           formattedJoining.courseInfo?.course || '',
           formattedJoining.courseInfo?.branch || '',
           formattedJoining.courseInfo?.quota || '',
@@ -1578,12 +1994,11 @@ export const approveJoining = async (req, res) => {
           formattedJoining.documents?.rationCard || 'pending',
           'active',
           req.user.id,
-          admissionId,
+          admissionId
         ]
       );
     } else {
-      // Insert new admission
-      await pool.execute(
+      await connection.execute(
         `INSERT INTO admissions (
           id, lead_id, enquiry_number, lead_data, joining_id, admission_number, status,
           course_id, branch_id, course, branch, quota,
@@ -1598,82 +2013,113 @@ export const approveJoining = async (req, res) => {
           document_cet_rank_card, document_cet_hall_ticket, document_allotment_letter, document_joining_report,
           document_bank_passbook, document_ration_card,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
-          admissionId,
-          joining.lead_id || null,
-          lead?.enquiryNumber || leadDataSnapshot.enquiryNumber || '',
-          JSON.stringify(leadDataSnapshot),
-          joining.id,
-          admissionNumber,
-          'active',
-          formattedJoining.courseInfo?.courseId || null,
-          formattedJoining.courseInfo?.branchId || null,
-          formattedJoining.courseInfo?.course || '',
-          formattedJoining.courseInfo?.branch || '',
-          formattedJoining.courseInfo?.quota || '',
-          formattedJoining.studentInfo?.name || '',
-          formattedJoining.studentInfo?.phone || '',
-          formattedJoining.studentInfo?.gender || '',
-          formattedJoining.studentInfo?.dateOfBirth || '',
-          formattedJoining.studentInfo?.notes || '',
-          formattedJoining.studentInfo?.aadhaarNumber || null,
-          formattedJoining.parents?.father?.name || '',
-          formattedJoining.parents?.father?.phone || '',
-          formattedJoining.parents?.father?.aadhaarNumber || null,
-          formattedJoining.parents?.mother?.name || '',
-          formattedJoining.parents?.mother?.phone || '',
-          formattedJoining.parents?.mother?.aadhaarNumber || null,
-          formattedJoining.reservation?.general || 'oc',
-          JSON.stringify(formattedJoining.reservation?.other || []),
-          formattedJoining.address?.communication?.doorOrStreet || '',
-          formattedJoining.address?.communication?.landmark || '',
-          formattedJoining.address?.communication?.villageOrCity || '',
-          formattedJoining.address?.communication?.mandal || '',
-          formattedJoining.address?.communication?.district || '',
-          formattedJoining.address?.communication?.pinCode || '',
-          formattedJoining.qualifications?.ssc === true ? 1 : 0,
-          formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0,
-          formattedJoining.qualifications?.ug === true ? 1 : 0,
-          JSON.stringify(formattedJoining.qualifications?.mediums || []),
-          formattedJoining.qualifications?.otherMediumLabel || '',
-          formattedJoining.documents?.ssc || 'pending',
-          formattedJoining.documents?.inter || 'pending',
-          formattedJoining.documents?.ugPgCmm || 'pending',
-          formattedJoining.documents?.transferCertificate || 'pending',
-          formattedJoining.documents?.studyCertificate || 'pending',
-          formattedJoining.documents?.aadhaarCard || 'pending',
-          formattedJoining.documents?.photos || 'pending',
-          formattedJoining.documents?.incomeCertificate || 'pending',
-          formattedJoining.documents?.casteCertificate || 'pending',
-          formattedJoining.documents?.cetRankCard || 'pending',
-          formattedJoining.documents?.cetHallTicket || 'pending',
-          formattedJoining.documents?.allotmentLetter || 'pending',
-          formattedJoining.documents?.joiningReport || 'pending',
-          formattedJoining.documents?.bankPassbook || 'pending',
-          formattedJoining.documents?.rationCard || 'pending',
-          req.user.id,
-          req.user.id,
+          admissionId, // 1
+          joining.lead_id || null, // 2
+          lead?.enquiryNumber || leadDataSnapshot.enquiryNumber || '', // 3
+          JSON.stringify(leadDataSnapshot), // 4
+          joining.id, // 5
+          admissionNumber, // 6
+          'active', // 7
+          admissionFkCourseId, // 8
+          admissionFkBranchId, // 9
+          formattedJoining.courseInfo?.course || '', // 10
+          formattedJoining.courseInfo?.branch || '', // 11
+          formattedJoining.courseInfo?.quota || '', // 12
+          formattedJoining.studentInfo?.name || '', // 13
+          formattedJoining.studentInfo?.phone || '', // 14
+          formattedJoining.studentInfo?.gender || '', // 15
+          formattedJoining.studentInfo?.dateOfBirth || '', // 16
+          formattedJoining.studentInfo?.notes || '', // 17
+          formattedJoining.studentInfo?.aadhaarNumber || null, // 18
+          formattedJoining.parents?.father?.name || '', // 19
+          formattedJoining.parents?.father?.phone || '', // 20
+          formattedJoining.parents?.father?.aadhaarNumber || null, // 21
+          formattedJoining.parents?.mother?.name || '', // 22
+          formattedJoining.parents?.mother?.phone || '', // 23
+          formattedJoining.parents?.mother?.aadhaarNumber || null, // 24
+          formattedJoining.reservation?.general || 'oc', // 25
+          JSON.stringify(formattedJoining.reservation?.other || []), // 26
+          formattedJoining.address?.communication?.doorOrStreet || '', // 27
+          formattedJoining.address?.communication?.landmark || '', // 28
+          formattedJoining.address?.communication?.villageOrCity || '', // 29
+          formattedJoining.address?.communication?.mandal || '', // 30
+          formattedJoining.address?.communication?.district || '', // 31
+          formattedJoining.address?.communication?.pinCode || '', // 32
+          formattedJoining.qualifications?.ssc === true ? 1 : 0, // 33
+          formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0, // 34
+          formattedJoining.qualifications?.ug === true ? 1 : 0, // 35
+          JSON.stringify(formattedJoining.qualifications?.mediums || []), // 36
+          formattedJoining.qualifications?.otherMediumLabel || '', // 37
+          formattedJoining.documents?.ssc || 'pending', // 38
+          formattedJoining.documents?.inter || 'pending', // 39
+          formattedJoining.documents?.ugPgCmm || 'pending', // 40
+          formattedJoining.documents?.transferCertificate || 'pending', // 41
+          formattedJoining.documents?.studyCertificate || 'pending', // 42
+          formattedJoining.documents?.aadhaarCard || 'pending', // 43
+          formattedJoining.documents?.photos || 'pending', // 44
+          formattedJoining.documents?.incomeCertificate || 'pending', // 45
+          formattedJoining.documents?.casteCertificate || 'pending', // 46
+          formattedJoining.documents?.cetRankCard || 'pending', // 47
+          formattedJoining.documents?.cetHallTicket || 'pending', // 48
+          formattedJoining.documents?.allotmentLetter || 'pending', // 49
+          formattedJoining.documents?.joiningReport || 'pending', // 50
+          formattedJoining.documents?.bankPassbook || 'pending', // 51
+          formattedJoining.documents?.rationCard || 'pending', // 52
+          req.user.id, // 53 (created_by)
+          req.user.id, // 54 (updated_by)
         ]
       );
 
-      // Insert admission related tables (relatives, education history, siblings)
-      // Note: These would need to be copied from joining related tables
-      // For now, we'll handle this in a separate step if needed
+      // 6. Copy related records
+      const tables = [
+        { joining: 'joining_relatives', admission: 'admission_relatives' },
+        { joining: 'joining_education_history', admission: 'admission_education_history' },
+        { joining: 'joining_siblings', admission: 'admission_siblings' }
+      ];
+
+      for (const t of tables) {
+        const [rows] = await connection.execute(`SELECT * FROM ${t.joining} WHERE joining_id = ?`, [joining.id]);
+        for (const row of rows) {
+          const rowData = { ...row };
+          delete rowData.id;
+          delete rowData.joining_id;
+          rowData.admission_id = admissionId;
+          rowData.id = uuidv4();
+          
+          const keys = Object.keys(rowData);
+          const placeholders = keys.map(() => '?').join(', ');
+          await connection.execute(
+            `INSERT INTO ${t.admission} (${keys.join(', ')}) VALUES (${placeholders})`,
+            Object.values(rowData)
+          );
+        }
+      }
     }
 
-    // Record activity if lead exists
+    // 7. Sync to Secondary DB
+    await syncToSecondaryDatabase(formattedJoining, admissionNumber, {
+      leadId: joining.lead_id,
+      joiningId: joining.id,
+      email: lead?.email || ''
+    });
+
+    await connection.commit();
+
+    // Record activity after commit so activity_logs lock contention
+    // never delays or interferes with core approval/admission writes.
     if (joining.lead_id) {
-      await recordActivity({
+      recordActivity({
         leadId: joining.lead_id,
         userId: req.user.id,
-        description: 'Joining form approved',
+        description: 'Joining form approved and admission created',
         statusFrom: previousStatus,
         statusTo: 'approved',
       });
     }
 
-    // Fetch updated joining
+    // Fetch updated joining for response
     const [updated] = await pool.execute(
       'SELECT * FROM joinings WHERE id = ?',
       [joining.id]
@@ -1690,13 +2136,17 @@ export const approveJoining = async (req, res) => {
       200
     );
   } catch (error) {
+    if (connection) await connection.rollback();
     console.error('Error approving joining form:', error);
     return errorResponse(
       res,
       error.message || 'Failed to approve joining form',
       error.statusCode || 500
     );
+  } finally {
+    if (connection) connection.release();
   }
 };
+
 
 
