@@ -15,6 +15,7 @@
     "migrate:state-field": "node src/scripts-sql/addStateFieldToDefaultForm.js",
     "migrate:timestamps": "node src/scripts/addTimestampsToLeads.js",
     "migrate:secondary-students-format": "node src/scripts/migrateSecondaryStudentsFormat.js",
+    "resync:secondary-student": "node src/scripts/resyncSecondaryStudentByAdmissionNumber.js",
     "sync:mandal-from-staging": "node src/scripts-sql/syncMandalFromStaging.js",
     "sync:mandal-from-staging:dry": "node src/scripts-sql/syncMandalFromStaging.js --dry-run",
     "db:copy-remote-to-local": "node src/scripts-sql/copyRemoteDbToLocal.js",

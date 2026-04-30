@@ -28,7 +28,7 @@ const normalizeVerifiedState = (value) => {
   if (v === 'verified' || v === 'received' || v === 'complete' || v === 'completed')
     return 'Verified';
   if (v === 'certified') return 'Verified';
-  if (v === 'partial' || v === 'temporary' || v === 'provisional') return 'Partial';
+  if (v === 'partial' || v === 'temporary' || v === 'provisional') return 'Temporary';
   if (v === 'unverified' || v === 'not verified' || v === 'pending' || v === 'incomplete')
     return 'Not Verified';
   if (v === 'not certified' || v === 'submitted') return 'Not Verified';
@@ -45,13 +45,13 @@ const deriveCertificatesStatus = (registrationExtras) => {
       );
       if (!everyReceived) return 'Not Verified';
 
-      // Business rule: received + temporary/provisional option means Partial.
+      // Business rule: received + temporary/provisional/memo option means Temporary.
       const hasTemporaryOption = values.some((entry) => {
         const option = normalizeChecklistOption(entry);
         if (!option) return false;
         return /(temporary|provisional|memo)/i.test(option);
       });
-      return hasTemporaryOption ? 'Partial' : 'Verified';
+      return hasTemporaryOption ? 'Temporary' : 'Verified';
     }
   }
 
@@ -78,12 +78,93 @@ const normalizeStudentPhotoForSecondary = (value) => {
 
 const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
   const explicitStatus = String(registrationExtras?.student_status ?? '').trim();
-  if (explicitStatus) return explicitStatus;
+  if (explicitStatus) {
+    const lower = explicitStatus.toLowerCase();
+    // Never persist primary admission workflow labels into secondary student_status.
+    if (lower === 'active' || lower === 'withdrawn') {
+      return lower === 'withdrawn' ? 'Discontinued' : 'Regular';
+    }
+    return explicitStatus;
+  }
 
-  // Keep secondary domain labels distinct from primary admission status labels.
+  const admission = String(admissionStatus ?? '').trim().toLowerCase();
+  if (admission === 'withdrawn') return 'Discontinued';
+
+  // Secondary DB: academic student status, not admission row status (active/withdrawn).
   return 'Regular';
 };
 
+const normalizeDobForSecondary = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+
+  const dmy = raw.match(/^(\d{2})[-\/](\d{2})[-\/](\d{4})$/);
+  if (dmy) {
+    const day = Number.parseInt(dmy[1], 10);
+    const month = Number.parseInt(dmy[2], 10);
+    const year = Number.parseInt(dmy[3], 10);
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  return raw;
+};
+const deriveCertificationDialogCompat = (certificatesStatus, registrationExtras) => {
+  const status = String(certificatesStatus ?? '').trim();
+  const statusLower = status.toLowerCase();
+  const isCertified = statusLower === 'verified' || statusLower === 'temporary';
+  const yesNo = isCertified ? 'Yes' : 'No';
+
+  const checklist =
+    registrationExtras?.certificate_checklist &&
+    typeof registrationExtras.certificate_checklist === 'object' &&
+    !Array.isArray(registrationExtras.certificate_checklist)
+      ? registrationExtras.certificate_checklist
+      : {};
+
+  const findChecklistEntry = (patterns) => {
+    const hit = Object.entries(checklist).find(([key]) =>
+      patterns.some((re) => re.test(String(key || '').toLowerCase()))
+    );
+    return hit ? hit[1] : null;
+  };
+
+  const isChecklistReceived = (entry) => normalizeChecklistItemStatus(entry) === 'received';
+  const mapInterStudyOption = (entry) => {
+    const statusVal = normalizeChecklistItemStatus(entry);
+    if (statusVal !== 'received') return 'No';
+    const option = String(normalizeChecklistOption(entry) ?? '').toLowerCase();
+    if (/(memo|temporary|provisional)/i.test(option)) return 'Memo';
+    return 'Original';
+  };
+
+  const tenthStudyEntry = findChecklistEntry([/10th[_\s-]*study/, /ssc[_\s-]*study/, /10th/, /ssc/]);
+  const tenthTcEntry = findChecklistEntry([/10th[_\s-]*tc/]);
+  const interTcEntry = findChecklistEntry([/inter[_\s-]*diploma[_\s-]*tc/, /inter[_\s-]*tc/, /diploma[_\s-]*tc/]);
+  const interStudyEntry = findChecklistEntry([/inter[_\s-]*diploma[_\s-]*study/, /inter[_\s-]*study/, /diploma[_\s-]*study/]);
+
+  const tenthStudyReceived = tenthStudyEntry != null ? isChecklistReceived(tenthStudyEntry) : null;
+  const tenthTcReceived = tenthTcEntry != null ? isChecklistReceived(tenthTcEntry) : null;
+  const interTcReceived = interTcEntry != null ? isChecklistReceived(interTcEntry) : null;
+  const interStudyReceived = interStudyEntry != null ? isChecklistReceived(interStudyEntry) : null;
+  const interStudySelection = interStudyEntry != null ? mapInterStudyOption(interStudyEntry) : (isCertified ? 'Original' : 'No');
+
+  return {
+    certification_status: yesNo,
+    certificates_verified: yesNo,
+    certificates_status: status || (isCertified ? 'Verified' : 'Not Verified'),
+    ssc_certificate: tenthStudyReceived == null ? isCertified : tenthStudyReceived,
+    inter_diploma_cert: interStudyReceived == null ? yesNo : interStudyReceived ? 'Yes' : 'No',
+    inter_diploma_study: interStudySelection,
+    inter_diploma_tc: interTcReceived == null ? yesNo : interTcReceived ? 'Yes' : 'No',
+    '10th_study': tenthStudyReceived == null ? isCertified : tenthStudyReceived,
+    '10th_tc': tenthTcReceived == null ? isCertified : tenthTcReceived,
+    '10th_original': tenthStudyReceived == null ? yesNo : tenthStudyReceived ? 'Yes' : 'No',
+  };
+};
 const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
   const q = String(quotaValue ?? '').trim().toUpperCase();
   if (q === 'MANG' || q === 'MANAGEMENT') return 'MANG';
@@ -93,6 +174,68 @@ const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
   if (fallback === 'MANG' || fallback === 'MANAGEMENT') return 'MANG';
   if (fallback === 'CONV' || fallback === 'CONVENOR' || fallback === 'CONVENER') return 'CONV';
   return null;
+};
+
+/**
+ * Build JSON for `students.student_data` so legacy consumers (e.g. sibling apps that
+ * flatten objects into SQL) do not receive nested `address` objects, which can produce
+ * invalid SQL like `student_address = communication = '[object Object]'`.
+ */
+const buildStudentDataForSecondaryStorage = (
+  admissionData,
+  admissionNumber,
+  extraInfo,
+  secondaryStudentStatus,
+  normalizedDob,
+  certificationCompat
+) => {
+  const payload = {
+    ...admissionData,
+    admission_number: admissionNumber,
+    admission_date: new Date().toISOString().split('T')[0],
+    _lead_id: extraInfo.leadId,
+    _joining_id: extraInfo.joiningId,
+    _synced_at: new Date().toISOString(),
+  };
+
+  // Do not dump primary admission workflow `status` (active/withdrawn) into student_data as
+  // a generic `status` field — legacy apps treat it like student_status.
+  if ('status' in payload) {
+    const s = String(payload.status ?? '').trim().toLowerCase();
+    if (s === 'active' || s === 'withdrawn') {
+      payload.admission_status = payload.status;
+      delete payload.status;
+    }
+  }
+  payload.student_status = secondaryStudentStatus;
+  payload.dob = normalizedDob || '';
+  Object.assign(payload, certificationCompat || {});
+  if (payload?.studentInfo && typeof payload.studentInfo === 'object') {
+    payload.studentInfo = {
+      ...payload.studentInfo,
+      dateOfBirth: normalizedDob || payload.studentInfo.dateOfBirth || '',
+    };
+  }
+
+  const comm = admissionData?.address?.communication;
+  const lineParts = [
+    comm?.doorOrStreet,
+    comm?.landmark,
+    comm?.villageOrCity,
+    comm?.mandal,
+    comm?.district,
+    comm?.pinCode,
+  ]
+    .map((p) => (p == null ? '' : String(p).trim()))
+    .filter(Boolean);
+  const fullAddressLine = lineParts.join(', ').trim();
+
+  delete payload.address;
+  if (fullAddressLine) {
+    payload.student_address = fullAddressLine;
+  }
+
+  return { payload, studentAddressLine: fullAddressLine };
 };
 
 /**
@@ -138,8 +281,13 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       parseCurrentYear(registrationExtras?.current_year) ??
       parseCurrentYear(registrationExtras?.currentYear);
     const certificatesStatus = deriveCertificatesStatus(registrationExtras);
-    const secondaryStudentStatus = deriveSecondaryStudentStatus(admissionData?.status, registrationExtras);
+    const secondaryStudentStatus = deriveSecondaryStudentStatus(
+      admissionData?.status,
+      registrationExtras
+    );
     const studType = deriveStudTypeFromQuota(admissionData?.courseInfo?.quota, registrationExtras);
+    const normalizedDob = normalizeDobForSecondary(admissionData?.studentInfo?.dateOfBirth);
+    const certificationCompat = deriveCertificationDialogCompat(certificatesStatus, registrationExtras);
 
     const collegeIdRaw =
       registrationExtras?.college_id ??
@@ -166,21 +314,21 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       [admissionNumber]
     );
 
-    const studentDataSecondary = {
-      ...admissionData,
-      admission_number: admissionNumber,
-      admission_date: new Date().toISOString().split('T')[0],
-      _lead_id: extraInfo.leadId,
-      _joining_id: extraInfo.joiningId,
-      _synced_at: new Date().toISOString(),
-    };
+    const { payload: studentDataSecondary, studentAddressLine } = buildStudentDataForSecondaryStorage(
+      admissionData,
+      admissionNumber,
+      extraInfo,
+      secondaryStudentStatus,
+      normalizedDob,
+      certificationCompat
+    );
 
     const studentParams = [
       admissionNumber,
       admissionNumber,
       admissionData.studentInfo?.name || '',
       admissionData.studentInfo?.phone || '',
-      admissionData.studentInfo?.dateOfBirth || '',
+      normalizedDob,
       admissionData.studentInfo?.aadhaarNumber || '',
       admissionData.parents?.father?.name || '',
       admissionData.parents?.father?.phone || '',
@@ -192,7 +340,8 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData.address?.communication?.mandal || '',
       admissionData.address?.communication?.district || '',
       admissionData.address?.communication?.pinCode || '',
-      `${admissionData.address?.communication?.doorOrStreet || ''}, ${admissionData.address?.communication?.landmark || ''}`.trim(),
+      studentAddressLine ||
+        `${admissionData.address?.communication?.doorOrStreet || ''}, ${admissionData.address?.communication?.landmark || ''}`.trim(),
       JSON.stringify(studentDataSecondary),
       admissionData.parents?.mother?.phone || '',
       toNullableText(registrationExtras?.batch) || toNullableText(registrationExtras?.academic_year),
@@ -295,3 +444,17 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     return false;
   }
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+

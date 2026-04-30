@@ -37,8 +37,8 @@ const formatLead = (leadData) => {
   };
 };
 
-// Helper function to format admission data from SQL
-const formatAdmission = async (admissionData, pool) => {
+// Helper function to format admission data from SQL (exported for one-off resync scripts)
+export const formatAdmission = async (admissionData, pool) => {
   if (!admissionData) return null;
 
   const admissionId = admissionData.id;
