@@ -43,6 +43,7 @@ const canonicalCounselorCallStatusForReports = (label) => {
   const t = String(label ?? '').trim();
   if (!t || /^not\s*set$/i.test(t)) return 'Not set';
   const lower = t.toLowerCase();
+  if (lower === 'new') return 'Assigned';
   const hit = COUNSELLOR_CALL_STATUS_CANONICAL.find((s) => s.toLowerCase() === lower);
   return hit || t;
 };
@@ -3073,7 +3074,8 @@ export const getUserAnalytics = async (req, res) => {
               `SELECT a.target_user_id AS user_id,
                 TRIM(u.role_name) AS cohort_user_role,
                 CASE
-                  WHEN TRIM(u.role_name) = 'PRO' THEN
+                  WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                     CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
                   ELSE
                     CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3086,7 +3088,8 @@ export const getUserAnalytics = async (req, res) => {
                ${assignmentDateWhere}
                GROUP BY a.target_user_id, TRIM(u.role_name),
                  CASE
-                   WHEN TRIM(u.role_name) = 'PRO' THEN
+                   WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                      CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
                    ELSE
                      CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3097,7 +3100,8 @@ export const getUserAnalytics = async (req, res) => {
               `SELECT c.sent_by AS user_id,
                 TRIM(u.role_name) AS cohort_user_role,
                 CASE
-                  WHEN TRIM(u.role_name) = 'PRO' THEN
+                  WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                     CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
                   ELSE
                     CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3120,7 +3124,8 @@ export const getUserAnalytics = async (req, res) => {
                  )
                GROUP BY c.sent_by, TRIM(u.role_name),
                  CASE
-                   WHEN TRIM(u.role_name) = 'PRO' THEN
+                   WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                      CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
                    ELSE
                      CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3242,7 +3247,8 @@ export const getUserAnalytics = async (req, res) => {
           `SELECT u.id AS user_id,
             TRIM(u.role_name) AS cohort_user_role,
             CASE
-              WHEN TRIM(u.role_name) = 'PRO' THEN
+              WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                 CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
               ELSE
                 CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3253,7 +3259,8 @@ export const getUserAnalytics = async (req, res) => {
            WHERE u.id IN (${selectedUserPlaceholders}) ${aySql}
            GROUP BY u.id, TRIM(u.role_name),
              CASE
-               WHEN TRIM(u.role_name) = 'PRO' THEN
+               WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
+WHEN TRIM(u.role_name) = 'PRO' THEN
                  CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
                ELSE
                  CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
@@ -3286,6 +3293,10 @@ export const getUserAnalytics = async (req, res) => {
     const reclaimedUniqueMap = new Map();
 
     if (includeAssignmentDetailsForWork) {
+      const now = new Date();
+      const tzOffset = now.getTimezoneOffset() * 60000;
+      const todayYmd = new Date(now.getTime() - tzOffset).toISOString().slice(0, 10);
+
       const uidKeyToRole = new Map();
       cohortScopeUsers.forEach((u) => {
         uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
@@ -3293,7 +3304,6 @@ export const getUserAnalytics = async (req, res) => {
 
       const [
         [rawAssignments],
-        [reclamations],
         [validMandalsRows]
       ] = await Promise.all([
         pool.execute(
@@ -3301,27 +3311,17 @@ export const getUserAnalytics = async (req, res) => {
             a.target_user_id as user_id, 
             DATE(a.created_at) as assigned_date, 
             a.lead_id,
+            a.metadata as log_metadata,
+            a.created_at as log_created_at,
             l.lead_status,
             l.call_status,
             l.visit_status,
             l.student_group,
             l.mandal,
-            COALESCE(
-              NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.assignment.targetDate'))), ''),
-              (${SQL_COHORT_ASSIGNMENT_TARGET_YMD}),
-              IF(
-                l.academic_year IS NOT NULL AND l.academic_year BETWEEN 2000 AND 2100,
-                DATE_FORMAT(
-                  STR_TO_DATE(CONCAT(l.academic_year, '-04-25'), '%Y-%m-%d'),
-                  '%Y-%m-%d'
-                ),
-                NULL
-              ),
-              DATE_FORMAT(
-                STR_TO_DATE(CONCAT(YEAR(DATE(a.created_at)), '-04-25'), '%Y-%m-%d'),
-                '%Y-%m-%d'
-              )
-            ) AS report_target_date_ymd,
+            l.counsellor_target_date,
+            l.pro_target_date,
+            l.target_date,
+            l.academic_year,
             l.cycle_number,
             l.assigned_to,
             l.assigned_to_pro,
@@ -3332,19 +3332,6 @@ export const getUserAnalytics = async (req, res) => {
             AND a.target_user_id IN (${cohortUserIdPlaceholders})
             ${assignmentDateWhere}`,
           [...cohortScopeUserIds, ...assignmentDateParams]
-        ),
-        pool.execute(
-          `SELECT 
-            lead_id, 
-            source_user_id as previous_assignee, 
-            JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.reclamation.oldStatus')) as old_status_meta,
-            old_status,
-            created_at
-          FROM activity_logs
-          WHERE type = 'status_change' AND source_user_id IN (${cohortUserIdPlaceholders})
-          ${reclaimLogWhereForBatchMetrics}
-          ORDER BY created_at DESC`,
-          [...cohortScopeUserIds, ...reclaimLogParamsForBatchMetrics]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
@@ -3361,12 +3348,7 @@ export const getUserAnalytics = async (req, res) => {
         return m ? m[1] : s.slice(0, 10);
       };
 
-      // Latest reclamation metadata per (lead, user)
-      const latestReclaimMap = new Map();
-      reclamations.forEach(r => {
-        const key = `${r.lead_id}-${r.previous_assignee}`;
-        if (!latestReclaimMap.has(key)) latestReclaimMap.set(key, r);
-      });
+
 
       rawAssignments.forEach(row => {
         const userKey = String(row.user_id).trim().toLowerCase();
@@ -3384,11 +3366,48 @@ export const getUserAnalytics = async (req, res) => {
         
         if (!dateKey || dateKey === 'null') return;
 
-        // Log targetDate → lead.target_date → 25 Apr of lead.academic_year (if set) → 25 Apr of assignment calendar year.
-        const effectiveYmd = sliceAssignmentYmd(row.report_target_date_ymd);
+        // Calculate report_target_date_ymd in JS for performance
+        let reportTargetDateYmd = null;
+        try {
+          const meta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata;
+          const metaTDate = meta?.assignment?.targetDate;
+          if (metaTDate && String(metaTDate).trim() !== '') {
+            reportTargetDateYmd = String(metaTDate).trim();
+          } else {
+            // Fallback logic mirrored from SQL fragment
+            const uid = row.user_id;
+            const isAssignedToMe = (uid != null && (uid === row.assigned_to || uid === row.assigned_to_pro));
+            
+            if (isAssignedToMe) {
+              if (uid === row.assigned_to) {
+                reportTargetDateYmd = row.counsellor_target_date || row.target_date;
+              } else {
+                reportTargetDateYmd = row.pro_target_date || row.target_date;
+              }
+            } else {
+              reportTargetDateYmd = row.counsellor_target_date || row.pro_target_date || row.target_date;
+            }
+
+            // Academic year fallback (25 Apr)
+            if (!reportTargetDateYmd) {
+              const yr = row.academic_year || (row.log_created_at ? new Date(row.log_created_at).getFullYear() : null);
+              if (yr && yr >= 2000 && yr <= 2100) {
+                reportTargetDateYmd = `${yr}-04-25`;
+              }
+            }
+          }
+        } catch (e) {
+          // ignore parse errors
+        }
+
+        const effectiveYmd = sliceAssignmentYmd(reportTargetDateYmd);
         let tDateSegment = '__NULL__';
+        let isTargetDatePassed = false;
         if (effectiveYmd) {
           tDateSegment = effectiveYmd;
+          if (tDateSegment < todayYmd) {
+            isTargetDatePassed = true;
+          }
         }
         // One row per (allotted calendar day, effective target date) — same SQL/fetch; split only in memory.
         const bucketKey = `${dateKey}\t${tDateSegment}`;
@@ -3440,25 +3459,31 @@ export const getUserAnalytics = async (req, res) => {
         }
 
         // 2. Lead Status / Reclamation check (distinct students per bucket label)
-        const rKey = `${row.lead_id}-${row.user_id}`;
-        const reclaimMeta = latestReclaimMap.get(rKey);
-        if (reclaimMeta) {
+        const isNoLongerWithUser = (row.assigned_to !== row.user_id && row.assigned_to_pro !== row.user_id);
+        const currentCallStatus = canonicalCounselorCallStatusForReports(row.call_status);
+        const isFailedStatus = ['Assigned', 'Not Interested', 'Wrong Data', 'Wrong Number', 'Invalid Number'].includes(currentCallStatus);
+
+        // A lead is "Unattended" if:
+        // 1. It was reclaimed (taken back).
+        // 2. OR the target date has passed and it's in a failed status.
+        const isActuallyReclaimed = isNoLongerWithUser; 
+        const isPastDueFailed = isTargetDatePassed && isFailedStatus;
+
+        if (isActuallyReclaimed || isPastDueFailed) {
           bucket._reclaimedLeadIds.add(lid);
-          const status = (reclaimMeta.old_status_meta || reclaimMeta.old_status || 'Unknown').trim() || 'Unknown';
-          if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
-          bucket._leadStatusLeadSets[status].add(lid);
-        } else {
-          const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
-          if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
-          bucket._leadStatusLeadSets[status].add(lid);
         }
 
-        const callS =
+        // Always count in status columns for visibility (User requested Assigned not to be 0)
+        let callS =
           row.call_status != null && String(row.call_status).trim() !== ''
             ? String(row.call_status).trim()
             : 'Not set';
+        if (String(row.lead_status || '').trim().toLowerCase() === 'new') {
+          callS = 'Assigned';
+        }
         if (!bucket._callStatusLeadSets[callS]) bucket._callStatusLeadSets[callS] = new Set();
         bucket._callStatusLeadSets[callS].add(lid);
+
         const visitRaw =
           row.visit_status != null && String(row.visit_status).trim() !== ''
             ? String(row.visit_status).trim()
@@ -3466,6 +3491,10 @@ export const getUserAnalytics = async (req, res) => {
         const visitKey = canonicalProVisitStatusForReports(visitRaw);
         if (!bucket._visitStatusLeadSets[visitKey]) bucket._visitStatusLeadSets[visitKey] = new Set();
         bucket._visitStatusLeadSets[visitKey].add(lid);
+
+        const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
+        if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
+        bucket._leadStatusLeadSets[status].add(lid);
 
         // 3. Target Date breakdown (distinct students per target date key)
         if (effectiveYmd) {
@@ -3505,23 +3534,36 @@ export const getUserAnalytics = async (req, res) => {
         const isProAssignee = assigneeRole.toUpperCase() === 'PRO';
         perDate.forEach((bucket) => {
           let assignedBalance = 0;
-          if (isProAssignee) {
-            const vss = bucket._visitStatusLeadSets;
-            if (vss && typeof vss === 'object') {
-              Object.entries(vss).forEach(([k, set]) => {
-                if (canonicalProVisitStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
-                  assignedBalance += set.size;
-                }
-              });
+          let isTargetDatePassed = false;
+
+          if (bucket.targetDateSortKey && bucket.targetDateSortKey !== '__NULL__') {
+            const now = new Date();
+            const tzOffset = now.getTimezoneOffset() * 60000;
+            const todayYmd = new Date(now.getTime() - tzOffset).toISOString().slice(0, 10);
+            if (bucket.targetDateSortKey < todayYmd) {
+              isTargetDatePassed = true;
             }
-          } else {
-            const css = bucket._callStatusLeadSets;
-            if (css && typeof css === 'object') {
-              Object.entries(css).forEach(([k, set]) => {
-                if (canonicalCounselorCallStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
-                  assignedBalance += set.size;
-                }
-              });
+          }
+
+          if (!isTargetDatePassed) {
+            if (isProAssignee) {
+              const vss = bucket._visitStatusLeadSets;
+              if (vss && typeof vss === 'object') {
+                Object.entries(vss).forEach(([k, set]) => {
+                  if (canonicalProVisitStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
+                    assignedBalance += set.size;
+                  }
+                });
+              }
+            } else {
+              const css = bucket._callStatusLeadSets;
+              if (css && typeof css === 'object') {
+                Object.entries(css).forEach(([k, set]) => {
+                  if (canonicalCounselorCallStatusForReports(k) === 'Assigned' && set && typeof set.size === 'number') {
+                    assignedBalance += set.size;
+                  }
+                });
+              }
             }
           }
           const nTot = bucket._allLeadIds ? bucket._allLeadIds.size : 0;
@@ -3533,7 +3575,7 @@ export const getUserAnalytics = async (req, res) => {
           bucket.mandalCounts = setRecordToCounts(bucket._mandalLeadSets);
           bucket.studentGroupCounts = setRecordToCounts(bucket._studentGroupLeadSets);
           bucket.targetDateCounts = setRecordToCounts(bucket._targetDateLeadSets);
-          bucket.reclaimedCount = bucket._reclaimedLeadIds ? bucket._reclaimedLeadIds.size : 0;
+          bucket.reclaimedCount = (!isTargetDatePassed) ? 0 : (bucket._reclaimedLeadIds ? bucket._reclaimedLeadIds.size : 0);
           bucket.currentlyUnassigned = bucket._unassignedLeadIds ? bucket._unassignedLeadIds.size : 0;
           bucket.currentlyWithSameUser = bucket._sameUserLeadIds ? bucket._sameUserLeadIds.size : 0;
           bucket.movedToOtherUser = bucket._otherUserLeadIds ? bucket._otherUserLeadIds.size : 0;
@@ -3607,6 +3649,10 @@ export const getUserAnalytics = async (req, res) => {
           FROM activity_logs
           WHERE type = 'status_change' AND source_user_id IN (${rph2})
           ${reclaimLogWhereForBatchMetrics}
+          AND (
+            LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.reclamation.oldStatus')))) IN ('assigned', 'new', 'not interested', 'wrong data', 'wrong number', 'invalid number')
+            OR LOWER(TRIM(old_status)) IN ('assigned', 'new', 'not interested', 'wrong data', 'wrong number', 'invalid number')
+          )
           GROUP BY LOWER(TRIM(source_user_id))
         ) s`,
         [...aggregateUserIds, ...reclaimLogParamsForBatchMetrics]
