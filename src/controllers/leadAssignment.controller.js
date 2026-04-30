@@ -1496,6 +1496,20 @@ export const getOverviewAnalytics = async (req, res) => {
       ? `${leadWhere} AND created_at >= ? AND created_at <= ?`
       : 'WHERE created_at >= ? AND created_at <= ?';
 
+    const studentGroupCallsWhere = leadFilters.length > 0 
+      ? `${leadWhere} AND EXISTS (
+          SELECT 1 FROM activity_logs a 
+          WHERE a.lead_id = leads.id 
+          AND a.created_at >= CURDATE() 
+          AND a.type IN ('status_change', 'comment')
+        )`
+      : `WHERE EXISTS (
+          SELECT 1 FROM activity_logs a 
+          WHERE a.lead_id = leads.id 
+          AND a.created_at >= CURDATE() 
+          AND a.type IN ('status_change', 'comment')
+        )`;
+
     const [
       countsPack,
       userRolePack,
@@ -1507,6 +1521,7 @@ export const getOverviewAnalytics = async (req, res) => {
       statusChangesPack,
       joiningTrendPack,
       admissionsPack,
+      studentGroupCallsPack,
     ] = await Promise.all([
       pool.execute(
         `SELECT 
@@ -1571,6 +1586,20 @@ export const getOverviewAnalytics = async (req, res) => {
           [startDateStr, endDateStr]
         )
         .catch(() => [[]]),
+      pool.execute(
+        `SELECT 
+          student_group,
+          SUM(CASE WHEN 
+            (assigned_to IS NOT NULL AND call_status IS NOT NULL AND TRIM(call_status) <> '' AND UPPER(TRIM(call_status)) <> 'ASSIGNED')
+            OR (assigned_to_pro IS NOT NULL AND visit_status IS NOT NULL AND TRIM(visit_status) <> '' AND UPPER(TRIM(visit_status)) <> 'ASSIGNED')
+          THEN 1 ELSE 0 END) as callsDone
+        FROM leads 
+        ${studentGroupCallsWhere}
+        GROUP BY student_group
+        HAVING callsDone > 0
+        ORDER BY callsDone DESC`,
+        leadParams
+      ).catch(() => [[ ]]),
     ]);
 
     const countsResult = countsPack[0];
@@ -1614,6 +1643,13 @@ export const getOverviewAnalytics = async (req, res) => {
     const statusChangesAgg = statusChangesPack[0];
     const joiningTrendAgg = joiningTrendPack[0] || [];
     const admissionsAgg = admissionsPack[0] || [];
+    const studentGroupCallsAgg = studentGroupCallsPack[0] || [];
+
+    const studentGroupCallsBreakdown = studentGroupCallsAgg.reduce((acc, item) => {
+      const key = item.student_group || 'Unknown';
+      acc[key] = toCount(item.callsDone);
+      return acc;
+    }, {});
 
     const leadStatusBreakdown = leadStatusAgg.reduce((acc, item) => {
       const key = item.lead_status || 'Unknown';
@@ -1776,6 +1812,7 @@ export const getOverviewAnalytics = async (req, res) => {
         userRoleCounts,
       },
       leadStatusBreakdown,
+      studentGroupCallsBreakdown,
       joiningStatusBreakdown,
       admissionStatusBreakdown,
       daily: {
