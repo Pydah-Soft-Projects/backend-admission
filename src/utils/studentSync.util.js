@@ -72,19 +72,33 @@ const normalizeStudentPhotoForSecondary = (value) => {
     return `data:image/jpeg;base64,${raw}`;
   }
 
-  // For non-base64 values (e.g., filenames), skip sync to keep storage consistent.
-  return null;
+  // Preserve non-empty filename/URL strings instead of dropping them.
+  // Some records currently store only filename in registration extras.
+  return raw;
 };
 
 const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
   const explicitStatus = String(registrationExtras?.student_status ?? '').trim();
   if (explicitStatus) {
     const lower = explicitStatus.toLowerCase();
-    // Never persist primary admission workflow labels into secondary student_status.
-    if (lower === 'active' || lower === 'withdrawn') {
-      return lower === 'withdrawn' ? 'Discontinued' : 'Regular';
+    // Never persist primary workflow labels into secondary student_status.
+    if (lower === 'active' || lower === 'pending_approval' || lower === 'approved') {
+      return 'Regular';
     }
-    return explicitStatus;
+    if (lower === 'withdrawn') return 'Discontinued';
+
+    // Keep known secondary lifecycle values, fallback to Regular for unknown workflow-like tokens.
+    const allowed = new Set([
+      'regular',
+      'discontinued',
+      'admission cancelled',
+      'detained',
+      'long absent',
+      're-joined',
+      'rejoined',
+    ]);
+    if (allowed.has(lower)) return explicitStatus;
+    return 'Regular';
   }
 
   const admission = String(admissionStatus ?? '').trim().toLowerCase();

@@ -221,6 +221,45 @@ const validateAdmissionPayload = (payload = {}) => {
   return errors;
 };
 
+const resolvePrimaryCourseBranchIds = async (pool, courseId, branchId) => {
+  let resolvedCourseId =
+    courseId !== undefined && courseId !== null && String(courseId).trim() !== ''
+      ? courseId
+      : null;
+  let resolvedBranchId =
+    branchId !== undefined && branchId !== null && String(branchId).trim() !== ''
+      ? branchId
+      : null;
+
+  if (resolvedCourseId != null) {
+    const [courses] = await pool.execute('SELECT id FROM courses WHERE id = ? LIMIT 1', [
+      resolvedCourseId,
+    ]);
+    if (courses.length === 0) resolvedCourseId = null;
+  }
+
+  if (resolvedBranchId != null) {
+    const [branches] = await pool.execute(
+      'SELECT id, course_id FROM branches WHERE id = ? LIMIT 1',
+      [resolvedBranchId]
+    );
+    if (branches.length === 0) {
+      resolvedBranchId = null;
+    } else if (
+      resolvedCourseId != null &&
+      branches[0].course_id != null &&
+      String(branches[0].course_id) !== String(resolvedCourseId)
+    ) {
+      resolvedBranchId = null;
+    } else if (resolvedCourseId == null) {
+      resolvedCourseId = branches[0].course_id ?? null;
+    }
+  }
+
+  if (resolvedCourseId == null) resolvedBranchId = null;
+  return { resolvedCourseId, resolvedBranchId };
+};
+
 const formatAdmissionListItem = (row) => ({
   _id: row.id,
   id: row.id,
@@ -600,13 +639,18 @@ export const updateAdmissionById = async (req, res) => {
 
     // Main admission fields
     if (payload.courseInfo !== undefined) {
+      const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
+        pool,
+        payload.courseInfo.courseId,
+        payload.courseInfo.branchId
+      );
       if (payload.courseInfo.courseId !== undefined) {
         updateFields.push('course_id = ?');
-        updateParams.push(payload.courseInfo.courseId || null);
+        updateParams.push(resolvedCourseId);
       }
       if (payload.courseInfo.branchId !== undefined) {
         updateFields.push('branch_id = ?');
-        updateParams.push(payload.courseInfo.branchId || null);
+        updateParams.push(resolvedBranchId);
       }
       if (payload.courseInfo.course !== undefined) {
         updateFields.push('course = ?');
@@ -853,13 +897,18 @@ export const updateAdmissionByLead = async (req, res) => {
 
     // Main admission fields (same logic as updateAdmissionById)
     if (payload.courseInfo !== undefined) {
+      const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
+        pool,
+        payload.courseInfo.courseId,
+        payload.courseInfo.branchId
+      );
       if (payload.courseInfo.courseId !== undefined) {
         updateFields.push('course_id = ?');
-        updateParams.push(payload.courseInfo.courseId || null);
+        updateParams.push(resolvedCourseId);
       }
       if (payload.courseInfo.branchId !== undefined) {
         updateFields.push('branch_id = ?');
-        updateParams.push(payload.courseInfo.branchId || null);
+        updateParams.push(resolvedBranchId);
       }
       if (payload.courseInfo.course !== undefined) {
         updateFields.push('course = ?');

@@ -389,26 +389,67 @@ export const recordCashPayment = async (req, res) => {
       return errorResponse(res, 'Amount must be a positive number', 422);
     }
 
-    // Validate course
-    if (courseId) {
-      const [courses] = await pool.execute(
-        'SELECT id FROM courses WHERE id = ?',
-        [courseId]
+    // Resolve admission by joining when caller omits admissionId.
+    let finalAdmissionId = admissionId || null;
+    if (!finalAdmissionId && joiningId) {
+      const [admissionRows] = await pool.execute(
+        'SELECT id FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+        [joiningId]
       );
-      if (courses.length === 0) {
-        return errorResponse(res, 'Invalid course specified', 400);
+      if (admissionRows.length > 0) {
+        finalAdmissionId = admissionRows[0].id;
       }
     }
 
-    // Validate branch
-    if (branchId) {
-      const [branches] = await pool.execute(
-        'SELECT id FROM branches WHERE id = ?',
-        [branchId]
+    // Do not hard-fail on course/branch IDs from managed external catalogs.
+    // Resolve from request first, then fallback to joining/admission row values.
+    let resolvedCourseId = courseId || null;
+    let resolvedBranchId = branchId || null;
+
+    if ((!resolvedCourseId || !resolvedBranchId) && joiningId) {
+      const [joinings] = await pool.execute(
+        'SELECT course_id, branch_id FROM joinings WHERE id = ? LIMIT 1',
+        [joiningId]
       );
-      if (branches.length === 0) {
-        return errorResponse(res, 'Invalid branch specified', 400);
+      if (joinings.length > 0) {
+        resolvedCourseId = resolvedCourseId || joinings[0].course_id || null;
+        resolvedBranchId = resolvedBranchId || joinings[0].branch_id || null;
       }
+    }
+
+    if ((!resolvedCourseId || !resolvedBranchId) && finalAdmissionId) {
+      const [admissions] = await pool.execute(
+        'SELECT course_id, branch_id FROM admissions WHERE id = ? LIMIT 1',
+        [finalAdmissionId]
+      );
+      if (admissions.length > 0) {
+        resolvedCourseId = resolvedCourseId || admissions[0].course_id || null;
+        resolvedBranchId = resolvedBranchId || admissions[0].branch_id || null;
+      }
+    }
+
+    // Keep payment insert resilient when course/branch comes from external managed catalogs:
+    // only persist IDs that actually exist in primary FK tables.
+    if (resolvedCourseId != null && String(resolvedCourseId) !== '') {
+      const [courses] = await pool.execute('SELECT id FROM courses WHERE id = ? LIMIT 1', [
+        resolvedCourseId,
+      ]);
+      if (courses.length === 0) {
+        resolvedCourseId = null;
+      }
+    }
+
+    if (resolvedBranchId != null && String(resolvedBranchId) !== '') {
+      const [branches] = await pool.execute('SELECT id FROM branches WHERE id = ? LIMIT 1', [
+        resolvedBranchId,
+      ]);
+      if (branches.length === 0) {
+        resolvedBranchId = null;
+      }
+    }
+
+    if (!resolvedCourseId) {
+      resolvedBranchId = null;
     }
 
     // Create transaction
@@ -423,9 +464,9 @@ export const recordCashPayment = async (req, res) => {
         transactionId,
         finalLeadId || null,
         joiningId,
-        admissionId || null,
-        courseId || null,
-        branchId || null,
+        finalAdmissionId,
+        resolvedCourseId,
+        resolvedBranchId,
         amount,
         currency.toUpperCase(),
         'cash',
@@ -443,10 +484,10 @@ export const recordCashPayment = async (req, res) => {
     // Update payment summary
     await updatePaymentSummary({
       joiningId,
-      admissionId,
+      admissionId: finalAdmissionId,
       leadId: finalLeadId,
-      courseId,
-      branchId,
+      courseId: resolvedCourseId,
+      branchId: resolvedBranchId,
       amount,
       currency,
     });
@@ -513,6 +554,18 @@ export const createCashfreeOrder = async (req, res) => {
 
     if (typeof amount !== 'number' || amount <= 0) {
       return errorResponse(res, 'Amount must be a positive number', 422);
+    }
+
+    // Resolve admission by joining when caller omits admissionId.
+    let finalAdmissionId = admissionId || null;
+    if (!finalAdmissionId && joiningId) {
+      const [admissionRows] = await pool.execute(
+        'SELECT id FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+        [joiningId]
+      );
+      if (admissionRows.length > 0) {
+        finalAdmissionId = admissionRows[0].id;
+      }
     }
 
     // Get Cashfree config
@@ -599,7 +652,7 @@ export const createCashfreeOrder = async (req, res) => {
         ...notes,
         leadId: finalLeadId,
         joiningId,
-        admissionId,
+        admissionId: finalAdmissionId,
       },
     };
 
@@ -655,7 +708,7 @@ export const createCashfreeOrder = async (req, res) => {
         transactionId,
         finalLeadId || null,
         joiningId,
-        admissionId || null,
+        finalAdmissionId,
         courseId || null,
         branchId || null,
         amount,
