@@ -267,20 +267,32 @@ export const getLeads = async (req, res) => {
       params.push(req.query.district);
     }
     if (req.query.village) {
-      const vTrim = String(req.query.village).trim();
-      if (vTrim) {
+      const villages = Array.isArray(req.query.village) 
+        ? req.query.village 
+        : String(req.query.village).split(',').map(v => v.trim()).filter(Boolean);
+        
+      if (villages.length > 0) {
         const proAddressMatch =
           req.user.roleName === 'PRO' &&
           (req.query.villageInAddress === 'true' || req.query.villageInAddress === '1');
+
         if (proAddressMatch) {
-          const esc = vTrim.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-          conditions.push(
-            `LOWER(CONCAT_WS(' ', IFNULL(l.address,''), IFNULL(l.village,''), IFNULL(l.mandal,''), IFNULL(l.district,''), IFNULL(l.state,''))) LIKE ?`
-          );
-          params.push(`%${esc.toLowerCase()}%`);
+          const villageConditions = [];
+          villages.forEach(v => {
+            const esc = v.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+            villageConditions.push(`LOWER(CONCAT_WS(' ', IFNULL(l.address,''), IFNULL(l.village,''), IFNULL(l.mandal,''), IFNULL(l.district,''), IFNULL(l.state,''))) LIKE ?`);
+            params.push(`%${esc.toLowerCase()}%`);
+          });
+          conditions.push(`(${villageConditions.join(' OR ')})`);
         } else {
-          conditions.push('l.village = ?');
-          params.push(vTrim);
+          if (villages.length === 1) {
+            conditions.push('l.village = ?');
+            params.push(villages[0]);
+          } else {
+            const placeholders = villages.map(() => '?').join(',');
+            conditions.push(`l.village IN (${placeholders})`);
+            params.push(...villages);
+          }
         }
       }
     }
