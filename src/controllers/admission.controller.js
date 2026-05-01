@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
+import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {

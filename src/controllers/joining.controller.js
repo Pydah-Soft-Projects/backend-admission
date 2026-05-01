@@ -3,6 +3,7 @@ import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js
 import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -2117,6 +2118,22 @@ export const approveJoining = async (req, res) => {
         statusFrom: previousStatus,
         statusTo: 'approved',
       });
+
+      // Update performance summary (conversion)
+      // We attribute the conversion to the user currently assigned to the lead
+      if (lead) {
+        const [assignedUser] = await pool.execute('SELECT role_name FROM users WHERE id = ?', [lead.assigned_to || lead.assigned_to_pro]);
+        if (assignedUser.length > 0) {
+          updatePerformanceMetric({
+            userId: lead.assigned_to || lead.assigned_to_pro,
+            academicYear: lead.academicYear,
+            studentGroup: lead.studentGroup,
+            roleName: assignedUser[0].role_name,
+            metric: 'converted_count',
+            value: 1
+          });
+        }
+      }
     }
 
     // Fetch updated joining for response
