@@ -304,9 +304,25 @@ export const sendPasswordResetSuccess = async (mobileNumber, name, username, new
   });
 };
 
+/**
+ * Send Visitor Code SMS
+ * Template: Visitor Code Dear {#var#}, Your Visitor Code for admission is {#var#}. Your Counsellor is {#var#}. Please use this code during your campus visit - Pydah Group
+ * Template ID: 1707177753294074438
+ */
+export const sendVisitorCode = async (mobileNumber, leadName, code, counselorName) => {
+  const templateId = '1707177753294074438';
+  const message = `Dear ${leadName}, Your Visitor Code for admission is ${code}. Your Counsellor is ${counselorName}. Please use this code during your campus visit - Pydah Group`;
+
+  return sendSmsThroughBulkSmsApps({
+    numbers: [mobileNumber],
+    message,
+    tempid: templateId,
+  });
+};
+
 export default {
-  sendSmsThroughBulkSmsApps,
   sendOTP,
   sendPasswordResetSuccess,
+  sendVisitorCode,
   getBulkSmsAccountInfo,
 };
