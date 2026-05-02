@@ -2994,13 +2994,13 @@ export const getUserAnalytics = async (req, res) => {
     const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
 
     const [
-      [portfolioCounts],
-      [actionCounts],
-      [conversionCounts],
-      [activePortfolioCounts],
-      [reclaimedLogsResult],
-      [commLogsResult],
-    ] = batch1Results;
+      portfolioCounts = [],
+      actionCounts = [],
+      conversionCounts = [],
+      activePortfolioCounts = [],
+      reclaimedLogsResult = [],
+      commLogsResult = [],
+    ] = (batch1Results || []).map(r => Array.isArray(r) ? r[0] : (r || []));
     
     const reclaimedLogs = reclaimedLogsResult || [];
     const commLogs = commLogsResult || [];
