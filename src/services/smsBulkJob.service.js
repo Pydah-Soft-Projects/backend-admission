@@ -525,36 +525,58 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
     sort_order: idx,
   }));
   const reportContext = normalizeReportContextForInsert(source, rawContext);
-  await pool.execute(
-    `INSERT INTO sms_bulk_jobs (
-      id, created_by, source, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
-    ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
-    [
-      jobId,
-      userId,
-      source,
-      reportContext == null ? null : JSON.stringify(reportContext),
-      template.id,
-      template.name,
-      insItems.length,
-    ]
-  );
-  for (const it of insItems) {
-    await pool.execute(
-      `INSERT INTO sms_bulk_job_items (
-        id, job_id, sort_order, lead_id, lead_name, contact_numbers, template_id, variables, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    await conn.execute(
+      `INSERT INTO sms_bulk_jobs (
+        id, created_by, source, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
+      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
       [
-        it.id,
         jobId,
-        it.sort_order,
-        it.leadId,
-        it.leadName,
-        JSON.stringify(it.contactNumbers),
-        templateId,
-        JSON.stringify(it.variables || []),
+        userId,
+        source,
+        reportContext == null ? null : JSON.stringify(reportContext),
+        template.id,
+        template.name,
+        insItems.length,
       ]
     );
+
+    if (insItems.length > 0) {
+      const batchSize = 100;
+      for (let i = 0; i < insItems.length; i += batchSize) {
+        const batch = insItems.slice(i, i + batchSize);
+        const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, \'pending\')').join(', ');
+        const values = [];
+        batch.forEach(it => {
+          values.push(
+            it.id,
+            jobId,
+            it.sort_order,
+            it.leadId,
+            it.leadName,
+            JSON.stringify(it.contactNumbers),
+            templateId,
+            JSON.stringify(it.variables || [])
+          );
+        });
+        await conn.execute(
+          `INSERT INTO sms_bulk_job_items (
+            id, job_id, sort_order, lead_id, lead_name, contact_numbers, template_id, variables, status
+          ) VALUES ${placeholders}`,
+          values
+        );
+      }
+    }
+
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
   }
   return { jobId, totalItems: insItems.length, templateName: template.name };
 }

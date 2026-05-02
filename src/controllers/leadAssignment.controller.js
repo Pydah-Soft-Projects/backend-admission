@@ -13,6 +13,7 @@ import {
   clearUserAnalyticsCache,
 } from '../utils/userAnalyticsCache.js';
 import { normalizeEmpNoKey, resolveHrmsOrgNamesFindById } from './user.controller.js';
+import { updatePerformanceSummary } from '../services/userPerformance.service.js';
 
 const assignmentStatsCache = new Map();
 const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
@@ -421,6 +422,17 @@ export const assignLeads = async (req, res) => {
 
       modifiedCount++;
       successfullyAssignedLeadIds.push(lead.id);
+    }
+
+    // Update real-time performance summary
+    if (modifiedCount > 0) {
+      updatePerformanceSummary({
+        userId: userId,
+        academicYear: academicYear || new Date().getFullYear(),
+        studentGroup: studentGroup || 'General',
+        roleName: user.role_name,
+        metrics: { allottedDelta: modifiedCount }
+      }).catch(err => console.error('[PerformanceHook] Assignment update failed:', err));
     }
 
     // Send notifications (async, don't wait for it)
@@ -2509,12 +2521,7 @@ export const getUserAnalytics = async (req, res) => {
     /** Current `leads` rows only (assigned_to / assigned_to_pro); no activity_log / communications date window. */
     const executeBatch1PortfolioSnapshot = async (ids) => {
       if (!ids.length) {
-        return [
-          [[], []],
-          [[], []],
-          [[], []],
-          [[], []],
-        ];
+        return [[[], []], [[], []], [[], []], [[], []]];
       }
       const ph = ids.map(() => '?').join(',');
       const aySql = leadFiltersSql;
@@ -2559,7 +2566,103 @@ export const getUserAnalytics = async (req, res) => {
       ]);
     };
 
-    const runBatch1 = isCurrentPortfolioOnly ? executeBatch1PortfolioSnapshot : executeBatch1ForAnalytics;
+    /** Aggregation from user_performance_summaries table for high performance. */
+    const executeBatch1FromSummaries = async (ids) => {
+      if (!ids.length) {
+        return [[[], []], [[], []], [[], []], [[], []]];
+      }
+      const ph = ids.map(() => '?').join(',');
+      const summaryConditions = ['user_id IN (' + ph + ')'];
+      const summaryParams = [...ids];
+
+      if (rangeStartStr) {
+        summaryConditions.push('summary_date >= ?');
+        summaryParams.push(rangeStartStr);
+      }
+      if (rangeEndStr) {
+        summaryConditions.push('summary_date <= ?');
+        summaryParams.push(rangeEndStr);
+      }
+      if (useAcademicYear) {
+        summaryConditions.push('academic_year = ?');
+        summaryParams.push(yearNum);
+      }
+      if (portfolioStudentGroupNorm) {
+        summaryConditions.push('student_group = ?');
+        summaryParams.push(portfolioStudentGroupNorm);
+      }
+
+      const where = `WHERE ${summaryConditions.join(' AND ')}`;
+
+      const [rows] = await pool.execute(`
+        SELECT 
+          user_id,
+          SUM(total_assigned_count) as total_assigned,
+          SUM(total_handled_leads) as total_handled,
+          SUM(converted_count) as total_converted,
+          SUM(reclaimed_count) as reclaimed_count,
+          SUM(calls_count) as calls_count,
+          SUM(total_call_duration_seconds) as total_call_duration_seconds,
+          SUM(sms_count) as sms_count,
+          GROUP_CONCAT(status_breakdown SEPARATOR '||') as breakdowns_list,
+          MAX(total_assigned_count) as active_leads
+        FROM user_performance_summaries
+        ${where}
+        GROUP BY user_id
+      `, summaryParams);
+
+      const activeRows = rows.map(r => ({ user_id: r.user_id, active_leads: Number(r.total_assigned || 0) }));
+      const convertedRows = rows.map(r => ({ user_id: r.user_id, total_converted: Number(r.total_converted || 0) }));
+      const totalHandledRows = rows.map(r => ({ 
+        user_id: r.user_id, 
+        total_assigned: Number(r.total_assigned || 0), 
+        total_handled: Number(r.total_assigned || 0), 
+        total_converted: Number(r.total_converted || 0) 
+      }));
+      const commRows = [];
+      rows.forEach(r => {
+        if (r.calls_count) commRows.push({ user_id: r.user_id, type: 'call', count: r.calls_count, total_duration: r.total_call_duration_seconds, unique_leads: r.total_handled });
+        if (r.sms_count) commRows.push({ user_id: r.user_id, type: 'sms', count: r.sms_count, total_duration: 0, unique_leads: r.total_handled });
+      });
+      
+      const statusRows = [];
+      rows.forEach(r => {
+        if (r.breakdowns_list) {
+          const parts = r.breakdowns_list.split('||');
+          const mergedBreakdown = {};
+          parts.forEach(p => {
+            try {
+              const obj = JSON.parse(p);
+              Object.keys(obj).forEach(k => {
+                const canonicalKey = canonicalCounselorCallStatusForReports(k);
+                mergedBreakdown[canonicalKey] = (mergedBreakdown[canonicalKey] || 0) + obj[k];
+              });
+            } catch (e) { /* ignore invalid json */ }
+          });
+          Object.keys(mergedBreakdown).forEach(status => {
+            statusRows.push({ user_id: r.user_id, bucket: status, cnt: mergedBreakdown[status] });
+          });
+        }
+      });
+
+      return [
+        [totalHandledRows, []],
+        [statusRows, []],
+        [convertedRows, []],
+        [activeRows, []],
+        [rows.map(r => ({ user_id: r.user_id, reclaimed_count: Number(r.reclaimed_count || 0) })), []],
+        [commRows, []],
+      ];
+    };
+
+    const runBatch1 = isCurrentPortfolioOnly 
+      ? executeBatch1PortfolioSnapshot 
+      : isRosterOnly 
+        ? executeBatch1ForAnalytics 
+        : executeBatch1FromSummaries;
+
+    // Skip heavy legacy batches if using the optimized summary table
+    const skipLegacyBatches = !isCurrentPortfolioOnly && !isRosterOnly;
 
     /** Assignment logs in the selected period (same window as date-wise expanded rows). */
     let assignmentDateConditions = [];
@@ -2891,11 +2994,16 @@ export const getUserAnalytics = async (req, res) => {
     const selectedUserPlaceholders = selectedUserIds.map(() => '?').join(',');
 
     const [
-      [portfolioCounts],
-      [actionCounts],
-      [conversionCounts],
-      [activePortfolioCounts],
-    ] = batch1Results;
+      portfolioCounts = [],
+      actionCounts = [],
+      conversionCounts = [],
+      activePortfolioCounts = [],
+      reclaimedLogsResult = [],
+      commLogsResult = [],
+    ] = (batch1Results || []).map(r => Array.isArray(r) ? r[0] : (r || []));
+    
+    const reclaimedLogs = reclaimedLogsResult || [];
+    const commLogs = commLogsResult || [];
 
     // Initialize statsByUserId Map with all filtered users
     const statsByUserId = new Map();
@@ -3018,7 +3126,12 @@ export const getUserAnalytics = async (req, res) => {
       : [...aggregateUserIds, ...activityDateParams];
 
     /** Comms + activity-log aggregates run together with cohort SQL (previously 3+3 sequential round-trips). */
-    const batch2Promise = Promise.all([
+    let commRows = [];
+    let activityAgg = [];
+    let assignments = [];
+    let batch2Promise = null;
+    if (!skipLegacyBatches) {
+      batch2Promise = Promise.all([
       pool.execute(commAggSql, commAggParams),
       pool.execute(
         `SELECT
@@ -3055,13 +3168,26 @@ export const getUserAnalytics = async (req, res) => {
         GROUP BY performed_by`,
         leadFiltersSql ? [...selectedUserIds, ...activityDateParams, ...leadFiltersParams] : [...selectedUserIds, ...activityDateParams]
       ),
-    ]);
+      ]);
 
-    const emptyExec = [[], []];
-    const cohortPromise =
-      cohortScopeUserIds.length === 0
-        ? Promise.resolve([emptyExec, emptyExec, emptyExec, emptyExec])
-        : Promise.all([
+      const [
+        [commRowsRes],
+        [activityAggRes],
+        [assignmentsRes]
+      ] = await batch2Promise;
+      commRows = commRowsRes;
+      activityAgg = activityAggRes;
+      assignments = assignmentsRes;
+    } else {
+      commRows = commLogs;
+    }
+
+    let cohortPromise = null;
+    if (!skipLegacyBatches) {
+      cohortPromise =
+        cohortScopeUserIds.length === 0
+          ? Promise.resolve([emptyExec, emptyExec, emptyExec, emptyExec])
+          : Promise.all([
             pool.execute(
               `SELECT a.target_user_id AS user_id, COUNT(DISTINCT a.lead_id) AS cnt
                FROM activity_logs a
@@ -3166,6 +3292,7 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
               cohortAssignJoinParams
             ),
           ]);
+    }
 
     const emptyMysqlResult = [[], []];
     let batch2Results;
@@ -3193,6 +3320,24 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         currentPortfolioCallPack = [cpRows, []];
       }
       batch2Results = [emptyMysqlResult, currentPortfolioCallPack, emptyMysqlResult];
+    } else if (skipLegacyBatches) {
+      // FOR PERFORMANCE REPORTS: Use pre-calculated summary data and skip all slow background scans
+      batch2Results = [
+        [commLogs, []],
+        [[], []], // unique_current_leads_called (optional)
+        [[], []]  // activity logs count (optional)
+      ];
+      
+      // Map user roles for canonical bucket mapping
+      const userRoleMap = new Map(users.map(u => [u.id, u.role_name]));
+
+      const actionCountsMapped = actionCounts.map(r => ({ ...r, cohort_user_role: userRoleMap.get(r.user_id) }));
+      cohortTriple = [
+        [portfolioCounts.map(r => ({ user_id: r.user_id, cnt: r.total_assigned })), []], // allotted counts (expects cnt)
+        [actionCountsMapped, []], // status counts (expects bucket, cnt, cohort_user_role)
+        [actionCountsMapped, []], // outcome counts (also use status counts for current-state reporting)
+        [portfolioCounts.map(r => ({ user_id: r.user_id, bucket_sum: r.total_assigned })), []], // bucket sums
+      ];
     } else {
       [batch2Results, cohortTriple] = await Promise.all([batch2Promise, cohortPromise]);
     }
@@ -3701,14 +3846,14 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
       totalSms += numAgg(comms.sms);
 
       if (isStudentCounselor) {
-        totalInterested += allottedBag
-          ? numAgg(allottedBag['Interested']) + numAgg(allottedBag['CET Applied'] ?? 0)
-          : 0;
+        const interestedCount = numAgg(allottedBag?.['Interested'] || 0);
+        const cetAppliedCount = numAgg(allottedBag?.['CET Applied'] || 0);
+        totalInterested += interestedCount + cetAppliedCount;
       } else if (isPro) {
-        totalInterested += allottedBag ? numAgg(allottedBag['Interested']) : 0;
+        totalInterested += numAgg(allottedBag?.['Interested'] || 0);
       } else {
         const sb = stats.statusBreakdown || {};
-        totalInterested += numAgg(sb['Interested']) + numAgg(sb['CET Applied'] ?? 0);
+        totalInterested += numAgg(sb['Interested'] || 0) + numAgg(sb['CET Applied'] || 0);
       }
       if (isStudentCounselor || isPro) {
         totalCallbacksRevisits += sumCallbacksRevisitsFromAllottedBag(allottedBag, u.role_name);
@@ -3747,11 +3892,11 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
       const proBucketSum = isPro ? numAgg(allottedBucketSumMap.get(uidForCohort) ?? 0) : 0;
       /** Student Counselor: same as expanded footer — sum of distinct allotted-cohort leads in Interested + CET Applied (current call_status). */
       const interestedPlusCetAllotted = allottedCallStatusBag
-        ? numAgg(allottedCallStatusBag['Interested']) + numAgg(allottedCallStatusBag['CET Applied'])
+        ? numAgg(allottedCallStatusBag['Interested'] || 0) + numAgg(allottedCallStatusBag['CET Applied'] || 0)
         : 0;
       /** Student Counselor: period-allotted cohort leads currently in Visited (call_status), same buckets as expanded table. */
       const visitedCumulativeCounsellor = isStudentCounselor
-        ? numAgg(allottedCallStatusBag?.['Visited'])
+        ? numAgg(allottedCallStatusBag?.['Visited'] || 0)
         : undefined;
       /** PRO: Interested on period-allotted cohort by current visit_status (no CET Applied in visit workflow). */
       const interestedProAllotted = allottedCallStatusBag ? numAgg(allottedCallStatusBag['Interested']) : 0;

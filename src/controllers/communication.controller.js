@@ -9,6 +9,7 @@ import {
   renderTemplateContent,
 } from '../services/communicationSmsDispatch.js';
 import { v4 as uuidv4 } from 'uuid';
+import { logCallPerformance, updatePerformanceMetric } from '../services/userPerformance.service.js';
 
 export const logCallCommunication = async (req, res) => {
   try {
@@ -46,6 +47,9 @@ export const logCallCommunication = async (req, res) => {
         JSON.stringify({ source: 'click_to_call' }),
       ]
     );
+
+    // Track performance
+    logCallPerformance(userId, lead, durationSeconds ? Number(durationSeconds) : 0);
 
     if (req.user.roleName === 'Student Counselor' && outcome?.trim()) {
       const oc = String(outcome).trim();
@@ -136,6 +140,19 @@ export const sendSmsCommunication = async (req, res) => {
       contactNumbers,
       templates
     );
+
+    // Track performance
+    if (savedCommunicationIds.length > 0) {
+      const { lead } = await ensureLeadAndNumbers(leadId, contactNumbers);
+      updatePerformanceMetric({
+        userId,
+        academicYear: lead.academic_year,
+        studentGroup: lead.student_group,
+        roleName: req.user.roleName || 'Counsellor',
+        metric: 'sms_count',
+        value: savedCommunicationIds.length
+      });
+    }
 
     // Fetch created communications
     if (savedCommunicationIds.length === 0) {

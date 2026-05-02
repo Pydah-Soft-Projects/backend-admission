@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import { logStatusChangePerformance } from '../services/userPerformance.service.js';
 
 // Helper function to format lead status log
 const formatStatusLog = (logData, changedByUser = null) => {
@@ -70,6 +71,12 @@ export const updateLeadStatus = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, NOW())`,
       [statusLogId, leadId, status, comment || '', userId]
     );
+
+    // Track performance (increment handled leads and update status breakdown)
+    const [fullLead] = await pool.execute('SELECT academic_year, student_group FROM leads WHERE id = ?', [leadId]);
+    if (fullLead.length > 0) {
+      logStatusChangePerformance(userId, fullLead[0], status);
+    }
 
     // Fetch updated lead with status logs
     const [updatedLeads] = await pool.execute(

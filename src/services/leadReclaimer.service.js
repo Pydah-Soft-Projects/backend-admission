@@ -1,6 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { notifyLeadReclamationSummary } from './notification.service.js';
+import { updatePerformanceMetric } from './userPerformance.service.js';
 
 /**
  * Under PM2, stdout can be closed during reload/restart; console.log may throw EPIPE and
@@ -127,7 +128,8 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
       `
       SELECT id, lead_status, cycle_number,
         assigned_to, assigned_to_pro,
-        counsellor_target_date, pro_target_date, target_date
+        counsellor_target_date, pro_target_date, target_date,
+        academic_year, student_group
       FROM leads
       WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned')
         AND (
@@ -164,6 +166,8 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
       newCycle,
       cycleIncremented,
       reclaimedRole,
+      academicYear,
+      studentGroup
     }) => {
       const activityLogId = uuidv4();
       await pool.execute(
@@ -190,6 +194,18 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
           }),
         ]
       );
+
+      // Update performance summary
+      if (previousAssignee) {
+        await updatePerformanceMetric({
+          userId: previousAssignee,
+          academicYear: academicYear,
+          studentGroup: studentGroup,
+          roleName: reclaimedRole === 'counsellor' ? 'Student Counselor' : 'PRO',
+          metric: 'reclaimed_count',
+          value: 1
+        });
+      }
     };
 
     for (const lead of leadsToReclaim) {
@@ -262,6 +278,8 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
           newCycle,
           cycleIncremented: shouldIncrementCycle,
           reclaimedRole: 'counsellor',
+          academicYear: lead.academic_year,
+          studentGroup: lead.student_group
         });
         bumpReclaimedCount(lead.assigned_to);
         reclaimedCount += 1;
@@ -277,6 +295,8 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
           newCycle,
           cycleIncremented: shouldIncrementCycle,
           reclaimedRole: 'PRO',
+          academicYear: lead.academic_year,
+          studentGroup: lead.student_group
         });
         bumpReclaimedCount(lead.assigned_to_pro);
         reclaimedCount += 1;
