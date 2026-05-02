@@ -663,6 +663,157 @@ export const listJoinings = async (req, res) => {
   }
 };
 
+/**
+ * Load joining + lead for read-only flows (no auto-create when a lead has no joining yet).
+ * @param {string} leadId Joining id or lead id (same URL segment as authenticated API).
+ * @returns {Promise<{ joining: object; lead: object | null }>}
+ */
+export async function fetchJoiningPayloadReadOnly(leadId) {
+  if (!leadId || typeof leadId !== 'string' || leadId === 'new' || leadId === 'undefined') {
+    const err = new Error('Joining form not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const pool = getPool();
+  let joiningDoc = null;
+  let lead = null;
+
+  if (leadId.length === 36) {
+    const [joinings] = await pool.execute('SELECT * FROM joinings WHERE id = ?', [leadId]);
+
+    if (joinings.length > 0) {
+      joiningDoc = joinings[0];
+      if (!joiningDoc.lead_id) {
+        const formattedJoining = await formatJoining(joiningDoc, pool);
+        return { joining: formattedJoining, lead: null };
+      }
+      try {
+        lead = await ensureLeadExists(joiningDoc.lead_id);
+      } catch {
+        lead = null;
+      }
+    }
+  }
+
+  if (!joiningDoc) {
+    try {
+      lead = await ensureLeadExists(leadId);
+      const [joinings] = await pool.execute('SELECT * FROM joinings WHERE lead_id = ?', [leadId]);
+
+      if (joinings.length > 0) {
+        joiningDoc = joinings[0];
+      }
+    } catch (error) {
+      if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
+        const err = new Error('Invalid joining or lead identifier');
+        err.statusCode = 404;
+        throw err;
+      }
+      throw error;
+    }
+  }
+
+  if (!joiningDoc) {
+    const err = new Error('Joining form not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const formattedJoining = await formatJoining(joiningDoc, pool);
+  if (!lead && joiningDoc.lead_id) {
+    try {
+      lead = await ensureLeadExists(joiningDoc.lead_id);
+    } catch {
+      lead = null;
+    }
+  }
+
+  return { joining: formattedJoining, lead };
+};
+
+/**
+ * Ensure a draft joining exists for a CRM lead (UUID). Creates one if missing (same as first open of joining form).
+ * Only when the lead is in Confirmed status. Throws with statusCode if not allowed.
+ * @param {string} leadId Lead UUID
+ * @param {string} userId Staff user id for created_by / activity
+ */
+export async function ensureJoiningDraftForLead(leadId, userId) {
+  const pool = getPool();
+  if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
+    const err = new Error('Invalid lead identifier');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const [existingByLead] = await pool.execute(
+    'SELECT id, status FROM joinings WHERE lead_id = ? ORDER BY updated_at DESC LIMIT 1',
+    [leadId]
+  );
+
+  if (existingByLead.length > 0) {
+    if (existingByLead[0].status !== 'draft') {
+      const err = new Error(
+        'This lead already has a joining form that is not a draft. Manage it from the joining desk.'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+    return;
+  }
+
+  const lead = await ensureLeadExists(leadId);
+  const ls = String(lead.leadStatus || '').trim().toLowerCase();
+  if (ls !== 'confirmed') {
+    const err = new Error(
+      'A self-serve joining link can only be created when the lead is in Confirmed status.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const leadDataSnapshot = { ...lead };
+  delete leadDataSnapshot._id;
+  delete leadDataSnapshot.id;
+  delete leadDataSnapshot.__v;
+
+  const joiningId = uuidv4();
+  await pool.execute(
+    `INSERT INTO joinings (
+      id, lead_id, lead_data, status, course, quota,
+      student_name, student_phone, student_gender, student_notes,
+      father_name, father_phone, mother_name,
+      reservation_general, reservation_other,
+      created_by, updated_by, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      joiningId,
+      leadId,
+      JSON.stringify(leadDataSnapshot),
+      'draft',
+      lead.courseInterested || '',
+      lead.quota || '',
+      lead.name,
+      lead.phone,
+      lead.gender || '',
+      'As per SSC for no issues',
+      lead.fatherName || '',
+      lead.fatherPhone || '',
+      lead.motherName || '',
+      DEFAULT_GENERAL_RESERVATION,
+      JSON.stringify([]),
+      userId,
+      userId,
+    ]
+  );
+
+  await recordActivity({
+    leadId: lead.id,
+    userId,
+    description: 'Joining draft created for lead self-serve form link',
+  });
+}
+
 export const getJoining = async (req, res) => {
   try {
     const { leadId } = req.params;

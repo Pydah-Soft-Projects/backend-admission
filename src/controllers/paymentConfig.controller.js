@@ -80,112 +80,115 @@ const formatPaymentConfig = (configData) => {
   };
 };
 
+/**
+ * Course/branch directory + fee configs (same shape as GET /payments/settings data payload).
+ * @param {boolean} showInactive
+ * @returns {Promise<Array<{ course: object; branches: object[]; payment: object }>>}
+ */
+export async function fetchCoursePaymentCatalogPayload(showInactive = false) {
+  const secondaryPool = getSecondaryPool();
+  const primaryPool = getPool();
+  const courseCols = await buildCoursesSelectList(secondaryPool);
+
+  let courseQuery = `SELECT ${courseCols} FROM courses`;
+  const courseParams = [];
+  if (!showInactive) {
+    courseQuery += ' WHERE is_active = ?';
+    courseParams.push(1);
+  }
+  courseQuery += ' ORDER BY name ASC';
+
+  const [courses] = await secondaryPool.execute(courseQuery, courseParams);
+  const formattedCourses = courses.map(formatCourse);
+  const courseIds = formattedCourses.map((c) => c.id);
+
+  if (courseIds.length === 0) {
+    return [];
+  }
+
+  const courseIdsInt = formattedCourses.map((c) => parseInt(c.id, 10));
+  let branchQuery =
+    'SELECT DISTINCT id, course_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, academic_year_id, created_at, updated_at FROM course_branches WHERE course_id IN (';
+  branchQuery += courseIdsInt.map(() => '?').join(',');
+  branchQuery += ')';
+  const branchParams = [...courseIdsInt];
+  if (!showInactive) {
+    branchQuery += ' AND is_active = ?';
+    branchParams.push(1);
+  }
+  branchQuery += ' ORDER BY name ASC';
+
+  const [branches] = await secondaryPool.execute(branchQuery, branchParams);
+  const formattedBranches = branches.map(formatBranch);
+
+  const uniqueBranchesMap = new Map();
+  formattedBranches.forEach((branch) => {
+    const branchId = branch.id || branch._id;
+    if (branchId && !uniqueBranchesMap.has(branchId)) {
+      uniqueBranchesMap.set(branchId, branch);
+    }
+  });
+  const deduplicatedBranches = Array.from(uniqueBranchesMap.values());
+
+  let configQuery =
+    'SELECT id, course_id, branch_id, amount, currency, is_active, notes, created_by, updated_by, created_at, updated_at FROM payment_configs WHERE course_id IN (';
+  configQuery += courseIds.map(() => '?').join(',');
+  configQuery += ')';
+  const configParams = [...courseIds];
+  if (!showInactive) {
+    configQuery += ' AND is_active = ?';
+    configParams.push(true);
+  }
+  configQuery += ' ORDER BY created_at DESC';
+
+  const [configs] = await primaryPool.execute(configQuery, configParams);
+  const formattedConfigs = configs.map(formatPaymentConfig);
+
+  const configMap = formattedConfigs.reduce((acc, config) => {
+    const key = config.courseId;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(config);
+    return acc;
+  }, {});
+
+  const branchMap = deduplicatedBranches.reduce((acc, branch) => {
+    const key = branch.courseId;
+    if (!acc[key]) acc[key] = [];
+    const existingBranch = acc[key].find((b) => (b.id || b._id) === (branch.id || branch._id));
+    if (!existingBranch) {
+      acc[key].push(branch);
+    }
+    return acc;
+  }, {});
+
+  return formattedCourses.map((course) => {
+    const courseKey = course.id;
+    const relatedBranches = branchMap[courseKey] || [];
+    const relatedConfigs = configMap[courseKey] || [];
+
+    const defaultFee = relatedConfigs.find((config) => !config.branchId) || null;
+    const branchFees = relatedConfigs
+      .filter((config) => !!config.branchId)
+      .map((config) => ({
+        ...config,
+        branch: relatedBranches.find((branch) => branch.id === config.branchId) || null,
+      }));
+
+    return {
+      course,
+      branches: relatedBranches,
+      payment: {
+        defaultFee,
+        branchFees,
+      },
+    };
+  });
+}
+
 export const getPaymentSettings = async (req, res) => {
   try {
     const showInactive = req.query.showInactive === 'true';
-    const secondaryPool = getSecondaryPool(); // Secondary DB for courses/branches
-    const primaryPool = getPool(); // Primary DB for payment configs
-    const courseCols = await buildCoursesSelectList(secondaryPool);
-
-    // Get courses from secondary database
-    let courseQuery = `SELECT ${courseCols} FROM courses`;
-    const courseParams = [];
-    if (!showInactive) {
-      courseQuery += ' WHERE is_active = ?';
-      courseParams.push(1); // tinyint(1) uses 1 for true
-    }
-    courseQuery += ' ORDER BY name ASC';
-
-    const [courses] = await secondaryPool.execute(courseQuery, courseParams);
-    const formattedCourses = courses.map(formatCourse);
-    const courseIds = formattedCourses.map(c => c.id); // These are now strings
-
-    if (courseIds.length === 0) {
-      return successResponse(res, []);
-    }
-
-    // Get branches from secondary database
-    const courseIdsInt = formattedCourses.map(c => parseInt(c.id)); // Convert back to int for query
-    let branchQuery = 'SELECT DISTINCT id, course_id, name, code, total_years, semesters_per_year, year_semester_config, metadata, is_active, academic_year_id, created_at, updated_at FROM course_branches WHERE course_id IN (';
-    branchQuery += courseIdsInt.map(() => '?').join(',');
-    branchQuery += ')';
-    const branchParams = [...courseIdsInt];
-    if (!showInactive) {
-      branchQuery += ' AND is_active = ?';
-      branchParams.push(1); // tinyint(1) uses 1 for true
-    }
-    branchQuery += ' ORDER BY name ASC';
-
-    const [branches] = await secondaryPool.execute(branchQuery, branchParams);
-    const formattedBranches = branches.map(formatBranch);
-
-    // Deduplicate branches by ID (in case of any duplicates from secondary DB)
-    const uniqueBranchesMap = new Map();
-    formattedBranches.forEach((branch) => {
-      const branchId = branch.id || branch._id;
-      if (branchId && !uniqueBranchesMap.has(branchId)) {
-        uniqueBranchesMap.set(branchId, branch);
-      }
-    });
-    const deduplicatedBranches = Array.from(uniqueBranchesMap.values());
-
-    // Get payment configs from primary database (using string IDs)
-    let configQuery = 'SELECT id, course_id, branch_id, amount, currency, is_active, notes, created_by, updated_by, created_at, updated_at FROM payment_configs WHERE course_id IN (';
-    configQuery += courseIds.map(() => '?').join(',');
-    configQuery += ')';
-    const configParams = [...courseIds];
-    if (!showInactive) {
-      configQuery += ' AND is_active = ?';
-      configParams.push(true);
-    }
-    configQuery += ' ORDER BY created_at DESC';
-
-    const [configs] = await primaryPool.execute(configQuery, configParams);
-    const formattedConfigs = configs.map(formatPaymentConfig);
-
-    // Group by course_id
-    const configMap = formattedConfigs.reduce((acc, config) => {
-      const key = config.courseId;
-      if (!acc[key]) acc[key] = [];
-      acc[key].push(config);
-      return acc;
-    }, {});
-
-    // Group deduplicated branches by course_id
-    const branchMap = deduplicatedBranches.reduce((acc, branch) => {
-      const key = branch.courseId;
-      if (!acc[key]) acc[key] = [];
-      // Additional check to prevent duplicates within the same course
-      const existingBranch = acc[key].find((b) => (b.id || b._id) === (branch.id || branch._id));
-      if (!existingBranch) {
-        acc[key].push(branch);
-      }
-      return acc;
-    }, {});
-
-    const payload = formattedCourses.map((course) => {
-      const courseKey = course.id;
-      const relatedBranches = branchMap[courseKey] || [];
-      const relatedConfigs = configMap[courseKey] || [];
-
-      const defaultFee = relatedConfigs.find((config) => !config.branchId) || null;
-      const branchFees = relatedConfigs
-        .filter((config) => !!config.branchId)
-        .map((config) => ({
-          ...config,
-          branch: relatedBranches.find((branch) => branch.id === config.branchId) || null,
-        }));
-
-      return {
-        course,
-        branches: relatedBranches,
-        payment: {
-          defaultFee,
-          branchFees,
-        },
-      };
-    });
-
+    const payload = await fetchCoursePaymentCatalogPayload(showInactive);
     return successResponse(res, payload);
   } catch (error) {
     console.error('Get payment settings error:', error);

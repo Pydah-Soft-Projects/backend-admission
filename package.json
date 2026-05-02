@@ -21,6 +21,8 @@
     "db:copy-remote-to-local": "node src/scripts-sql/copyRemoteDbToLocal.js",
     "db:analyze-secondary-forms": "node src/scripts-sql/analyzeSecondaryRegistrationForms.js",
     "migrate:user-analytics-indexes": "node src/scripts-sql/addUserAnalyticsPerformanceIndexes.js",
+    "migrate:joining-public-edit-tokens": "node src/scripts-sql/migrateJoiningPublicEditTokens.js",
+    "migrate:joining-online-admission-sms-template": "node src/scripts-sql/migrateJoiningOnlineAdmissionSmsTemplate.js",
     "db:diagnose-status-mismatch": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js",
     "db:diagnose-status-apply": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js --apply",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",
