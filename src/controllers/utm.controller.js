@@ -91,8 +91,8 @@ export const buildUtmTrackedUrl = async (req, res) => {
 
     // Check if a record with this URL already exists (without short code)
     const [existing] = await pool.execute(
-      'SELECT * FROM short_urls WHERE original_url = ? AND short_code IS NULL AND created_by = ?',
-      [utmUrl, userId]
+      'SELECT * FROM short_urls WHERE original_url = ? AND short_code IS NULL',
+      [utmUrl]
     );
 
     let urlRecord;
@@ -190,8 +190,8 @@ export const shortenUtmUrl = async (req, res) => {
 
     // Try to find existing long URL record
     const [existingUrls] = await pool.execute(
-      'SELECT * FROM short_urls WHERE original_url = ? AND created_by = ?',
-      [fullUrl, userId]
+      'SELECT * FROM short_urls WHERE original_url = ?',
+      [fullUrl]
     );
 
     let shortUrl;
@@ -625,21 +625,18 @@ export const getAllShortUrls = async (req, res) => {
 
     // Get total count
     const [countResult] = await pool.execute(
-      'SELECT COUNT(*) as total FROM short_urls WHERE created_by = ?',
-      [userId]
+      'SELECT COUNT(*) as total FROM short_urls'
     );
     const total = countResult[0].total;
 
-    // Get all URLs (including long URLs without short codes) for current user
+    // Get all URLs (including long URLs without short codes)
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const [shortUrls] = await pool.execute(
       `SELECT s.*, u.name as created_by_name, u.email as created_by_email
        FROM short_urls s
        LEFT JOIN users u ON s.created_by = u.id
-       WHERE s.created_by = ?
        ORDER BY s.created_at DESC
-       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`,
-      [userId]
+       LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
     );
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://admissions.pydah.edu.in';
