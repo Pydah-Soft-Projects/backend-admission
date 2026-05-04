@@ -45,15 +45,17 @@ async function uploadExcel() {
     console.log('   EXCEL UPLOAD TO TEMPORARY TABLE');
     console.log('=========================================\n');
     
-    // 1. Ensure table exists with new column
+    // 1. Ensure table exists with new columns
     console.log('✔ Ensuring temp_excel_leads table exists...');
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS temp_excel_leads (
         id INT AUTO_INCREMENT PRIMARY KEY,
         student_name VARCHAR(255),
-        inter_college VARCHAR(255),
-        college_district VARCHAR(255),
-        pincode VARCHAR(20),
+        phone VARCHAR(20),
+        district VARCHAR(255),
+        mandal VARCHAR(255),
+        village VARCHAR(255),
+        street VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -96,62 +98,87 @@ async function uploadExcel() {
 
     console.log(`\nSelected Sheet: "${selectedSheetName}"`);
     const worksheet = workbook.Sheets[selectedSheetName];
-    const data = xlsx.utils.sheet_to_json(worksheet);
+    const sheetData = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+    const headers = sheetData[0];
 
-    if (data.length === 0) {
+    if (sheetData.length <= 1) {
       console.log('The Excel file is empty.');
       return;
     }
 
-    console.log(`Found ${data.length} rows in the sheet.`);
+    console.log(`Found ${sheetData.length - 1} rows in the sheet.`);
 
-    // 4. Map columns correctly regardless of order
-    const rowsToInsert = data.map(row => {
-      const getVal = (possibleNames) => {
-        const key = Object.keys(row).find(k => 
-          possibleNames.includes(k.toLowerCase().replace(/[\s_]/g, ''))
-        );
-        return key ? row[key] : null;
+    // 4. Process rows and map columns
+    const seen = new Set();
+    let duplicateCount = 0;
+
+    const rowsToInsert = sheetData.slice(1).map((row) => {
+      const getVal = (aliases) => {
+        const index = headers.findIndex(h => h && aliases.includes(h.toLowerCase().replace(/[^a-z0-9]/g, '')));
+        return index !== -1 ? row[index] : null;
       };
 
+      const name = (getVal(['stuname', 'studentname', 'name', 'student', 'fullname', 'studentfullname', 'full_name', 'student_name']) || '').toString().trim();
+      const phone = (getVal(['stumobileno', 'mobileno', 'phone', 'phonenumber', 'studentphone', 'mobile', 'contact_no']) || '').toString().trim();
+
+      // Duplicate detection: Name + Phone
+      const duplicateKey = `${name.toLowerCase()}|${phone}`;
+      if (seen.has(duplicateKey)) {
+        duplicateCount++;
+        return null;
+      }
+      if (name && phone) seen.add(duplicateKey);
+
       return [
-        // Aliases for STUDENT NAME
-        getVal(['studentname', 'name', 'student', 'fullname', 'studentfullname', 'full_name', 'student_name']),
-        
-        // Aliases for INTER COLLEGE
-        getVal(['intercollege', 'college', 'inter_college', 'inter_college_name', 'collegename', 'college_name', 'school_college', 'school_or_college']),
-        
-        // Aliases for COLLEGE DISTRICT
-        getVal(['collegedistrict', 'district', 'college_district', 'districtname', 'district_name', 'location_district']),
-        
-        // Aliases for PINCODE
-        getVal(['pincode', 'pin', 'zip', 'zipcode', 'pincode_no', 'postal_code', 'pin_code'])
+        name,
+        phone,
+        getVal(['stddistrictname', 'district', 'dist', 'districtname', 'district_name', 'student_district']),
+        getVal(['stdmandalname', 'mandal', 'tehsil', 'block', 'mandalname', 'mandal_name']),
+        getVal(['villagename', 'village', 'city', 'town', 'vill', 'village_name', 'habitation']),
+        getVal(['street', 'address', 'fulladdress', 'full_address', 'streetname', 'street_name', 'location'])
       ];
     });
 
-    const validRows = rowsToInsert.filter(r => r[0] || r[1] || r[2] || r[3]);
+    const validRows = rowsToInsert.filter(r => r !== null && r[0] && r[1]);
+    
+    console.log(`\nExcel processing complete.`);
+    console.log(`- Rows found: ${sheetData.length - 1}`);
+    console.log(`- Duplicates skipped: ${duplicateCount}`);
+    console.log(`- Valid unique rows to upload: ${validRows.length}`);
+    console.log('Columns mapped: [Student Name], [Phone], [District], [Mandal], [Village], [Street]');
 
     if (validRows.length === 0) {
-      console.error('Error: Could not find any data matching expected columns.');
+      console.error('Error: Could not find any valid data matching expected columns.');
       return;
     }
 
-    console.log(`\nReady to upload ${validRows.length} rows.`);
-    console.log('Columns mapped: [Student Name], [Inter College], [College District], [Pincode]');
+    // 5. Ask for confirmation and truncation
+    const cleanOld = await question('\nDo you want to CLEAR (TRUNCATE) old data in the temp table first? (y/n): ');
+    if (cleanOld.toLowerCase() === 'y' || cleanOld.toLowerCase() === 'yes') {
+      console.log('Clearing old data...');
+      await pool.execute('TRUNCATE TABLE temp_excel_leads');
+    }
 
-    // 5. Ask for confirmation
-    const confirm = await question('\nDo you want to proceed and dump this data into the database? (y/n): ');
+    const confirm = await question('\nDo you want to proceed and upload this new data? (y/n): ');
     
     if (confirm.toLowerCase() !== 'y' && confirm.toLowerCase() !== 'yes') {
       console.log('Upload cancelled by user.');
       return;
     }
 
-    console.log('Uploading data...');
-    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, inter_college, college_district, pincode) VALUES ?';
-    const [result] = await pool.query(insertQuery, [validRows]);
+    console.log(`Uploading ${validRows.length} unique rows...`);
+    const BATCH_SIZE = 5000;
+    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, phone, district, mandal, village, street) VALUES ?';
+    
+    let totalInserted = 0;
+    for (let i = 0; i < validRows.length; i += BATCH_SIZE) {
+      const chunk = validRows.slice(i, i + BATCH_SIZE);
+      const [result] = await pool.query(insertQuery, [chunk]);
+      totalInserted += result.affectedRows;
+      console.log(`   Progress: Uploaded ${totalInserted} / ${validRows.length} rows...`);
+    }
 
-    console.log(`\nSUCCESS! Uploaded ${result.affectedRows} rows to 'temp_excel_leads'.`);
+    console.log(`\nSUCCESS! Uploaded ${totalInserted} rows to 'temp_excel_leads'.`);
     
     // Preview
     const [preview] = await pool.execute('SELECT * FROM temp_excel_leads ORDER BY id DESC LIMIT 5');
