@@ -147,7 +147,7 @@ function leadInstitutionLabelExprSql(studentGroup) {
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, district, state, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate, cycleNumber } = req.body;
+    const { userId, mandal, district, state, village, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate, cycleNumber } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -249,6 +249,10 @@ export const assignLeads = async (req, res) => {
       if (state) {
         conditions.push('state = ?');
         params.push(state);
+      }
+      if (village) {
+        conditions.push('village = ?');
+        params.push(village);
       }
 
       if (studentGroup) {
@@ -518,7 +522,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, district, state, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
+    const { mandal, district, state, village, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
     const pool = getPool();
     const includeBreakdowns = String(req.query.includeBreakdowns || 'true').toLowerCase() !== 'false';
     const summaryOnly = String(req.query.summaryOnly || 'false').toLowerCase() === 'true';
@@ -584,6 +588,18 @@ export const getAssignmentStats = async (req, res) => {
       conditions.push('mandal = ?');
       params.push(mandal);
     }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
+    }
 
     // Add district filter if provided
     if (district) {
@@ -595,6 +611,16 @@ export const getAssignmentStats = async (req, res) => {
     if (state) {
       conditions.push('state = ?');
       params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
+    }
+
+    // Add village filter if provided
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
     }
 
     const institutionKeySql = leadInstitutionKeySql(studentGroup);
@@ -645,6 +671,10 @@ export const getAssignmentStats = async (req, res) => {
     if (state) {
       baseConditions.push('state = ?');
       baseParams.push(state);
+    }
+    if (village) {
+      baseConditions.push('village = ?');
+      baseParams.push(village);
     }
     if (institutionName && typeof institutionName === 'string' && String(institutionName).trim()) {
       const instBase = String(institutionName).trim();
@@ -778,6 +808,7 @@ export const getAssignmentStats = async (req, res) => {
 
     let districtAssignmentBreakdown;
     let mandalAssignmentBreakdown;
+    let villageAssignmentBreakdown;
 
     if (geoBreakdown === 'district' && state) {
       const { gc, gp } = buildGeoScopeConditions({ includeDistrict: false });
@@ -819,6 +850,28 @@ export const getAssignmentStats = async (req, res) => {
       }
     }
 
+    if (geoBreakdown === 'village' && state && district && mandal) {
+      const { gc, gp } = buildGeoScopeConditions({ includeDistrict: true, districtValue: district });
+      gc.push('mandal = ?');
+      gp.push(mandal);
+      if (gc.length > 0) {
+        const [vRows] = await pool.execute(
+          `SELECT COALESCE(NULLIF(TRIM(village), ''), '(Unknown)') AS village,
+            SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned_count,
+            SUM(CASE WHEN NOT (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS assigned_count
+           FROM leads WHERE ${gc.join(' AND ')}
+           GROUP BY COALESCE(NULLIF(TRIM(village), ''), '(Unknown)')
+           ORDER BY village ASC`,
+          gp
+        );
+        villageAssignmentBreakdown = (vRows || []).map((r) => ({
+          village: r.village,
+          unassignedCount: Number(r.unassigned_count) || 0,
+          assignedCount: Number(r.assigned_count) || 0,
+        }));
+      }
+    }
+
     const payload = {
       ...(skipSummaryForInstitutionBreakdownOnly
         ? {}
@@ -837,6 +890,7 @@ export const getAssignmentStats = async (req, res) => {
       })),
       ...(districtAssignmentBreakdown ? { districtAssignmentBreakdown } : {}),
       ...(mandalAssignmentBreakdown ? { mandalAssignmentBreakdown } : {}),
+      ...(villageAssignmentBreakdown ? { villageAssignmentBreakdown } : {}),
     };
 
     if (needsInstitutionBreakdown) {
@@ -866,7 +920,7 @@ export const getAssignmentStats = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignedCountForUser = async (req, res) => {
   try {
-    const { userId, mandal, district, state, academicYear, studentGroup, cycleNumber } = req.query;
+    const { userId, mandal, district, state, village, academicYear, studentGroup, cycleNumber } = req.query;
     const pool = getPool();
 
     if (!userId) {
@@ -920,6 +974,22 @@ export const getAssignedCountForUser = async (req, res) => {
       conditions.push('state = ?');
       params.push(state);
     }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
+    }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
+    }
 
     const [result] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads WHERE ${conditions.join(' AND ')}`,
@@ -947,7 +1017,7 @@ export const getAssignedCountForUser = async (req, res) => {
 // @access  Private (Super Admin only)
 export const removeAssignments = async (req, res) => {
   try {
-    const { userId, mandal, district, state, academicYear, studentGroup, cycleNumber, count } = req.body;
+    const { userId, mandal, district, state, village, academicYear, studentGroup, cycleNumber, count } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -1003,6 +1073,22 @@ export const removeAssignments = async (req, res) => {
     if (state) {
       conditions.push('state = ?');
       params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
+    }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
     }
 
     const limitNum = Math.min(Math.max(parseInt(count, 10) || 0, 1), 10000);
@@ -1138,6 +1224,18 @@ export const getUserLeadAnalytics = async (req, res) => {
     if (mandal) {
       conditions.push('mandal = ?');
       params.push(mandal);
+    }
+    if (district) {
+      conditions.push('district = ?');
+      params.push(district);
+    }
+    if (state) {
+      conditions.push('state = ?');
+      params.push(state);
+    }
+    if (village) {
+      conditions.push('village = ?');
+      params.push(village);
     }
     const whereClause = conditions.join(' AND ');
 

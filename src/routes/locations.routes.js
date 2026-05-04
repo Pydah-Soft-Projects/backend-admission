@@ -9,6 +9,7 @@ import {
   listMandals,
   listSchools,
   listColleges,
+  listVillages,
 } from '../controllers/locations.controller.js';
 
 const router = express.Router();
@@ -18,5 +19,6 @@ router.get('/districts', listDistricts);
 router.get('/mandals', listMandals);
 router.get('/schools', listSchools);
 router.get('/colleges', listColleges);
+router.get('/villages', listVillages);
 
 export default router;

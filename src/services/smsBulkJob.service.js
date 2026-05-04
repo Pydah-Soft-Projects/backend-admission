@@ -171,7 +171,7 @@ export async function resumeRunningSmsBulkJobsOnStartup() {
  * @param {string} jobId
  * @param {object} row
  */
-async function processOneJobItem(pool, userId, jobId, row) {
+async function processOneJobItem(pool, userId, jobId, row, category = 'sms') {
   const itemId = row.id;
   const leadId = row.lead_id;
   const templateId = row.template_id;
@@ -196,13 +196,83 @@ async function processOneJobItem(pool, userId, jobId, row) {
     return;
   }
   try {
-    const out = await withTimeout(
-      executeSmsSendForLead(pool, userId, leadId, nums, [
-        { templateId, variables: Array.isArray(variables) ? variables : [] },
-      ]),
-      SMS_ITEM_MAX_MS,
-      'executeSmsSendForLead'
-    );
+    let out;
+    if (category === 'whatsapp') {
+      const { default: whatsappService } = await import('./whatsapp.service.js');
+      const varObj = {};
+      if (Array.isArray(variables)) {
+        variables.forEach((v) => {
+          if (v.key) varObj[v.key] = v.value || v.defaultValue || '';
+        });
+      }
+
+      // Need header config from template
+      const t = await findTemplate(templateId);
+      const headerConfig = {
+        type: t.headerType,
+        text: t.headerText,
+        handle: t.headerHandle,
+      };
+
+      const headerVarCount = (t.headerText?.match(/\{#var#\}/g) || []).length;
+      const bodyVarCount = (t.content.match(/\{#var#\}/g) || []).length;
+
+      const res = await whatsappService.sendTemplateMessage(
+        nums[0],
+        row.template_name || templateId,
+        t.language || 'en_US',
+        whatsappService.formatVariables(Object.values(varObj), headerConfig, { headerVarCount, bodyVarCount })
+      );
+
+      const savedCommIds = [];
+      if (res.success && res.data?.messages?.[0]?.id) {
+        try {
+          const commId = uuidv4();
+          await pool.execute(
+            `INSERT INTO communications (
+              id, lead_id, contact_number, type, direction, status, sent_by, sent_at,
+              template_id, template_name, template_rendered_content,
+              provider_message_ids, metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, 'whatsapp', 'outgoing', 'success', ?, NOW(), ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+              commId,
+              leadId,
+              nums[0],
+              userId,
+              templateId,
+              row.template_name || templateId,
+              `WhatsApp Template: ${row.template_name || templateId}`,
+              JSON.stringify([res.messageId]),
+              JSON.stringify({
+                providerResponse: res.data,
+                variables: varObj
+              }),
+            ]
+          );
+          savedCommIds.push(commId);
+        } catch (logErr) {
+          console.error('[WhatsApp Bulk Log Error]', logErr);
+        }
+      }
+
+      out = {
+        results: [{
+          success: res.success,
+          responseText: JSON.stringify(res.data || res.error),
+          messageId: res.data?.messages?.[0]?.id,
+          error: res.error?.message
+        }],
+        savedCommunicationIds: savedCommIds
+      };
+    } else {
+      out = await withTimeout(
+        executeSmsSendForLead(pool, userId, leadId, nums, [
+          { templateId, variables: Array.isArray(variables) ? variables : [] },
+        ]),
+        SMS_ITEM_MAX_MS,
+        'executeSmsSendForLead'
+      );
+    }
     const anyOk = out.results.some((r) => r.success);
     const last = out.results[out.results.length - 1];
     const errMsg = anyOk ? null : (last?.error || 'Provider reported failure');
@@ -464,7 +534,8 @@ export async function processSmsBulkJob(jobId) {
       return;
     }
     const userId = job.created_by;
-    await runWithConcurrencyItems(itemRows, SMS_JOB_CONCURRENCY, (row) => processOneJobItem(pool, userId, jobId, row));
+    const category = String(job.category || 'sms');
+    await runWithConcurrencyItems(itemRows, SMS_JOB_CONCURRENCY, (row) => processOneJobItem(pool, userId, jobId, row, category));
     const [p] = await pool.execute(
       `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
       [jobId]
@@ -531,12 +602,13 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
 
     await conn.execute(
       `INSERT INTO sms_bulk_jobs (
-        id, created_by, source, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
-      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
+        id, created_by, source, category, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
       [
         jobId,
         userId,
         source,
+        template.category || 'sms',
         reportContext == null ? null : JSON.stringify(reportContext),
         template.id,
         template.name,

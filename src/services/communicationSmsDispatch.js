@@ -39,6 +39,10 @@ const formatTemplateRow = (template) => ({
   isUnicode: template.is_unicode === 1 || template.is_unicode === true,
   variableCount: template.variable_count || 0,
   variables: typeof template.variables === 'string' ? JSON.parse(template.variables) : template.variables || [],
+  category: template.category || 'sms',
+  headerType: template.header_type || 'TEXT',
+  headerText: template.header_text || '',
+  headerHandle: template.header_handle || '',
   isActive: template.is_active === 1 || template.is_active === true,
 });
 

@@ -57,6 +57,10 @@ const formatTemplate = (templateData) => {
     variables: typeof templateData.variables === 'string' 
       ? JSON.parse(templateData.variables) 
       : templateData.variables || [],
+    category: templateData.category || 'sms',
+    headerType: templateData.header_type || 'TEXT',
+    headerText: templateData.header_text || '',
+    headerHandle: templateData.header_handle || '',
     isActive: templateData.is_active === 1 || templateData.is_active === true,
     createdBy: templateData.created_by,
     updatedBy: templateData.updated_by,
@@ -196,11 +200,20 @@ export const deleteTemplateGroup = async (req, res) => {
 
 export const getTemplates = async (req, res) => {
   try {
-    const { language, isActive, search, templateGroupId } = req.query;
+    const { language, isActive, search, templateGroupId, category } = req.query;
     const pool = getPool();
 
     const conditions = [];
     const params = [];
+
+    if (category) {
+      if (category.toLowerCase() === 'sms') {
+        conditions.push('(t.category = ? OR t.category IS NULL OR t.category = \'\')');
+      } else {
+        conditions.push('t.category = ?');
+      }
+      params.push(category.toLowerCase());
+    }
 
     if (language) {
       conditions.push('t.language = ?');
@@ -242,11 +255,20 @@ export const getTemplates = async (req, res) => {
 
 export const getActiveTemplates = async (req, res) => {
   try {
-    const { language } = req.query;
+    const { language, category } = req.query;
     const pool = getPool();
 
     const conditions = ['t.is_active = ?'];
     const params = [true];
+
+    if (category) {
+      if (category.toLowerCase() === 'sms') {
+        conditions.push('(t.category = ? OR t.category IS NULL OR t.category = \'\')');
+      } else {
+        conditions.push('t.category = ?');
+      }
+      params.push(category.toLowerCase());
+    }
 
     if (language) {
       conditions.push('t.language = ?');
@@ -284,6 +306,7 @@ export const createTemplate = async (req, res) => {
       isUnicode,
       variables,
       templateGroupId,
+      category = 'sms'
     } = req.body;
 
     if (!name?.trim() || !dltTemplateId?.trim() || !content?.trim()) {
@@ -305,14 +328,15 @@ export const createTemplate = async (req, res) => {
 
     await pool.execute(
       `INSERT INTO message_templates (
-        id, name, template_group_id, dlt_template_id, language, content, description, is_unicode,
+        id, name, template_group_id, category, dlt_template_id, language, content, description, is_unicode,
         variable_count, variables, is_active, created_by, updated_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         templateId,
         name.trim(),
         groupIdResolved,
-        dltTemplateId.trim(),
+        (category || 'sms').toLowerCase(),
+        (dltTemplateId || '').trim(),
         language.trim().toLowerCase(),
         content.trim(),
         description?.trim() || null,
@@ -356,6 +380,7 @@ export const updateTemplate = async (req, res) => {
       variables,
       isActive,
       templateGroupId,
+      category
     } = req.body;
 
     const pool = getPool();
@@ -403,6 +428,11 @@ export const updateTemplate = async (req, res) => {
     if (isActive !== undefined) {
       updateFields.push('is_active = ?');
       updateValues.push(Boolean(isActive));
+    }
+
+    if (category !== undefined) {
+      updateFields.push('category = ?');
+      updateValues.push(category?.trim()?.toLowerCase() || currentTemplate.category);
     }
 
     if (templateGroupId !== undefined) {

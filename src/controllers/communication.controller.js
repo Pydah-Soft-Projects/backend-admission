@@ -10,6 +10,7 @@ import {
 } from '../services/communicationSmsDispatch.js';
 import { v4 as uuidv4 } from 'uuid';
 import { logCallPerformance, updatePerformanceMetric } from '../services/userPerformance.service.js';
+import whatsappService from '../services/whatsapp.service.js';
 
 export const logCallCommunication = async (req, res) => {
   try {
@@ -431,7 +432,7 @@ export const getLeadCommunicationStats = async (req, res) => {
 export const sendTestTemplateSms = async (req, res) => {
   try {
     const { id: templateId } = req.params;
-    const { phone, variables: bodyVariables } = req.body || {};
+    const { phone, variables: bodyVariables, headerHandle } = req.body || {};
 
     if (req.user.roleName === 'PRO') {
       return errorResponse(res, 'SMS is not available for PRO users', 403);
@@ -454,6 +455,48 @@ export const sendTestTemplateSms = async (req, res) => {
       template = await findTemplate(templateId, { activeOnly: false });
     } catch (e) {
       return errorResponse(res, e.message || 'Template not found', 404);
+    }
+
+    if (template.category === 'whatsapp') {
+      const whatsappVariables = userVariables.map((v) => v.value || '');
+      const headerConfig = {
+        type: template.headerType,
+        text: template.headerText,
+        handle: headerHandle || template.headerHandle,
+      };
+      // Calculate variable distribution across components
+      const headerVarCount = (template.headerText?.match(/\{#var#\}/g) || []).length;
+      const bodyVarCount = (template.content.match(/\{#var#\}/g) || []).length;
+
+      const components = whatsappService.formatVariables(
+        whatsappVariables, 
+        headerConfig, 
+        { headerVarCount, bodyVarCount }
+      );
+      // Use the synced language code directly (Meta uses codes like 'en', 'en_US', 'te', etc.)
+      const lang = template.language || 'en_US';
+
+      try {
+        const apiResponse = await whatsappService.sendTemplateMessage(
+        phone,
+        template.name || templateId,
+        template.language || 'en_US',
+        components
+      );
+
+        return successResponse(
+          res,
+          {
+            success: apiResponse.success,
+            messageId: apiResponse.messageId,
+            responseText: apiResponse.success ? 'WhatsApp message sent' : 'WhatsApp delivery error',
+            renderedPreview: template.content,
+          },
+          'WhatsApp test message submitted'
+        );
+      } catch (waError) {
+        return errorResponse(res, waError.message || 'WhatsApp API Error', 502);
+      }
     }
 
     const { rendered } = renderTemplateContent(template, userVariables);

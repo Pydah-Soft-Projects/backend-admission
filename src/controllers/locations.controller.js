@@ -128,3 +128,36 @@ export const listColleges = async (req, res) => {
     return errorResponse(res, err.message || 'Failed to list colleges', 500);
   }
 };
+
+export const listVillages = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { stateName, districtName, mandalName } = req.query;
+
+    if (!stateName || !districtName || !mandalName) {
+      return errorResponse(res, 'stateName, districtName, and mandalName are required', 400);
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT DISTINCT TRIM(village) AS name 
+       FROM leads 
+       WHERE LOWER(state) = LOWER(?) 
+         AND LOWER(district) = LOWER(?) 
+         AND LOWER(mandal) = LOWER(?) 
+         AND village IS NOT NULL 
+         AND village != '' 
+       ORDER BY name ASC`,
+      [
+        String(stateName).trim(),
+        String(districtName).trim(),
+        String(mandalName).trim()
+      ]
+    );
+
+    const data = rows.map((r, i) => ({ id: r.name, name: r.name }));
+    return successResponse(res, data);
+  } catch (err) {
+    console.error('locations listVillages error:', err);
+    return errorResponse(res, err.message || 'Failed to list villages', 500);
+  }
+};

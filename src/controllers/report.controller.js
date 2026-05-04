@@ -614,7 +614,7 @@ export const getLeadsAbstract = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const { academicYear, studentGroup, stateId, districtId } = req.query;
+    const { academicYear, studentGroup, stateId, districtId, mandalId } = req.query;
     const pool = getPool();
 
     if (!academicYear || academicYear === '') {
@@ -688,7 +688,7 @@ export const getLeadsAbstract = async (req, res) => {
     let mandalBreakdown = [];
     let maxMandal = null;
 
-    // 3) Mandal stats ONLY when district is selected - avoids 600+ mandals × leads scan
+    // 3) Mandal stats ONLY when district is selected
     if (districtId && districtId !== '') {
       const [districtNameRow] = await pool.execute(
         'SELECT name FROM districts WHERE id = ? AND is_active = 1',
@@ -747,6 +747,47 @@ export const getLeadsAbstract = async (req, res) => {
       }
     }
 
+    let villageBreakdown = [];
+    let maxVillage = null;
+
+    // 4) Village stats ONLY when mandal is selected
+    if (mandalId && mandalId !== '') {
+      const [mandalDetails] = await pool.execute(
+        `SELECT m.name as mandalName, d.name as districtName 
+         FROM mandals m
+         INNER JOIN districts d ON m.district_id = d.id
+         WHERE m.id = ? AND m.is_active = 1`,
+        [mandalId]
+      ).catch(() => [[]]);
+
+      if (mandalDetails && mandalDetails[0]) {
+        const { mandalName, districtName } = mandalDetails[0];
+        const villageLeadParams = [...leadParams, districtName, mandalName];
+        const villageLeadWhere = `${leadWhere} AND district = ? AND mandal = ? AND village IS NOT NULL AND village != ''`;
+        
+        const [leadVillageAgg] = await pool.execute(
+          `SELECT TRIM(village) AS village,
+                  COUNT(*) AS cnt,
+                  SUM(CASE WHEN assigned_to IS NULL THEN 1 ELSE 0 END) AS unassigned_cnt
+           FROM leads
+           WHERE ${villageLeadWhere}
+           GROUP BY TRIM(village)
+           ORDER BY cnt DESC`,
+          villageLeadParams
+        ).catch(() => [[]]);
+
+        villageBreakdown = (leadVillageAgg || []).map((r) => {
+          const count = Number(r.cnt || 0);
+          let unassigned = Number(r.unassigned_cnt ?? 0);
+          if (unassigned > count) unassigned = count;
+          const assigned = count - unassigned;
+          return { name: r.village, count, assignedCount: assigned, unassignedCount: unassigned };
+        });
+
+        maxVillage = villageBreakdown.length > 0 ? villageBreakdown[0].name : null;
+      }
+    }
+
     return successResponse(
       res,
       {
@@ -756,6 +797,8 @@ export const getLeadsAbstract = async (req, res) => {
         maxDistrict,
         mandalBreakdown,
         maxMandal,
+        villageBreakdown,
+        maxVillage,
       },
       'Leads abstract retrieved successfully',
       200
