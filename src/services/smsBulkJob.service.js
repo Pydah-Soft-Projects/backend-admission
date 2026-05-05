@@ -219,7 +219,7 @@ async function processOneJobItem(pool, userId, jobId, row, category = 'sms') {
 
       const res = await whatsappService.sendTemplateMessage(
         nums[0],
-        row.template_name || templateId,
+        t.dltTemplateId || templateId,
         t.language || 'en_US',
         whatsappService.formatVariables(Object.values(varObj), headerConfig, { headerVarCount, bodyVarCount })
       );

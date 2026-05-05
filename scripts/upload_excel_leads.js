@@ -56,6 +56,7 @@ async function uploadExcel() {
         mandal VARCHAR(255),
         village VARCHAR(255),
         street VARCHAR(255),
+        student_group VARCHAR(50) DEFAULT 'Inter-MPC',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -135,7 +136,8 @@ async function uploadExcel() {
         getVal(['stddistrictname', 'district', 'dist', 'districtname', 'district_name', 'student_district']),
         getVal(['stdmandalname', 'mandal', 'tehsil', 'block', 'mandalname', 'mandal_name']),
         getVal(['villagename', 'village', 'city', 'town', 'vill', 'village_name', 'habitation']),
-        getVal(['street', 'address', 'fulladdress', 'full_address', 'streetname', 'street_name', 'location'])
+        getVal(['street', 'address', 'fulladdress', 'full_address', 'streetname', 'street_name', 'location']),
+        'Inter-MPC' // Default for new uploads, can be customized
       ];
     });
 
@@ -168,7 +170,7 @@ async function uploadExcel() {
 
     console.log(`Uploading ${validRows.length} unique rows...`);
     const BATCH_SIZE = 5000;
-    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, phone, district, mandal, village, street) VALUES ?';
+    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, phone, district, mandal, village, street, student_group) VALUES ?';
     
     let totalInserted = 0;
     for (let i = 0; i < validRows.length; i += BATCH_SIZE) {

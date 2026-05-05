@@ -152,9 +152,6 @@ class WhatsAppService {
         const isUrl = String(handle).startsWith('http');
         const mediaData = {};
         if (isUrl) {
-          // Meta scontent URLs in examples are often temporary/protected.
-          // For testing, if it's a known Meta temporary URL, we can use a placeholder
-          // to verify the integration works.
           if (handle.includes('whatsapp.net') || handle.includes('fbcdn.net')) {
             console.log('[WhatsApp Service] Replacing temporary Meta URL with placeholder for test');
             mediaData.link = type === 'IMAGE' ? 'https://picsum.photos/800/600' : handle;
@@ -165,6 +162,12 @@ class WhatsAppService {
           const numericId = parseInt(handle, 10);
           mediaData.id = !isNaN(numericId) && String(numericId) === String(handle) ? numericId : handle;
         }
+
+        // Add filename for documents if provided
+        if (type === 'DOCUMENT' && text) {
+          mediaData.filename = text;
+        }
+
         parameters.push({ type: type.toLowerCase(), [type.toLowerCase()]: mediaData });
       }
 

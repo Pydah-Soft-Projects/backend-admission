@@ -23,13 +23,27 @@ export const sendWhatsAppCommunication = async (req, res) => {
     const { lead, validatedNumbers } = await ensureLeadAndNumbers(leadId, [contactNumber]);
     const recipientNumber = validatedNumbers[0];
 
-    // Format variables for WhatsApp API
-    const components = whatsappService.formatVariables(variables);
+    // 0. Fetch template metadata for headers
+    const [templates] = await pool.execute(
+      'SELECT header_type, header_handle, header_text, variable_count FROM message_templates WHERE (name = ? OR dlt_template_id = ?) AND category = "whatsapp" LIMIT 1',
+      [templateName, templateName]
+    );
+    
+    const template = templates[0];
+    const headerConfig = template ? {
+      type: template.header_type,
+      handle: template.header_handle,
+      text: template.header_text
+    } : null;
 
-    // 1. Send via Service
+    // Format variables for WhatsApp API
+    const components = whatsappService.formatVariables(variables, headerConfig);
+
+    // 1. Send via Service using the technical name (dlt_template_id)
+    const technicalName = template?.dlt_template_id || templateName;
     const result = await whatsappService.sendTemplateMessage(
       recipientNumber,
-      templateName,
+      technicalName,
       languageCode || 'en_US',
       components
     );
@@ -125,48 +139,69 @@ export const syncWhatsAppTemplates = async (req, res) => {
         headerHandle = headerComponent.example.document[0];
       }
 
-      // 3. Upsert into message_templates
+      // 3. Media Filename Fallback
+      if (headerType === 'DOCUMENT' && !headerText) {
+        // Use template name as default filename, replacing underscores with spaces or camelCase
+        headerText = remote.name.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join('_');
+      }
+
+      // 4. Upsert into message_templates (Match by dlt_template_id for Smart Sync)
       const [existing] = await pool.execute(
-        'SELECT id FROM message_templates WHERE name = ? AND category = "whatsapp"',
+        'SELECT id, name, description, header_handle, media_gallery FROM message_templates WHERE dlt_template_id = ? AND category = "whatsapp"',
         [remote.name]
       );
 
       if (existing.length > 0) {
+        const t = existing[0];
+        
+        // Handle Media Gallery logic
+        let gallery = [];
+        try {
+          gallery = typeof t.media_gallery === 'string' ? JSON.parse(t.media_gallery) : (t.media_gallery || []);
+        } catch (e) { gallery = []; }
+        
+        // Add new handle to gallery if it's new and valid
+        if (headerHandle && !gallery.includes(headerHandle)) {
+          gallery.push(headerHandle);
+        }
+
         await pool.execute(
           `UPDATE message_templates SET 
             category = 'whatsapp',
-            dlt_template_id = ?,
             content = ?, 
             variable_count = ?, 
             language = ?, 
             header_type = ?,
-            header_text = ?,
-            header_handle = ?,
+            header_text = COALESCE(header_text, ?),
+            header_handle = COALESCE(header_handle, ?),
+            media_gallery = ?,
             updated_at = NOW(),
             updated_by = ?
           WHERE id = ?`,
           [
-            remote.name,
             normalizedContent,
             variableCount,
             remote.language,
             headerType,
             headerText,
             headerHandle,
+            JSON.stringify(gallery),
             userId,
-            existing[0].id,
+            t.id,
           ]
         );
       } else {
+        // New template: Store the first handle in both active and gallery
+        const initialGallery = headerHandle ? [headerHandle] : [];
         await pool.execute(
           `INSERT INTO message_templates (
             id, name, category, dlt_template_id, language, content, variable_count, 
-            header_type, header_text, header_handle,
+            header_type, header_text, header_handle, media_gallery,
             is_active, created_by, updated_by, created_at, updated_at
-          ) VALUES (?, ?, 'whatsapp', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NOW(), NOW())`,
+          ) VALUES (?, ?, 'whatsapp', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NOW(), NOW())`,
           [
             uuidv4(),
-            remote.name,
+            remote.name, // Use technical name as initial friendly name
             remote.name,
             remote.language,
             normalizedContent,
@@ -174,6 +209,7 @@ export const syncWhatsAppTemplates = async (req, res) => {
             headerType,
             headerText,
             headerHandle,
+            JSON.stringify(initialGallery),
             userId,
             userId,
           ]

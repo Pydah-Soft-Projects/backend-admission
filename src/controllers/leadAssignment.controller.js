@@ -1180,7 +1180,7 @@ export const removeAssignments = async (req, res) => {
 export const getUserLeadAnalytics = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { academicYear, studentGroup, mandal } = req.query;
+    const { academicYear, studentGroup, mandal, district, state, village } = req.query;
     const requestingUserId = req.user.id || req.user._id;
     const pool = getPool();
 

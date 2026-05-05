@@ -479,7 +479,7 @@ export const sendTestTemplateSms = async (req, res) => {
       try {
         const apiResponse = await whatsappService.sendTemplateMessage(
         phone,
-        template.name || templateId,
+        template.dltTemplateId || templateId,
         template.language || 'en_US',
         components
       );

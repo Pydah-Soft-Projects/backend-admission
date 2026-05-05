@@ -61,6 +61,9 @@ const formatTemplate = (templateData) => {
     headerType: templateData.header_type || 'TEXT',
     headerText: templateData.header_text || '',
     headerHandle: templateData.header_handle || '',
+    mediaGallery: typeof templateData.media_gallery === 'string' 
+      ? JSON.parse(templateData.media_gallery) 
+      : templateData.media_gallery || [],
     isActive: templateData.is_active === 1 || templateData.is_active === true,
     createdBy: templateData.created_by,
     updatedBy: templateData.updated_by,
@@ -448,6 +451,19 @@ export const updateTemplate = async (req, res) => {
           return errorResponse(res, e.message || 'Invalid template group', 400);
         }
       }
+    }
+
+    if (req.body.headerHandle !== undefined) {
+      updateFields.push('header_handle = ?');
+      updateValues.push(req.body.headerHandle);
+    }
+    if (req.body.headerText !== undefined) {
+      updateFields.push('header_text = ?');
+      updateValues.push(req.body.headerText);
+    }
+    if (req.body.mediaGallery !== undefined) {
+      updateFields.push('media_gallery = ?');
+      updateValues.push(JSON.stringify(req.body.mediaGallery));
     }
 
     if (content !== undefined) {
