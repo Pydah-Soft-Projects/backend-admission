@@ -62,7 +62,7 @@ const admissionSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'withdrawn'],
+      enum: ['active', 'withdrawn', 'Admission Cancelled'],
       default: 'active',
       index: true,
     },

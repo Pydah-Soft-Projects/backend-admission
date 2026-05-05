@@ -22,6 +22,21 @@ const ensureAdmissionId = (admissionId) => {
   }
 };
 
+const ADMISSION_CANCELLED_STATUS = 'Admission Cancelled';
+
+const parseAdmissionLeadData = (value) => {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' ? value : {};
+};
+
 // Helper function to format lead data from SQL
 const formatLead = (leadData) => {
   if (!leadData) return null;
@@ -605,6 +620,89 @@ export const getAdmissionByLead = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to fetch admission record',
+      error.statusCode || 500
+    );
+  }
+};
+
+export const cancelAdmissionById = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    const reason = String(req.body?.reason || '').trim();
+    const approvedBy = String(req.body?.approvedBy || '').trim();
+
+    if (!reason) {
+      return errorResponse(res, 'Reason for cancellation is required', 400);
+    }
+
+    if (!approvedBy) {
+      return errorResponse(res, 'Approved by is required', 400);
+    }
+
+    const pool = getPool();
+    const [admissions] = await pool.execute(
+      'SELECT * FROM admissions WHERE id = ?',
+      [admissionId]
+    );
+
+    if (admissions.length === 0) {
+      return errorResponse(res, 'Admission record not found', 404);
+    }
+
+    const admissionData = admissions[0];
+    const existingLeadData = parseAdmissionLeadData(admissionData.lead_data);
+    const cancellation = {
+      reason,
+      approvedBy,
+      cancelledAt: new Date().toISOString(),
+      cancelledBy: req.user.id,
+    };
+    const nextLeadData = {
+      ...existingLeadData,
+      _admissionCancellation: cancellation,
+    };
+
+    await pool.execute(
+      `UPDATE admissions
+       SET status = ?, lead_data = ?, updated_by = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [ADMISSION_CANCELLED_STATUS, JSON.stringify(nextLeadData), req.user.id, admissionId]
+    );
+
+    if (admissionData.lead_id) {
+      await pool.execute(
+        `UPDATE leads
+         SET application_status = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [ADMISSION_CANCELLED_STATUS, admissionData.lead_id]
+      );
+    }
+
+    const [updated] = await pool.execute(
+      'SELECT * FROM admissions WHERE id = ?',
+      [admissionId]
+    );
+    const formattedAdmission = await formatAdmission(updated[0], pool);
+
+    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+      leadId: formattedAdmission.leadId,
+      joiningId: formattedAdmission.joiningId,
+      email: formattedAdmission.leadData?.email || ''
+    });
+
+    return successResponse(
+      res,
+      formattedAdmission,
+      'Admission cancelled successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error cancelling admission:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to cancel admission',
       error.statusCode || 500
     );
   }

@@ -440,7 +440,7 @@ CREATE TABLE IF NOT EXISTS admissions (
     lead_data JSON DEFAULT (JSON_OBJECT()),
     joining_id CHAR(36) NOT NULL UNIQUE,
     admission_number VARCHAR(100) NOT NULL UNIQUE,
-    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn')),
+    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn', 'Admission Cancelled')),
     admission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
     course_id CHAR(36) NULL,
     branch_id CHAR(36) NULL,
