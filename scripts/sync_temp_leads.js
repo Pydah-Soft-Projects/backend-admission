@@ -1,5 +1,11 @@
-import 'dotenv/config';
-import mysql from 'mysql2/promise';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+import { getPool } from '../src/config-sql/database.js';
 import PQueue from 'p-queue';
 import readline from 'readline';
 
@@ -77,13 +83,7 @@ function toTitleCase(str) {
 }
 
 async function syncLeadsWithMasterData() {
-  const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    connectionLimit: CONCURRENCY + 5,
-  });
+  const pool = getPool();
 
   try {
     // ... existing initialization code ...
@@ -253,8 +253,6 @@ async function syncLeadsWithMasterData() {
 
   } catch (error) {
     console.error('\nError:', error.message);
-  } finally {
-    await pool.end();
   }
 }
 

@@ -1,9 +1,14 @@
-import 'dotenv/config';
-import mysql from 'mysql2/promise';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+import { getPool } from '../src/config-sql/database.js';
 import xlsx from 'xlsx';
 import readline from 'readline';
 import fs from 'fs';
-import path from 'path';
 import { execSync } from 'child_process';
 
 /**
@@ -33,12 +38,7 @@ function openFilePicker() {
 }
 
 async function uploadExcel() {
-  const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-  });
+  const pool = getPool();
 
   try {
     console.log('\n=========================================');
@@ -188,7 +188,6 @@ async function uploadExcel() {
   } catch (error) {
     console.error('\nAn error occurred:', error.message);
   } finally {
-    await pool.end();
     rl.close();
   }
 }
