@@ -317,8 +317,8 @@ export const getLeads = async (req, res) => {
       params.push(req.query.applicationStatus);
     }
     if (req.query.assignedTo) {
-      conditions.push('l.assigned_to = ?');
-      params.push(req.query.assignedTo);
+      conditions.push('(l.assigned_to = ? OR l.assigned_to_pro = ?)');
+      params.push(req.query.assignedTo, req.query.assignedTo);
     }
     if (req.query.courseInterested) {
       conditions.push('l.course_interested = ?');

@@ -2292,7 +2292,8 @@ async function fetchUserIdsWithPortfolioStudentGroup(pool, userIds, studentGroup
 /** User ids that have at least one current portfolio lead matching optional student group + district. */
 async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, districtRaw) {
   const d = districtRaw != null ? String(districtRaw).trim() : '';
-  if (!d) return new Set(userIds);
+  const sg = studentGroupRaw != null ? String(studentGroupRaw).trim() : '';
+  if (!d && !sg) return new Set(userIds);
   if (!userIds.length) return new Set();
   const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
   const ph = userIds.map(() => '?').join(',');
@@ -2905,7 +2906,7 @@ export const getUserAnalytics = async (req, res) => {
           : null;
 
       let rosterUsers = users;
-      if (rosterDistrictTrim) {
+      if (rosterDistrictTrim || studentGroupRoster) {
         const allowIds = await fetchUserIdsWithRosterScopeMatch(
           pool,
           users.map((u) => u.id).filter((id) => id != null),
@@ -2955,7 +2956,23 @@ export const getUserAnalytics = async (req, res) => {
       if (studentGroupRoster || rosterDistrictTrim) {
         userRows = userRows.filter((row) => (row.totalAssigned || 0) > 0);
       }
-      return successResponse(res, { users: userRows }, 'User roster retrieved successfully', 200);
+
+      let totalAssignedLeads = 0;
+      userRows.forEach((row) => {
+        totalAssignedLeads += Number(row.totalAssigned) || 0;
+      });
+
+      const summaryTotals = {
+        userCount: userRows.length,
+        totalAssignedLeads,
+      };
+
+      return successResponse(
+        res,
+        { users: userRows, summaryTotals },
+        'User roster retrieved successfully',
+        200
+      );
     }
 
     /** Optional UI filters (reports → User Performance). Distinct from HRMS org query params division/department/group. */
