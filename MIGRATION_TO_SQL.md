@@ -471,7 +471,7 @@ CREATE TABLE admissions (
     lead_data JSONB DEFAULT '{}'::jsonb,
     joining_id UUID NOT NULL REFERENCES joinings(id) ON DELETE RESTRICT UNIQUE,
     admission_number VARCHAR(100) NOT NULL UNIQUE,
-    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn')),
+    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'withdrawn', 'Admission Cancelled')),
     admission_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     
     -- Course Info

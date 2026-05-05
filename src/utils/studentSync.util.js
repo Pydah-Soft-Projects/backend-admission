@@ -77,7 +77,7 @@ const normalizeStudentPhotoForSecondary = (value) => {
   return raw;
 };
 
-const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
+export const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
   const explicitStatus = String(registrationExtras?.student_status ?? '').trim();
   if (explicitStatus) {
     const lower = explicitStatus.toLowerCase();
@@ -103,6 +103,7 @@ const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
 
   const admission = String(admissionStatus ?? '').trim().toLowerCase();
   if (admission === 'withdrawn') return 'Discontinued';
+  if (admission === 'admission cancelled') return 'Admission Cancelled';
 
   // Secondary DB: academic student status, not admission row status (active/withdrawn).
   return 'Regular';
