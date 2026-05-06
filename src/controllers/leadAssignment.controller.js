@@ -1310,8 +1310,8 @@ export const getUserLeadAnalytics = async (req, res) => {
         params
       ),
       pool.execute(
-        `SELECT COUNT(*) as total FROM leads WHERE ${assignmentCondition}`,
-        isProRole ? [userId, userId] : [userId]
+        `SELECT COUNT(*) as total FROM leads WHERE ${whereClause}`,
+        params
       ),
       pool.execute(
         `SELECT ${statusGroupExpr} AS lead_status, COUNT(*) as count 
