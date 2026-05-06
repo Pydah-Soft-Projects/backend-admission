@@ -1202,7 +1202,8 @@ export const getUserLeadAnalytics = async (req, res) => {
     const queriedUser = usersResult[0];
     const isProRole =
       queriedUser.role_name && String(queriedUser.role_name).trim().toUpperCase() === 'PRO';
-    const isStudentCounselor = queriedUser.role_name === 'Student Counselor';
+    const roleNorm = queriedUser.role_name ? String(queriedUser.role_name).trim().toUpperCase() : '';
+    const isStudentCounselor = roleNorm.includes('COUNSELOR') || roleNorm.includes('COUNSELLOR');
     const assignmentCondition = isProRole
       ? '(assigned_to_pro = ? OR assigned_to = ?)'
       : 'assigned_to = ?';
@@ -2636,12 +2637,17 @@ export const getUserAnalytics = async (req, res) => {
         ),
         pool.execute(
           `SELECT u.id AS user_id,
-            COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown') AS lead_status,
+            CASE 
+              WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
+              WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%') 
+                   AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
+              ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
+            END AS computed_status,
             COUNT(*) AS status_count
            FROM users u
            INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
            WHERE u.id IN (${ph}) ${aySql}
-           GROUP BY u.id, l.lead_status`,
+           GROUP BY u.id, computed_status`,
           paramsBase
         ),
         pool.execute(
@@ -3139,8 +3145,10 @@ export const getUserAnalytics = async (req, res) => {
 
     actionCounts.forEach(row => {
       const stats = statsByUserId.get(row.user_id);
-      if (stats && row.lead_status) {
-        stats.statusBreakdown[row.lead_status] = (stats.statusBreakdown[row.lead_status] || 0) + row.status_count;
+      const statusKey = row.lead_status || row.computed_status || row.bucket;
+      const countVal = Number(row.status_count ?? row.cnt ?? 0);
+      if (stats && statusKey) {
+        stats.statusBreakdown[statusKey] = (stats.statusBreakdown[statusKey] || 0) + countVal;
       }
     });
 
