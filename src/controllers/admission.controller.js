@@ -383,7 +383,7 @@ export const listAdmissions = async (req, res) => {
       page = 1,
       limit = 20,
       search = '',
-      status,
+      status, courseId, branchId, courseName, branchName,
     } = req.query;
 
     const pool = getPool();
@@ -398,6 +398,26 @@ export const listAdmissions = async (req, res) => {
     if (status) {
       conditions.push('a.status = ?');
       params.push(status);
+    }
+    if (courseId || courseName) {
+      if (courseId && courseName) {
+        conditions.push('(a.course_id = ? OR a.course = ?)');
+        params.push(courseId, courseName);
+      } else {
+        conditions.push('(a.course_id = ? OR a.course = ?)');
+        const val = courseId || courseName;
+        params.push(val, val);
+      }
+    }
+    if (branchId || branchName) {
+      if (branchId && branchName) {
+        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        params.push(branchId, branchName);
+      } else {
+        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        const val = branchId || branchName;
+        params.push(val, val);
+      }
     }
 
     // Search filtering
@@ -1222,4 +1242,77 @@ export const updateAdmissionByLead = async (req, res) => {
   }
 };
 
+export const getAdmissionStats = async (req, res) => {
+  try {
+    const { startDate, endDate, courseId, branchId, courseName, branchName } = req.query;
+    const pool = getPool();
+    const conditions = [];
+    const params = [];
+    if (startDate) {
+      conditions.push('created_at >= ?');
+      params.push(new Date(startDate));
+    }
+    if (endDate) {
+      conditions.push('created_at <= ?');
+      const end = new Date(endDate);
+      end.setDate(end.getDate() + 1);
+      params.push(end);
+    }
+    if (courseId || courseName) {
+      if (courseId && courseName) {
+        conditions.push('(course_id = ? OR course = ?)');
+        params.push(courseId, courseName);
+      } else {
+        conditions.push('(course_id = ? OR course = ?)');
+        const val = courseId || courseName;
+        params.push(val, val);
+      }
+    }
+    if (branchId || branchName) {
+      if (branchId && branchName) {
+        conditions.push('(branch_id = ? OR branch = ?)');
+        params.push(branchId, branchName);
+      } else {
+        conditions.push('(branch_id = ? OR branch = ?)');
+        const val = branchId || branchName;
+        params.push(val, val);
+      }
+    }
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    const query = `
+      SELECT 
+        course_id as courseId, 
+        MAX(course) as courseName,
+        COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
+        COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
+      FROM admissions
+      ${whereClause}
+      GROUP BY course_id, course
+      ORDER BY totalAdmissions DESC
+    `;
+    const [stats] = await pool.execute(query, params);
 
+    const queryBranches = `
+      SELECT 
+        course_id as courseId,
+        branch_id as branchId,
+        MAX(course) as courseName,
+        MAX(branch) as branchName,
+        COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
+        COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
+      FROM admissions
+      ${whereClause}
+      GROUP BY course_id, branch_id, branch
+      ORDER BY courseName, branchName
+    `;
+    const [branchStats] = await pool.execute(queryBranches, params);
+    const courseStats = stats.map(course => ({
+      ...course,
+      branches: branchStats.filter(b => b.courseId === course.courseId && b.courseName === course.courseName)
+    }));
+    return successResponse(res, { stats: courseStats }, 'Admission stats retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error fetching admission stats:', error);
+    return errorResponse(res, error.message || 'Failed to fetch admission stats', 500);
+  }
+};

@@ -222,7 +222,7 @@ export const createBranch = async (req, res) => {
 
 export const listBranches = async (req, res) => {
   try {
-    const { courseId } = req.params;
+    const courseId = req.params.courseId || req.query.courseId;
     const showInactive = req.query.showInactive === 'true';
     const pool = getPool();
 
