@@ -82,35 +82,33 @@ export const addActivity = async (req, res) => {
           leadModified = true;
         }
       } else if (isStudentCounselor && lead.assigned_to === userId) {
-        if (newStatus !== nextCallBase) {
-          const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
-          oldStatus = lead.lead_status;
-          newStatusValue = resolved;
-          activityType = 'status_change';
-          metadata.statusChannel = 'call_status';
-          updateFields.push('call_status = ?');
-          updateValues.push(newStatus);
-          if (resolved !== lead.lead_status) {
-            updateFields.push('lead_status = ?');
-            updateValues.push(resolved);
-          }
-          leadModified = true;
-        }
+        // ALWAYS resolve and update if a status is provided, to ensure lead_status is in sync
+        const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
+        oldStatus = lead.lead_status;
+        newStatusValue = resolved;
+        activityType = 'status_change';
+        metadata.statusChannel = 'call_status';
+        
+        updateFields.push('call_status = ?');
+        updateValues.push(newStatus);
+        
+        // Force lead_status update to match the resolved outcome
+        updateFields.push('lead_status = ?');
+        updateValues.push(resolved);
+        leadModified = true;
       } else if (isPro && lead.assigned_to_pro === userId) {
-        if (newStatus !== nextVisitBase) {
-          const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
-          oldStatus = lead.lead_status;
-          newStatusValue = resolved;
-          activityType = 'status_change';
-          metadata.statusChannel = 'visit_status';
-          updateFields.push('visit_status = ?');
-          updateValues.push(newStatus);
-          if (resolved !== lead.lead_status) {
-            updateFields.push('lead_status = ?');
-            updateValues.push(resolved);
-          }
-          leadModified = true;
-        }
+        const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
+        oldStatus = lead.lead_status;
+        newStatusValue = resolved;
+        activityType = 'status_change';
+        metadata.statusChannel = 'visit_status';
+        
+        updateFields.push('visit_status = ?');
+        updateValues.push(newStatus);
+        
+        updateFields.push('lead_status = ?');
+        updateValues.push(resolved);
+        leadModified = true;
       } else if (isAssigned && !isPro && !isStudentCounselor) {
         const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
         if (resolved !== lead.lead_status) {

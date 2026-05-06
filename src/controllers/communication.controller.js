@@ -60,11 +60,37 @@ export const logCallCommunication = async (req, res) => {
       );
       const st = stRows[0] || {};
       const nextLead = resolveLeadStatus(st.lead_status || 'New', oc, st.visit_status ?? null);
+      
       const visitSql = st.assigned_to_pro ? ', visit_status = ?' : '';
-      const visitParams = st.assigned_to_pro ? [oc, nextLead, 'Assigned', lead.id] : [oc, nextLead, lead.id];
+      const visitParams = st.assigned_to_pro 
+        ? [oc, nextLead, 'Assigned', lead.id] 
+        : [oc, nextLead, lead.id];
+      
       await pool.execute(
         `UPDATE leads SET last_follow_up = NOW(), updated_at = NOW(), call_status = ?, lead_status = ?${visitSql} WHERE id = ?`,
         visitParams
+      );
+
+      // Create an activity log so this is visible in the audit trail
+      const activityLogId = uuidv4();
+      await pool.execute(
+        `INSERT INTO activity_logs (
+          id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          lead.id,
+          'follow_up',
+          st.lead_status || 'Assigned',
+          nextLead,
+          remarks?.trim() || `Call logged with outcome: ${oc}`,
+          userId,
+          JSON.stringify({ 
+            source: 'logCallCommunication',
+            callOutcome: oc,
+            callDuration: durationSeconds
+          }),
+        ]
       );
     } else {
       await pool.execute(

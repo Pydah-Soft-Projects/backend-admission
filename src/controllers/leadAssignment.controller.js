@@ -3706,6 +3706,8 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
             _studentGroupLeadSets: {},
             _targetDateLeadSets: {},
             _reclaimedLeadIds: new Set(),
+            _manualUnassignedLeadIds: new Set(),
+            _movedToOtherUserLeadIds: new Set(),
             _unassignedLeadIds: new Set(),
             _sameUserLeadIds: new Set(),
             _otherUserLeadIds: new Set(),
@@ -3731,14 +3733,29 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         const currentCallStatus = canonicalCounselorCallStatusForReports(row.call_status);
         const isFailedStatus = ['Assigned', 'Not Interested', 'Wrong Data', 'Wrong Number', 'Invalid Number'].includes(currentCallStatus);
 
-        // A lead is "Unattended" if:
-        // 1. It was reclaimed (taken back).
-        // 2. OR the target date has passed and it's in a failed status.
-        const isActuallyReclaimed = isNoLongerWithUser; 
-        const isPastDueFailed = isTargetDatePassed && isFailedStatus;
+        // Logic for differentiating "Unattended" vs "Moved" vs "Manual Unassign"
+        // 1. Reclaimed (Automated/Failed):
+        //    - Currently unassigned AND was in a failed status
+        //    - OR currently assigned AND target date passed AND still in failed status
+        const isReclaimedAutomated = (row.assigned_to === null && row.assigned_to_pro === null && isFailedStatus) || 
+                                     (isTargetDatePassed && isFailedStatus && !isNoLongerWithUser);
+        
+        // 2. Manual Unassigned:
+        //    - Currently unassigned AND was NOT in a failed status (user worked on it, but admin took it back to pool)
+        const isManualUnassigned = (row.assigned_to === null && row.assigned_to_pro === null && !isFailedStatus);
 
-        if (isActuallyReclaimed || isPastDueFailed) {
+        // 3. Moved to Other User:
+        //    - Currently assigned to someone else
+        const isMovedToOther = (row.assigned_to !== null || row.assigned_to_pro !== null) && isNoLongerWithUser;
+
+        if (isReclaimedAutomated) {
           bucket._reclaimedLeadIds.add(lid);
+        }
+        if (isManualUnassigned) {
+          bucket._manualUnassignedLeadIds.add(lid);
+        }
+        if (isMovedToOther) {
+          bucket._movedToOtherUserLeadIds.add(lid);
         }
 
         // Always count in status columns for visibility (User requested Assigned not to be 0)
@@ -3843,7 +3860,9 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
           bucket.mandalCounts = setRecordToCounts(bucket._mandalLeadSets);
           bucket.studentGroupCounts = setRecordToCounts(bucket._studentGroupLeadSets);
           bucket.targetDateCounts = setRecordToCounts(bucket._targetDateLeadSets);
-          bucket.reclaimedCount = (!isTargetDatePassed) ? 0 : (bucket._reclaimedLeadIds ? bucket._reclaimedLeadIds.size : 0);
+          bucket.reclaimedCount = (bucket._reclaimedLeadIds ? bucket._reclaimedLeadIds.size : 0);
+          bucket.manualUnassignedCount = (bucket._manualUnassignedLeadIds ? bucket._manualUnassignedLeadIds.size : 0);
+          bucket.movedToOtherUserCount = (bucket._movedToOtherUserLeadIds ? bucket._movedToOtherUserLeadIds.size : 0);
           bucket.currentlyUnassigned = bucket._unassignedLeadIds ? bucket._unassignedLeadIds.size : 0;
           bucket.currentlyWithSameUser = bucket._sameUserLeadIds ? bucket._sameUserLeadIds.size : 0;
           bucket.movedToOtherUser = bucket._otherUserLeadIds ? bucket._otherUserLeadIds.size : 0;
@@ -3855,6 +3874,8 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
           delete bucket._studentGroupLeadSets;
           delete bucket._targetDateLeadSets;
           delete bucket._reclaimedLeadIds;
+          delete bucket._manualUnassignedLeadIds;
+          delete bucket._movedToOtherUserLeadIds;
           delete bucket._unassignedLeadIds;
           delete bucket._sameUserLeadIds;
           delete bucket._otherUserLeadIds;
