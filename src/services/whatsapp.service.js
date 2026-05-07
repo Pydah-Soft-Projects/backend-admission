@@ -14,7 +14,7 @@ class WhatsAppService {
     this.accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
     this.phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
     this.businessAccountId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
-    this.apiVersion = process.env.WHATSAPP_API_VERSION || 'v25.0';
+    this.apiVersion = process.env.WHATSAPP_API_VERSION || 'v19.0';
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/messages`;
     this.templatesUrl = `https://graph.facebook.com/${this.apiVersion}/${this.businessAccountId}/message_templates`;
     this.mediaUrl = `https://graph.facebook.com/${this.apiVersion}/${this.phoneNumberId}/media`;
