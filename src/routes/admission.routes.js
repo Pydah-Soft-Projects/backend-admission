@@ -9,6 +9,7 @@ import {
   updateAdmissionById,
   updateAdmissionByLead,
   getAdmissionStats,
+  exportAdmissions,
 } from '../controllers/admission.controller.js';
 
 const router = express.Router();
@@ -16,6 +17,7 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/stats', getAdmissionStats);
+router.get('/export', isSuperAdmin, exportAdmissions);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);
 router.get('/joining/:joiningId', getAdmissionByJoiningId);

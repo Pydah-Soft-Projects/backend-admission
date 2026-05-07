@@ -464,6 +464,7 @@ const formatJoining = async (joiningData, pool) => {
     },
     reservation: {
       general: joiningData.reservation_general || 'oc',
+      isEws: joiningData.reservation_is_ews === 1 || joiningData.reservation_is_ews === true,
       other: reservationOther,
     },
     address: {
@@ -784,9 +785,9 @@ export async function ensureJoiningDraftForLead(leadId, userId) {
       id, lead_id, lead_data, status, course, quota,
       student_name, student_phone, student_gender, student_notes,
       father_name, father_phone, mother_name,
-      reservation_general, reservation_other,
+      reservation_general, reservation_other, reservation_is_ews,
       created_by, updated_by, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW())`,
     [
       joiningId,
       leadId,
@@ -1703,6 +1704,7 @@ export const saveJoiningDraft = async (req, res) => {
         document_joining_report = ?,
         document_bank_passbook = ?,
         document_ration_card = ?,
+        reservation_is_ews = ?,
         draft_updated_at = NOW(),
         submitted_at = NULL,
         submitted_by = NULL,
@@ -1760,6 +1762,7 @@ export const saveJoiningDraft = async (req, res) => {
         documents.joiningReport || 'pending',
         documents.bankPassbook || 'pending',
         documents.rationCard || 'pending',
+        reservation.isEws === true ? 1 : 0,
         req.user.id,
         joiningIdToUse,
       ]
@@ -2092,6 +2095,7 @@ export const approveJoining = async (req, res) => {
           document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?, document_caste_certificate = ?,
           document_cet_rank_card = ?, document_cet_hall_ticket = ?, document_allotment_letter = ?, document_joining_report = ?,
           document_bank_passbook = ?, document_ration_card = ?,
+          reservation_is_ews = ?,
           status = ?, updated_by = ?, updated_at = NOW()
         WHERE id = ?`,
         [
@@ -2144,6 +2148,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.documents?.joiningReport || 'pending',
           formattedJoining.documents?.bankPassbook || 'pending',
           formattedJoining.documents?.rationCard || 'pending',
+          formattedJoining.reservation?.isEws === true ? 1 : 0,
           'active',
           req.user.id,
           admissionId
@@ -2164,8 +2169,9 @@ export const approveJoining = async (req, res) => {
           document_aadhaar_card, document_photos, document_income_certificate, document_caste_certificate,
           document_cet_rank_card, document_cet_hall_ticket, document_allotment_letter, document_joining_report,
           document_bank_passbook, document_ration_card,
+          reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -2219,8 +2225,9 @@ export const approveJoining = async (req, res) => {
           formattedJoining.documents?.joiningReport || 'pending', // 50
           formattedJoining.documents?.bankPassbook || 'pending', // 51
           formattedJoining.documents?.rationCard || 'pending', // 52
-          req.user.id, // 53 (created_by)
-          req.user.id, // 54 (updated_by)
+          formattedJoining.reservation?.isEws === true ? 1 : 0, // 53 (reservation_is_ews)
+          req.user.id, // 54 (created_by)
+          req.user.id, // 55 (updated_by)
         ]
       );
 

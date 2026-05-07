@@ -5,6 +5,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
+import ExcelJS from 'exceljs';
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -156,6 +157,7 @@ export const formatAdmission = async (admissionData, pool) => {
     },
     reservation: {
       general: admissionData.reservation_general || 'oc',
+      isEws: admissionData.reservation_is_ews === 1 || admissionData.reservation_is_ews === true,
       other: reservationOther,
     },
     address: {
@@ -294,6 +296,31 @@ const formatAdmissionListItem = (row) => ({
     name: row.student_name || row.lead_name || '',
     phone: row.student_phone || row.lead_phone || '',
   },
+  reservation: {
+    general: row.reservation_general || 'oc',
+    other: row.reservation_other ? (typeof row.reservation_other === 'string' ? JSON.parse(row.reservation_other) : row.reservation_other) : [],
+  },
+  paymentSummary: {
+    totalPaid: Number(row.payment_total_paid) || 0,
+  },
+  documents: {
+    ssc: row.document_ssc,
+    inter: row.document_inter,
+    ugPgCmm: row.document_ug_pg_cmm,
+    transferCertificate: row.document_transfer_certificate,
+    studyCertificate: row.document_study_certificate,
+    aadhaarCard: row.document_aadhaar_card,
+    photos: row.document_photos,
+    incomeCertificate: row.document_income_certificate,
+    casteCertificate: row.document_caste_certificate,
+    cetRankCard: row.document_cet_rank_card,
+    cetHallTicket: row.document_cet_hall_ticket,
+    allotmentLetter: row.document_allotment_letter,
+    joiningReport: row.document_joining_report,
+    bankPassbook: row.document_bank_passbook,
+    rationCard: row.document_ration_card,
+  },
+  leadSource: row.lead_source || '',
   updatedAt: row.updated_at,
   createdAt: row.created_at,
 });
@@ -456,7 +483,13 @@ export const listAdmissions = async (req, res) => {
       `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
               a.course_id, a.branch_id, a.course, a.branch, a.quota,
               a.student_name, a.student_phone, a.created_at, a.updated_at,
-              l.name as lead_name, l.phone as lead_phone
+              a.reservation_general, a.reservation_other, a.payment_total_paid,
+              a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
+              a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
+              a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
+              a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
+              a.document_bank_passbook, a.document_ration_card,
+              l.name as lead_name, l.phone as lead_phone, l.source as lead_source
        FROM admissions a
        LEFT JOIN leads l ON a.lead_id = l.id
        ${whereClause}
@@ -851,6 +884,10 @@ export const updateAdmissionById = async (req, res) => {
       if (payload.reservation.other !== undefined) {
         updateFields.push('reservation_other = ?');
         updateParams.push(JSON.stringify(payload.reservation.other || []));
+      }
+      if (payload.reservation.isEws !== undefined) {
+        updateFields.push('reservation_is_ews = ?');
+        updateParams.push(payload.reservation.isEws === true ? 1 : 0);
       }
     }
 
@@ -1302,7 +1339,7 @@ export const getAdmissionStats = async (req, res) => {
         COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
       FROM admissions
       ${whereClause}
-      GROUP BY course_id, branch_id, branch
+      GROUP BY course_id, course, branch_id, branch
       ORDER BY courseName, branchName
     `;
     const [branchStats] = await pool.execute(queryBranches, params);
@@ -1312,7 +1349,175 @@ export const getAdmissionStats = async (req, res) => {
     }));
     return successResponse(res, { stats: courseStats }, 'Admission stats retrieved successfully', 200);
   } catch (error) {
-    console.error('Error fetching admission stats:', error);
-    return errorResponse(res, error.message || 'Failed to fetch admission stats', 500);
+    console.error('Error getting admission stats:', error);
+    return errorResponse(res, error.message || 'Failed to get admission stats', 500);
+  }
+};
+
+/**
+ * @desc    Export admissions to Excel
+ * @route   GET /api/admissions/export
+ * @access  Private (Super Admin)
+ */
+export const exportAdmissions = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { 
+      search, 
+      status, 
+      startDate, 
+      endDate, 
+      courseId, 
+      branchId,
+      courseName,
+      branchName
+    } = req.query;
+
+    const conditions = [];
+    const params = [];
+
+    if (status && status !== 'all') {
+      conditions.push('a.status = ?');
+      params.push(status);
+    }
+
+    if (courseId || courseName) {
+      if (courseId && courseName) {
+        conditions.push('(a.course_id = ? OR a.course = ?)');
+        params.push(courseId, courseName);
+      } else {
+        conditions.push('(a.course_id = ? OR a.course = ?)');
+        const val = courseId || courseName;
+        params.push(val, val);
+      }
+    }
+
+    if (branchId || branchName) {
+      if (branchId && branchName) {
+        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        params.push(branchId, branchName);
+      } else {
+        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        const val = branchId || branchName;
+        params.push(val, val);
+      }
+    }
+
+    if (startDate) {
+      conditions.push('a.created_at >= ?');
+      params.push(`${startDate} 00:00:00`);
+    }
+
+    if (endDate) {
+      conditions.push('a.created_at <= ?');
+      params.push(`${endDate} 23:59:59`);
+    }
+
+    if (search) {
+      const searchTerm = `%${search.trim()}%`;
+      conditions.push('(a.student_name LIKE ? OR a.admission_number LIKE ? OR a.student_phone LIKE ?)');
+      params.push(searchTerm, searchTerm, searchTerm);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const query = `
+      SELECT a.* 
+      FROM admissions a
+      ${whereClause}
+      ORDER BY a.created_at DESC
+    `;
+
+    // Increase sort buffer for this session to handle large rows (e.g., 1MB+)
+    await pool.execute('SET SESSION sort_buffer_size = 4194304'); // 4MB
+
+    const [rows] = await pool.execute(query, params);
+
+    // Format all admissions
+    const formattedAdmissions = await Promise.all(
+      rows.map(row => formatAdmission(row, pool))
+    );
+
+    // Create Excel Workbook
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Admissions');
+
+    // Define Columns
+    worksheet.columns = [
+      { header: 'Admission #', key: 'admissionNumber', width: 15 },
+      { header: 'Timestamp', key: 'createdAt', width: 20 },
+      { header: 'Student Name', key: 'studentName', width: 25 },
+      { header: 'Contact No', key: 'studentPhone', width: 15 },
+      { header: 'Course', key: 'course', width: 20 },
+      { header: 'Branch', key: 'branch', width: 20 },
+      { header: 'Quota', key: 'quota', width: 15 },
+      { header: 'Reservation (General)', key: 'reservationGeneral', width: 20 },
+      { header: 'Reservation (Other)', key: 'reservationOther', width: 20 },
+      { header: 'EWS', key: 'isEws', width: 10 },
+      { header: 'Status', key: 'status', width: 15 },
+      { header: 'Total Fee', key: 'totalFee', width: 15 },
+      { header: 'Total Paid', key: 'totalPaid', width: 15 },
+      { header: 'Balance', key: 'balance', width: 15 },
+      { header: 'Source', key: 'source', width: 15 },
+      { header: 'SSC Result', key: 'sscResult', width: 10 },
+      { header: 'SSC Passed Year', key: 'sscPassedYear', width: 15 },
+      { header: 'Intermediate Passed Year', key: 'interPassedYear', width: 15 },
+    ];
+
+    // Add Rows
+    formattedAdmissions.forEach(record => {
+      const reservationOther = Array.isArray(record.reservation?.other) 
+        ? record.reservation.other.join(', ') 
+        : (record.reservation?.other || '');
+
+      worksheet.addRow({
+        admissionNumber: record.admissionNumber,
+        createdAt: record.createdAt ? new Date(record.createdAt).toLocaleString() : '',
+        studentName: record.studentInfo?.name || '',
+        studentPhone: record.studentInfo?.phone || '',
+        course: record.courseInfo?.course || '',
+        branch: record.courseInfo?.branch || '',
+        quota: record.courseInfo?.quota || '',
+        reservationGeneral: record.reservation?.general || 'OC',
+        reservationOther: reservationOther,
+        isEws: record.reservation?.isEws ? 'Yes' : 'No',
+        status: record.status || '',
+        totalFee: record.paymentSummary?.totalFee || 0,
+        totalPaid: record.paymentSummary?.totalPaid || 0,
+        balance: (record.paymentSummary?.totalFee || 0) - (record.paymentSummary?.totalPaid || 0),
+        source: record.leadData?.source || 'Direct',
+        sscResult: record.educationHistory?.[0]?.gradeOrPercentage || '',
+        sscPassedYear: record.educationHistory?.[0]?.yearOfPassing || '',
+        interPassedYear: record.educationHistory?.[1]?.yearOfPassing || '',
+      });
+    });
+
+    // Style the header
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    // Set Response Headers
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=admissions_export.xlsx'
+    );
+
+    // Write to stream
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (error) {
+    console.error('Error exporting admissions:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export admissions', 500);
+    }
   }
 };

@@ -103,6 +103,7 @@ const admissionSchema = new Schema(
         enum: ['oc', 'ews', 'bc-a', 'bc-b', 'bc-c', 'bc-d', 'bc-e', 'sc', 'st'],
         required: true,
       },
+      isEws: { type: Boolean, default: false },
       other: [{ type: String, trim: true }],
     },
     address: {
