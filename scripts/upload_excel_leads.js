@@ -56,10 +56,24 @@ async function uploadExcel() {
         mandal VARCHAR(255),
         village VARCHAR(255),
         street VARCHAR(255),
+        house_no VARCHAR(255),
         student_group VARCHAR(50) DEFAULT 'Inter-MPC',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_temp_name_phone (student_name(100), phone)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    
+    // Ensure house_no column exists (ALTER if table was created before)
+    try {
+      await pool.execute('ALTER TABLE temp_excel_leads ADD COLUMN IF NOT EXISTS house_no VARCHAR(255) AFTER street');
+    } catch (alterError) {
+      // In case the DB version doesn't support ADD COLUMN IF NOT EXISTS
+      try {
+        await pool.execute('ALTER TABLE temp_excel_leads ADD COLUMN house_no VARCHAR(255) AFTER street');
+      } catch (e) {
+        // Column probably already exists, ignore
+      }
+    }
 
     // 2. File selection
     let filePath = openFilePicker();
@@ -101,6 +115,7 @@ async function uploadExcel() {
     const worksheet = workbook.Sheets[selectedSheetName];
     const sheetData = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
     const headers = sheetData[0];
+    console.log('\nDetected Headers in Excel:', headers.filter(h => h).join(', '));
 
     if (sheetData.length <= 1) {
       console.log('The Excel file is empty.');
@@ -137,6 +152,7 @@ async function uploadExcel() {
         getVal(['stdmandalname', 'mandal', 'tehsil', 'block', 'mandalname', 'mandal_name']),
         getVal(['villagename', 'village', 'city', 'town', 'vill', 'village_name', 'habitation']),
         getVal(['street', 'address', 'fulladdress', 'full_address', 'streetname', 'street_name', 'location']),
+        getVal(['hno', 'doorno', 'house_no', 'houseno', 'door_no', 'h_no', 'doornumber', 'housenumber', 'hnumber', 'dnumber', 'dno', 'doorno']),
         'Inter-MPC' // Default for new uploads, can be customized
       ];
     });
@@ -147,7 +163,7 @@ async function uploadExcel() {
     console.log(`- Rows found: ${sheetData.length - 1}`);
     console.log(`- Duplicates skipped: ${duplicateCount}`);
     console.log(`- Valid unique rows to upload: ${validRows.length}`);
-    console.log('Columns mapped: [Student Name], [Phone], [District], [Mandal], [Village], [Street]');
+    console.log('Columns mapped: [Student Name], [Phone], [District], [Mandal], [Village], [Street], [House No]');
 
     if (validRows.length === 0) {
       console.error('Error: Could not find any valid data matching expected columns.');
@@ -170,7 +186,7 @@ async function uploadExcel() {
 
     console.log(`Uploading ${validRows.length} unique rows...`);
     const BATCH_SIZE = 5000;
-    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, phone, district, mandal, village, street, student_group) VALUES ?';
+    const insertQuery = 'INSERT INTO temp_excel_leads (student_name, phone, district, mandal, village, street, house_no, student_group) VALUES ?';
     
     let totalInserted = 0;
     for (let i = 0; i < validRows.length; i += BATCH_SIZE) {

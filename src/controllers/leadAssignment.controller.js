@@ -4186,3 +4186,71 @@ export const clearUserAnalyticsCacheHandler = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Get current user's assignment history grouped by date
+ * @route   GET /api/leads/analytics/me/assignments
+ * @access  Private
+ */
+export const getMyAssignmentHistory = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const isPro = req.user.roleName === 'PRO';
+    const pool = getPool();
+
+    const dateField = isPro ? 'pro_assigned_at' : 'assigned_at';
+    const userField = isPro ? 'assigned_to_pro' : 'assigned_to';
+
+    const [rows] = await pool.execute(
+      `SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') as date, COUNT(*) as count 
+       FROM leads 
+       WHERE ${userField} = ? AND ${dateField} IS NOT NULL
+       GROUP BY DATE(${dateField})
+       ORDER BY date DESC`,
+      [userId]
+    );
+
+    return successResponse(res, rows, 'Assignment history retrieved successfully');
+  } catch (error) {
+    console.error('Error getting assignment history:', error);
+    return errorResponse(res, error.message || 'Failed to get assignment history', 500);
+  }
+};
+
+/**
+ * @desc    Get assignment details for a specific user and date
+ * @route   GET /api/leads/analytics/me/assignments/details
+ * @access  Private
+ */
+export const getAssignmentDetailsByDate = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const isPro = String(req.user.roleName).toUpperCase() === 'PRO';
+    const { date } = req.query;
+    const pool = getPool();
+
+    if (!date) {
+      return errorResponse(res, 'Date is required', 400);
+    }
+
+    const dateField = isPro ? 'pro_assigned_at' : 'assigned_at';
+    const userField = isPro ? 'assigned_to_pro' : 'assigned_to';
+
+    console.log(`[getAssignmentDetailsByDate] Querying assignments for User: ${userId}, Role: ${req.user.roleName}, Date: ${date}`);
+
+    const [rows] = await pool.execute(
+      `SELECT *
+       FROM leads 
+       WHERE ${userField} = ? AND DATE_FORMAT(${dateField}, '%Y-%m-%d') = ?
+       ORDER BY district ASC, mandal ASC, village ASC, name ASC`,
+      [userId, date]
+    );
+
+    console.log(`[getAssignmentDetailsByDate] Found ${rows.length} leads`);
+
+    return successResponse(res, rows, 'Assignment details retrieved successfully');
+  } catch (error) {
+    console.error('Error getting assignment details:', error);
+    return errorResponse(res, error.message || 'Failed to get assignment details', 500);
+  }
+};
+

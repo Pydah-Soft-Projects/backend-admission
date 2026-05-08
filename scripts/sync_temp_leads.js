@@ -140,20 +140,63 @@ async function syncLeadsWithMasterData() {
     }
 
     const [[{ total: totalInTemp }]] = await pool.execute(`SELECT COUNT(*) as total FROM temp_excel_leads t WHERE 1=1 ${districtFilter}`);
-
-    // Step 3: Sync Loop (Same as before)
-    console.log('Step 3: Processing matches...');
-    const [matches] = await pool.execute(`
-      SELECT l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone, l.district AS old_district, l.mandal AS old_mandal, l.village AS old_village, l.address AS old_address, l.needs_manual_update, t.district AS excel_district, t.mandal AS excel_mandal, t.village AS excel_village, t.street AS excel_street
-      FROM leads l
-      INNER JOIN temp_excel_leads t ON (LOWER(TRIM(l.name)) COLLATE utf8mb4_general_ci) = (LOWER(TRIM(t.student_name)) COLLATE utf8mb4_general_ci) AND (TRIM(l.phone) COLLATE utf8mb4_general_ci) = (TRIM(t.phone) COLLATE utf8mb4_general_ci)
-      WHERE 1=1 ${districtFilter}
-    `);
+    
+    // Step 2.5: Sync Mode Selection
+    console.log('\nSync Modes:');
+    console.log('  1. FULL SYNC: Update District, Mandal, Village, and Address');
+    console.log('  2. ONLY HOUSE NUMBERS: Update only the Address field (Door No + Street)');
+    
+    const syncModeChoice = await question('\nSelect sync mode (1-2) [Default: 1]: ');
+    const syncMode = syncModeChoice === '2' ? 'hno' : 'full';
+    console.log(`\n[MODE] ${syncMode === 'hno' ? 'Updating only House Numbers/Address' : 'Performing Full Data Sync'}`);
 
     const results = [];
     const unmappedLeads = [];
     let updatedCount = 0;
     let actualChanges = 0;
+
+    // Step 3: Fast Path for "Only House Numbers" (Bulk Update with Progress)
+    if (syncMode === 'hno' && !DRY_RUN) {
+      console.log('\nStep 3: Performing Chunked Bulk Update for House Numbers...');
+      
+      const [[{ maxId }]] = await pool.execute('SELECT MAX(id) as maxId FROM temp_excel_leads');
+      const CHUNK_SIZE = 10000;
+      let totalAffected = 0;
+
+      for (let i = 0; i <= maxId; i += CHUNK_SIZE) {
+        const bulkUpdateQuery = `
+          UPDATE leads l
+          INNER JOIN temp_excel_leads t ON 
+            l.name = t.student_name AND l.phone = t.phone
+          SET l.address = CONCAT_WS(', ', NULLIF(TRIM(t.house_no), ''), NULLIF(TRIM(t.street), '')),
+              l.updated_at = NOW()
+          WHERE t.id BETWEEN ${i} AND ${i + CHUNK_SIZE - 1} ${districtFilter}
+        `;
+        
+        const [result] = await pool.execute(bulkUpdateQuery);
+        totalAffected += result.affectedRows;
+        
+        const progress = Math.min(100, Math.round((i + CHUNK_SIZE) / maxId * 100));
+        process.stdout.write(`   Progress: ${progress}% | Processed IDs up to ${i + CHUNK_SIZE} | Updates: ${totalAffected}\r`);
+      }
+
+      console.log(`\n\n✔ BULK UPDATE SUCCESSFUL!`);
+      console.log(`- Total Records Updated: ${totalAffected}`);
+      console.log('\nSync operation complete.');
+      return;
+    }
+
+    // Step 4: Processing matches (Loop for Full Sync or Dry Run)
+    console.log(`\nStep 3: Processing matches (${syncMode === 'hno' ? 'Dry Run Preview' : 'Mapping Full Data'})...`);
+    const [matches] = await pool.execute(`
+      SELECT 
+        l.id AS lead_id, l.name AS lead_name, l.phone AS lead_phone, 
+        l.district AS old_district, l.mandal AS old_mandal, l.village AS old_village, l.address AS old_address, l.needs_manual_update, 
+        t.district AS excel_district, t.mandal AS excel_mandal, t.village AS excel_village, t.street AS excel_street, t.house_no AS excel_hno
+      FROM leads l
+      INNER JOIN temp_excel_leads t ON (LOWER(TRIM(l.name)) COLLATE utf8mb4_general_ci) = (LOWER(TRIM(t.student_name)) COLLATE utf8mb4_general_ci) AND (TRIM(l.phone) COLLATE utf8mb4_general_ci) = (TRIM(t.phone) COLLATE utf8mb4_general_ci)
+      WHERE 1=1 ${districtFilter}
+    `);
 
     for (const row of matches) {
       const excelDist = (row.excel_district || '').toLowerCase().trim();
@@ -176,22 +219,31 @@ async function syncLeadsWithMasterData() {
       }
 
       let newFlag = masterMatched ? 0 : 2;
-      const hasChanged = row.old_district !== finalDistrict || row.old_mandal !== finalMandal || row.old_village !== row.excel_village || row.old_address !== row.excel_street || row.needs_manual_update !== newFlag;
+      
+      let hasChanged = false;
+      let finalAddress = row.excel_street || '';
+
+      if (syncMode === 'hno') {
+        // Construct address: "Door No, Street" or just Door No or just Street
+        const parts = [row.excel_hno, row.excel_street].filter(p => p && p.trim().length > 0);
+        finalAddress = parts.join(', ').trim();
+        
+        hasChanged = row.old_address !== finalAddress;
+        // In hno mode, we don't care about district/mandal flags
+        newFlag = row.needs_manual_update; 
+      } else {
+        hasChanged = row.old_district !== finalDistrict || row.old_mandal !== finalMandal || row.old_village !== row.excel_village || row.old_address !== row.excel_street || row.needs_manual_update !== newFlag;
+      }
       
       if (hasChanged) actualChanges++;
 
-      const matchType = masterMatched ? (isFuzzy ? '⚠ FUZZY' : '✔ EXACT') : '❌ NONE';
+      const matchType = syncMode === 'hno' ? '✔ NAME+PHONE' : (masterMatched ? (isFuzzy ? '⚠ FUZZY' : '✔ EXACT') : '❌ NONE');
       
       const record = {
         'Student Name': row.lead_name,
-        'District (Old)': row.old_district || '(empty)',
-        'District (New)': finalDistrict,
-        'Mandal (Old)': row.old_mandal || '(empty)',
-        'Mandal (New)': finalMandal,
-        'Village (Old)': row.old_village || '(empty)',
-        'Village (New)': row.excel_village || '(empty)',
+        'Old Value': syncMode === 'hno' ? (row.old_address || '(empty)') : `${row.old_district}, ${row.old_mandal}`,
+        'New Value': syncMode === 'hno' ? finalAddress : `${finalDistrict}, ${finalMandal}`,
         'Match': matchType,
-        'Flag': `(${row.needs_manual_update})->(${newFlag})`,
         'Sync?': hasChanged ? 'UPDATE' : 'SKIP'
       };
 
@@ -200,7 +252,11 @@ async function syncLeadsWithMasterData() {
 
       if (!DRY_RUN && hasChanged) {
         queue.add(async () => {
-          await pool.execute(`UPDATE leads SET district=?, mandal=?, village=?, address=?, needs_manual_update=?, updated_at=NOW() WHERE id=?`, [finalDistrict, finalMandal, row.excel_village, row.excel_street, newFlag, row.lead_id]);
+          if (syncMode === 'hno') {
+            await pool.execute(`UPDATE leads SET address=?, updated_at=NOW() WHERE id=?`, [finalAddress, row.lead_id]);
+          } else {
+            await pool.execute(`UPDATE leads SET district=?, mandal=?, village=?, address=?, needs_manual_update=?, updated_at=NOW() WHERE id=?`, [finalDistrict, finalMandal, row.excel_village, finalAddress, newFlag, row.lead_id]);
+          }
           updatedCount++;
           if (updatedCount % 500 === 0) console.log(`   Progress: Updated ${updatedCount} leads...`);
         });

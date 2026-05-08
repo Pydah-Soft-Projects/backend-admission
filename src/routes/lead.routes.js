@@ -42,6 +42,8 @@ import {
   getOverviewAnalytics,
   getUserAnalytics,
   clearUserAnalyticsCacheHandler,
+  getMyAssignmentHistory,
+  getAssignmentDetailsByDate,
 } from '../controllers/leadAssignment.controller.js';
 import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
@@ -103,6 +105,8 @@ router.post('/assign/remove', isSuperAdmin, removeAssignments);
 router.get('/analytics/overview', isSuperAdmin, getOverviewAnalytics);
 // Current user's call/SMS/status analytics (Call Activity page) - must be before :userId
 router.get('/analytics/me', getMyCallAnalytics);
+router.get('/analytics/me/assignments', getMyAssignmentHistory);
+router.get('/analytics/me/assignments/details', getAssignmentDetailsByDate);
 // Allow managers to access user analytics (they can only see their team members)
 router.get('/analytics/users', getUserAnalytics);
 router.post('/analytics/users/cache', isSuperAdmin, clearUserAnalyticsCacheHandler);
