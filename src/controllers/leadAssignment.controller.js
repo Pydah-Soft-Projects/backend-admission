@@ -2377,16 +2377,6 @@ async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGrou
 // @access  Private (Super Admin)
 export const getUserAnalytics = async (req, res) => {
   try {
-    // Allow Super Admin, Sub Super Admin, and Managers
-    const isAdmin = hasElevatedAdminPrivileges(req.user.roleName);
-    const isManager = req.user.isManager === true;
-    const pool = getPool();
-    const currentUserId = req.user.id || req.user._id;
-
-    if (!isAdmin && !isManager) {
-      return errorResponse(res, 'Access denied', 403);
-    }
-
     const {
       startDate,
       endDate,
@@ -2413,6 +2403,19 @@ export const getUserAnalytics = async (req, res) => {
       /** Communications roster: only users with ≥1 assigned lead in this `leads.district` (exact match). */
       district: rosterDistrictQuery,
     } = req.query;
+
+    // Allow Super Admin, Sub Super Admin, and Managers
+    const isAdmin = hasElevatedAdminPrivileges(req.user.roleName);
+    const isManager = req.user.isManager === true;
+    const pool = getPool();
+    const currentUserId = req.user.id || req.user._id;
+
+    // Allow user to view their own analytics OR if they are admin/manager
+    const isSelfSearch = userId && String(userId).split(',').length === 1 && String(userId) === String(currentUserId);
+
+    if (!isAdmin && !isManager && !isSelfSearch) {
+      return errorResponse(res, 'Access denied', 403);
+    }
 
     const isRosterOnly =
       String(rosterOnly || '').toLowerCase() === 'true' ||
