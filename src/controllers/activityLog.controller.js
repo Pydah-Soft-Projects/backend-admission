@@ -88,6 +88,7 @@ export const addActivity = async (req, res) => {
         newStatusValue = resolved;
         activityType = 'status_change';
         metadata.statusChannel = 'call_status';
+        metadata.callStatus = newStatus;
         
         updateFields.push('call_status = ?');
         updateValues.push(newStatus);
@@ -102,6 +103,7 @@ export const addActivity = async (req, res) => {
         newStatusValue = resolved;
         activityType = 'status_change';
         metadata.statusChannel = 'visit_status';
+        metadata.visitStatus = newStatus;
         
         updateFields.push('visit_status = ?');
         updateValues.push(newStatus);

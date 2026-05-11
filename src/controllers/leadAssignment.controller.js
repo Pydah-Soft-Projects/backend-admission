@@ -2511,16 +2511,12 @@ export const getUserAnalytics = async (req, res) => {
     let activityDateConditions = [];
     let activityDateParams = [];
     if (rangeStartStr) {
-      const start = new Date(rangeStartStr);
-      start.setHours(0, 0, 0, 0);
       activityDateConditions.push('>= ?');
-      activityDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
+      activityDateParams.push(`${rangeStartStr} 00:00:00`);
     }
     if (rangeEndStr) {
-      const end = new Date(rangeEndStr);
-      end.setHours(23, 59, 59, 999);
       activityDateConditions.push('<= ?');
-      activityDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
+      activityDateParams.push(`${rangeEndStr} 23:59:59`);
     }
     const activityDateClause = activityDateConditions.length > 0
       ? `AND ${activityDateConditions.map((c, i) => `sent_at ${c}`).join(' AND ')}`
@@ -2773,16 +2769,12 @@ export const getUserAnalytics = async (req, res) => {
     let assignmentDateConditions = [];
     let assignmentDateParams = [];
     if (rangeStartStr) {
-      const start = new Date(rangeStartStr);
-      start.setHours(0, 0, 0, 0);
       assignmentDateConditions.push('a.created_at >= ?');
-      assignmentDateParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
+      assignmentDateParams.push(`${rangeStartStr} 00:00:00`);
     }
     if (rangeEndStr) {
-      const end = new Date(rangeEndStr);
-      end.setHours(23, 59, 59, 999);
       assignmentDateConditions.push('a.created_at <= ?');
-      assignmentDateParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
+      assignmentDateParams.push(`${rangeEndStr} 23:59:59`);
     }
     if (useAcademicYear) {
       assignmentDateConditions.push('l.academic_year = ?');
@@ -3559,16 +3551,14 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
 
     const assignmentByDateMap = new Map();
     const reclaimedUniqueMap = new Map();
+    const visitDiaryUpdatesMap = new Map(); // New: userKey -> Map(dateKey -> { date, statusCounts: {}, details: [] })
 
     if (includeAssignmentDetailsForWork) {
       const now = new Date();
       const tzOffset = now.getTimezoneOffset() * 60000;
       const todayYmd = new Date(now.getTime() - tzOffset).toISOString().slice(0, 10);
 
-      const uidKeyToRole = new Map();
-      cohortScopeUsers.forEach((u) => {
-        uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
-      });
+      const cohortUserIdSet = new Set(cohortScopeUserIds);
 
       const [
         [rawAssignments],
@@ -3576,11 +3566,17 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
       ] = await Promise.all([
         pool.execute(
           `SELECT 
-            a.target_user_id as user_id, 
+            a.target_user_id, 
+            a.performed_by,
             DATE(a.created_at) as assigned_date, 
             a.lead_id,
             a.metadata as log_metadata,
             a.created_at as log_created_at,
+            a.new_status as log_new_status,
+            a.old_status as log_old_status,
+            l.name,
+            l.phone,
+            l.village,
             l.lead_status,
             l.call_status,
             l.visit_status,
@@ -3597,9 +3593,9 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
           FROM activity_logs a
           JOIN leads l ON l.id = a.lead_id
           WHERE a.type = 'status_change' 
-            AND a.target_user_id IN (${cohortUserIdPlaceholders})
+            AND (a.target_user_id IN (${cohortUserIdPlaceholders}) OR a.performed_by IN (${cohortUserIdPlaceholders}))
             ${assignmentDateWhere}`,
-          [...cohortScopeUserIds, ...assignmentDateParams]
+          [...cohortScopeUserIds, ...cohortScopeUserIds, ...assignmentDateParams]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
@@ -3618,192 +3614,224 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
 
 
 
-      rawAssignments.forEach(row => {
-        const userKey = String(row.user_id).trim().toLowerCase();
-        if (!userKey) return;
-        
-        let perDate = assignmentByDateMap.get(userKey);
-        if (!perDate) {
-          perDate = new Map();
-          assignmentByDateMap.set(userKey, perDate);
-        }
-
-        const dateKey = row.assigned_date instanceof Date
-          ? row.assigned_date.toISOString().slice(0, 10)
-          : String(row.assigned_date || '').slice(0, 10);
-        
-        if (!dateKey || dateKey === 'null') return;
-
-        // Calculate report_target_date_ymd in JS for performance
-        let reportTargetDateYmd = null;
-        try {
-          const meta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata;
-          const metaTDate = meta?.assignment?.targetDate;
-          if (metaTDate && String(metaTDate).trim() !== '') {
-            reportTargetDateYmd = String(metaTDate).trim();
-          } else {
-            // Fallback logic mirrored from SQL fragment
-            const uid = row.user_id;
-            const isAssignedToMe = (uid != null && (uid === row.assigned_to || uid === row.assigned_to_pro));
-            
-            if (isAssignedToMe) {
-              if (uid === row.assigned_to) {
-                reportTargetDateYmd = row.counsellor_target_date || row.target_date;
-              } else {
-                reportTargetDateYmd = row.pro_target_date || row.target_date;
-              }
-            } else {
-              reportTargetDateYmd = row.counsellor_target_date || row.pro_target_date || row.target_date;
-            }
-
-            // Academic year fallback (25 Apr)
-            if (!reportTargetDateYmd) {
-              const yr = row.academic_year || (row.log_created_at ? new Date(row.log_created_at).getFullYear() : null);
-              if (yr && yr >= 2000 && yr <= 2100) {
-                reportTargetDateYmd = `${yr}-04-25`;
-              }
-            }
-          }
-        } catch (e) {
-          // ignore parse errors
-        }
-
-        const effectiveYmd = sliceAssignmentYmd(reportTargetDateYmd);
-        let tDateSegment = '__NULL__';
-        let isTargetDatePassed = false;
-        if (effectiveYmd) {
-          tDateSegment = effectiveYmd;
-          if (tDateSegment < todayYmd) {
-            isTargetDatePassed = true;
-          }
-        }
-        // One row per (allotted calendar day, effective target date) — same SQL/fetch; split only in memory.
-        const bucketKey = `${dateKey}\t${tDateSegment}`;
-
-        if (!perDate.has(bucketKey)) {
-          perDate.set(bucketKey, {
-            date: dateKey,
-            targetDateSortKey: tDateSegment,
-            detailRowKey: bucketKey,
-            totalAssigned: 0,
-            leadStatusCounts: {},
-            statusBeforeReclaimCounts: {}, // For backward compatibility if needed
-            currentlyUnassigned: 0,
-            currentlyWithSameUser: 0,
-            movedToOtherUser: 0,
-            reclaimedCount: 0,
-            targetDateCounts: {},
-            studentGroupCounts: {},
-            mandalCounts: {},
-            callStatusCounts: {},
-            visitStatusCounts: {},
-            /** Distinct students (lead_id) — materialized after rawAssignments loop */
-            _allLeadIds: new Set(),
-            _callStatusLeadSets: {},
-            _visitStatusLeadSets: {},
-            _leadStatusLeadSets: {},
-            _mandalLeadSets: {},
-            _studentGroupLeadSets: {},
-            _targetDateLeadSets: {},
-            _reclaimedLeadIds: new Set(),
-            _manualUnassignedLeadIds: new Set(),
-            _movedToOtherUserLeadIds: new Set(),
-            _unassignedLeadIds: new Set(),
-            _sameUserLeadIds: new Set(),
-            _otherUserLeadIds: new Set(),
-          });
-        }
-
-        const bucket = perDate.get(bucketKey);
-        const lid = String(row.lead_id ?? '');
-        if (!lid) return;
-        bucket._allLeadIds.add(lid);
-
-        // 1. Current Engagement status (distinct students)
-        if (row.assigned_to === null && row.assigned_to_pro === null) {
-          bucket._unassignedLeadIds.add(lid);
-        } else if (row.assigned_to === row.user_id || row.assigned_to_pro === row.user_id) {
-          bucket._sameUserLeadIds.add(lid);
-        } else {
-          bucket._otherUserLeadIds.add(lid);
-        }
-
-        // 2. Lead Status / Reclamation check (distinct students per bucket label)
-        const isNoLongerWithUser = (row.assigned_to !== row.user_id && row.assigned_to_pro !== row.user_id);
-        const currentCallStatus = canonicalCounselorCallStatusForReports(row.call_status);
-        const isFailedStatus = ['Assigned', 'Not Interested', 'Wrong Data', 'Wrong Number', 'Invalid Number'].includes(currentCallStatus);
-
-        // Logic for differentiating "Unattended" vs "Moved" vs "Manual Unassign"
-        // 1. Reclaimed (Automated/Failed):
-        //    - Currently unassigned AND was in a failed status
-        //    - OR currently assigned AND target date passed AND still in failed status
-        const isReclaimedAutomated = (row.assigned_to === null && row.assigned_to_pro === null && isFailedStatus) || 
-                                     (isTargetDatePassed && isFailedStatus && !isNoLongerWithUser);
-        
-        // 2. Manual Unassigned:
-        //    - Currently unassigned AND was NOT in a failed status (user worked on it, but admin took it back to pool)
-        const isManualUnassigned = (row.assigned_to === null && row.assigned_to_pro === null && !isFailedStatus);
-
-        // 3. Moved to Other User:
-        //    - Currently assigned to someone else
-        const isMovedToOther = (row.assigned_to !== null || row.assigned_to_pro !== null) && isNoLongerWithUser;
-
-        if (isReclaimedAutomated) {
-          bucket._reclaimedLeadIds.add(lid);
-        }
-        if (isManualUnassigned) {
-          bucket._manualUnassignedLeadIds.add(lid);
-        }
-        if (isMovedToOther) {
-          bucket._movedToOtherUserLeadIds.add(lid);
-        }
-
-        // Always count in status columns for visibility (User requested Assigned not to be 0)
-        let callS =
-          row.call_status != null && String(row.call_status).trim() !== ''
-            ? String(row.call_status).trim()
-            : 'Not set';
-        if (String(row.lead_status || '').trim().toLowerCase() === 'new') {
-          callS = 'Assigned';
-        }
-        if (!bucket._callStatusLeadSets[callS]) bucket._callStatusLeadSets[callS] = new Set();
-        bucket._callStatusLeadSets[callS].add(lid);
-
-        const visitRaw =
-          row.visit_status != null && String(row.visit_status).trim() !== ''
-            ? String(row.visit_status).trim()
-            : '';
-        const visitKey = canonicalProVisitStatusForReports(visitRaw);
-        if (!bucket._visitStatusLeadSets[visitKey]) bucket._visitStatusLeadSets[visitKey] = new Set();
-        bucket._visitStatusLeadSets[visitKey].add(lid);
-
-        const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
-        if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
-        bucket._leadStatusLeadSets[status].add(lid);
-
-        // 3. Target Date breakdown (distinct students per target date key)
-        if (effectiveYmd) {
-          if (!bucket._targetDateLeadSets[effectiveYmd]) bucket._targetDateLeadSets[effectiveYmd] = new Set();
-          bucket._targetDateLeadSets[effectiveYmd].add(lid);
-        }
-
-        // 4. Student Group breakdown (distinct students per group)
-        const sGroup = (row.student_group || 'Unknown').trim() || 'Unknown';
-        if (!bucket._studentGroupLeadSets[sGroup]) bucket._studentGroupLeadSets[sGroup] = new Set();
-        bucket._studentGroupLeadSets[sGroup].add(lid);
-
-        // 5. Mandal breakdown (distinct students per mandal label)
-        let mandal = (row.mandal || 'Unknown').trim() || 'Unknown';
-        const mandalLow = mandal.toLowerCase();
-
-        if (mandal === 'Unknown') {
-          // Stay as Unknown
-        } else if (row.needs_manual_update === 1 || row.needs_manual_update === 2 || !validMandalsSet.has(mandalLow)) {
-          mandal = 'Others';
-        }
-        if (!bucket._mandalLeadSets[mandal]) bucket._mandalLeadSets[mandal] = new Set();
-        bucket._mandalLeadSets[mandal].add(lid);
+      const uidKeyToRole = new Map();
+      cohortScopeUsers.forEach((u) => {
+        uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
       });
+
+      rawAssignments.forEach(row => {
+        // Find users to attribute this activity to
+        const uidsToAttribute = new Set();
+        if (row.target_user_id && cohortUserIdSet.has(row.target_user_id)) {
+          uidsToAttribute.add(row.target_user_id);
+        }
+        if (row.performed_by && cohortUserIdSet.has(row.performed_by)) {
+          uidsToAttribute.add(row.performed_by);
+        }
+
+        let logMeta = null;
+        try {
+          logMeta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata;
+        } catch (e) { /* ignore */ }
+
+        // Support for "Record on Behalf": attribute visit status updates to the current PRO assignee
+        if (logMeta?.statusChannel === 'visit_status' && row.assigned_to_pro && cohortUserIdSet.has(row.assigned_to_pro)) {
+          uidsToAttribute.add(row.assigned_to_pro);
+        }
+
+        uidsToAttribute.forEach(uid => {
+          const userKey = String(uid).trim().toLowerCase();
+          const isAssignmentToMe = (row.target_user_id === uid);
+          const isVisitUpdate = (logMeta?.statusChannel === 'visit_status');
+
+          // 1. Core Aggregation (Only for leads assigned TO the user)
+          if (isAssignmentToMe) {
+            let perDate = assignmentByDateMap.get(userKey);
+            if (!perDate) {
+              perDate = new Map();
+              assignmentByDateMap.set(userKey, perDate);
+            }
+
+            const dateKey = row.assigned_date instanceof Date
+              ? row.assigned_date.toISOString().slice(0, 10)
+              : String(row.assigned_date || '').slice(0, 10);
+            
+            if (dateKey && dateKey !== 'null') {
+              // Calculate report_target_date_ymd in JS for performance
+              let reportTargetDateYmd = null;
+              const metaTDate = logMeta?.assignment?.targetDate;
+              if (metaTDate && String(metaTDate).trim() !== '') {
+                reportTargetDateYmd = String(metaTDate).trim();
+              } else {
+                // Fallback logic mirrored from SQL fragment
+                const isAssignedToMeNow = (uid != null && (uid === row.assigned_to || uid === row.assigned_to_pro));
+                
+                if (isAssignedToMeNow) {
+                  if (uid === row.assigned_to) {
+                    reportTargetDateYmd = row.counsellor_target_date || row.target_date;
+                  } else {
+                    reportTargetDateYmd = row.pro_target_date || row.target_date;
+                  }
+                } else {
+                  reportTargetDateYmd = row.counsellor_target_date || row.pro_target_date || row.target_date;
+                }
+
+                // Academic year fallback (25 Apr)
+                if (!reportTargetDateYmd) {
+                  const yr = row.academic_year || (row.log_created_at ? new Date(row.log_created_at).getFullYear() : null);
+                  if (yr && yr >= 2000 && yr <= 2100) {
+                    reportTargetDateYmd = `${yr}-04-25`;
+                  }
+                }
+              }
+
+              const effectiveYmd = sliceAssignmentYmd(reportTargetDateYmd);
+              let tDateSegment = '__NULL__';
+              let isTargetDatePassedRow = false;
+              if (effectiveYmd) {
+                tDateSegment = effectiveYmd;
+                if (tDateSegment < todayYmd) {
+                  isTargetDatePassedRow = true;
+                }
+              }
+              const bucketKey = `${dateKey}\t${tDateSegment}`;
+
+              if (!perDate.has(bucketKey)) {
+                perDate.set(bucketKey, {
+                  date: dateKey,
+                  targetDateSortKey: tDateSegment,
+                  detailRowKey: bucketKey,
+                  totalAssigned: 0,
+                  leadStatusCounts: {},
+                  statusBeforeReclaimCounts: {}, 
+                  currentlyUnassigned: 0,
+                  currentlyWithSameUser: 0,
+                  movedToOtherUser: 0,
+                  reclaimedCount: 0,
+                  targetDateCounts: {},
+                  studentGroupCounts: {},
+                  mandalCounts: {},
+                  callStatusCounts: {},
+                  visitStatusCounts: {},
+                  _allLeadIds: new Set(),
+                  _callStatusLeadSets: {},
+                  _visitStatusLeadSets: {},
+                  _leadStatusLeadSets: {},
+                  _mandalLeadSets: {},
+                  _studentGroupLeadSets: {},
+                  _targetDateLeadSets: {},
+                  _reclaimedLeadIds: new Set(),
+                  _manualUnassignedLeadIds: new Set(),
+                  _movedToOtherUserLeadIds: new Set(),
+                  _unassignedLeadIds: new Set(),
+                  _sameUserLeadIds: new Set(),
+                  _otherUserLeadIds: new Set(),
+                });
+              }
+
+              const bucket = perDate.get(bucketKey);
+              const lid = String(row.lead_id ?? '');
+              if (lid) {
+                bucket._allLeadIds.add(lid);
+
+                // Engagement status
+                if (row.assigned_to === null && row.assigned_to_pro === null) {
+                  bucket._unassignedLeadIds.add(lid);
+                } else if (row.assigned_to === uid || row.assigned_to_pro === uid) {
+                  bucket._sameUserLeadIds.add(lid);
+                } else {
+                  bucket._otherUserLeadIds.add(lid);
+                }
+
+                // Lead Status / Reclamation check
+                const isNoLongerWithUser = (row.assigned_to !== uid && row.assigned_to_pro !== uid);
+                const currentCallStatus = canonicalCounselorCallStatusForReports(row.call_status);
+                const isFailedStatus = ['Assigned', 'Not Interested', 'Wrong Data', 'Wrong Number', 'Invalid Number'].includes(currentCallStatus);
+
+                const isReclaimedAutomated = (row.assigned_to === null && row.assigned_to_pro === null && isFailedStatus) || 
+                                             (isTargetDatePassedRow && isFailedStatus && !isNoLongerWithUser);
+                const isManualUnassigned = (row.assigned_to === null && row.assigned_to_pro === null && !isFailedStatus);
+                const isMovedToOther = (row.assigned_to !== null || row.assigned_to_pro !== null) && isNoLongerWithUser;
+
+                if (isReclaimedAutomated) bucket._reclaimedLeadIds.add(lid);
+                if (isManualUnassigned) bucket._manualUnassignedLeadIds.add(lid);
+                if (isMovedToOther) bucket._movedToOtherUserLeadIds.add(lid);
+
+                let callS = row.call_status != null && String(row.call_status).trim() !== '' ? String(row.call_status).trim() : 'Not set';
+                if (String(row.lead_status || '').trim().toLowerCase() === 'new') callS = 'Assigned';
+                if (!bucket._callStatusLeadSets[callS]) bucket._callStatusLeadSets[callS] = new Set();
+                bucket._callStatusLeadSets[callS].add(lid);
+
+                const visitRaw = row.visit_status != null && String(row.visit_status).trim() !== '' ? String(row.visit_status).trim() : '';
+                const visitKey = canonicalProVisitStatusForReports(visitRaw);
+                if (!bucket._visitStatusLeadSets[visitKey]) bucket._visitStatusLeadSets[visitKey] = new Set();
+                bucket._visitStatusLeadSets[visitKey].add(lid);
+
+                const status = (row.lead_status || 'Unknown').trim() || 'Unknown';
+                if (!bucket._leadStatusLeadSets[status]) bucket._leadStatusLeadSets[status] = new Set();
+                bucket._leadStatusLeadSets[status].add(lid);
+
+                if (effectiveYmd) {
+                  if (!bucket._targetDateLeadSets[effectiveYmd]) bucket._targetDateLeadSets[effectiveYmd] = new Set();
+                  bucket._targetDateLeadSets[effectiveYmd].add(lid);
+                }
+
+                const sGroup = (row.student_group || 'Unknown').trim() || 'Unknown';
+                if (!bucket._studentGroupLeadSets[sGroup]) bucket._studentGroupLeadSets[sGroup] = new Set();
+                bucket._studentGroupLeadSets[sGroup].add(lid);
+
+                let mandal = (row.mandal || 'Unknown').trim() || 'Unknown';
+                const mandalLow = mandal.toLowerCase();
+                if (row.needs_manual_update === 1 || row.needs_manual_update === 2 || !validMandalsSet.has(mandalLow)) {
+                  if (mandal !== 'Unknown') mandal = 'Others';
+                }
+                if (!bucket._mandalLeadSets[mandal]) bucket._mandalLeadSets[mandal] = new Set();
+                bucket._mandalLeadSets[mandal].add(lid);
+              }
+            }
+          }
+
+          // 2. Individual Visit History (Visit Diary) - Grouped by Date
+          // Reflect status changes (Visit Outcomes), exclude the initial "Assigned" status
+          if (isVisitUpdate && row.log_new_status !== 'Assigned') {
+            let userUpdates = visitDiaryUpdatesMap.get(userKey);
+            if (!userUpdates) {
+              userUpdates = new Map();
+              visitDiaryUpdatesMap.set(userKey, userUpdates);
+            }
+
+            const dateKey = row.log_created_at instanceof Date
+              ? row.log_created_at.toISOString().slice(0, 10)
+              : String(row.log_created_at || '').slice(0, 10);
+            
+            if (dateKey && dateKey !== 'null') {
+              let dateBucket = userUpdates.get(dateKey);
+              if (!dateBucket) {
+                dateBucket = {
+                  date: dateKey,
+                  statusCounts: {},
+                  details: []
+                };
+                userUpdates.set(dateKey, dateBucket);
+              }
+
+              // Prioritize the point-in-time visit status stored in metadata, fallback to log_new_status
+              const statusToDisplay = logMeta?.visitStatus || row.log_new_status || 'Assigned';
+              dateBucket.statusCounts[statusToDisplay] = (dateBucket.statusCounts[statusToDisplay] || 0) + 1;
+              
+              dateBucket.details.push({
+                name: row.name || 'Unknown',
+                phone: row.phone || '-',
+                village: row.village || row.mandal || '-',
+                visitStatus: statusToDisplay,
+                visitDate: row.log_created_at,
+                leadId: row.lead_id
+              });
+            }
+          }
+        });
+      });
+
 
       const setRecordToCounts = (rec) => {
         const out = {};
@@ -4137,6 +4165,11 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
               if (bSk === '__NULL__' && aSk !== '__NULL__') return -1;
               return String(aSk).localeCompare(String(bSk));
             });
+        })(),
+        visitDiaryUpdates: (() => {
+          const userUpdates = visitDiaryUpdatesMap.get(String(user.id || '').trim().toLowerCase());
+          if (!userUpdates) return [];
+          return Array.from(userUpdates.values()).sort((a, b) => b.date.localeCompare(a.date));
         })(),
       };
     });
