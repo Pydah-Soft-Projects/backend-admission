@@ -241,24 +241,54 @@ export const getRecentVisitors = async (req, res) => {
     const pool = getPool();
     
     const [rows] = await pool.execute(`
-      SELECT 
-        vc.id,
-        vc.status,
-        vc.expires_at,
-        vc.created_at,
-        l.name as lead_name,
-        l.enquiry_number as lead_enquiry_number,
-        u.name as sender_name
-      FROM visitor_codes vc
-      JOIN leads l ON vc.lead_id = l.id
-      JOIN users u ON vc.created_by = u.id
-      ORDER BY vc.created_at DESC
-      LIMIT 10
+      (
+        SELECT 
+          vc.id as id,
+          vc.status as status,
+          vc.expires_at as expires_at,
+          vc.created_at as created_at,
+          l.name as lead_name,
+          l.enquiry_number as lead_enquiry_number,
+          u.name as sender_name
+        FROM visitor_codes vc
+        JOIN leads l ON vc.lead_id = l.id
+        JOIN users u ON vc.created_by = u.id
+      )
+      UNION ALL
+      (
+        SELECT 
+          CONCAT('manual-', l.id) as id,
+          'manual' as status,
+          NULL as expires_at,
+          l.updated_at as created_at,
+          l.name as lead_name,
+          l.enquiry_number as lead_enquiry_number,
+          'Manual Update' as sender_name
+        FROM leads l
+        WHERE LOWER(l.lead_status) = 'visited'
+        AND l.id NOT IN (SELECT DISTINCT lead_id FROM visitor_codes WHERE status = 'used')
+      )
+      ORDER BY created_at DESC
+      LIMIT 500
     `);
+    
+    // Get summary stats
+    const [statsRows] = await pool.execute(`
+      SELECT 
+        (SELECT COUNT(*) FROM visitor_codes WHERE status = 'used') as verified_count,
+        (SELECT COUNT(*) FROM leads WHERE LOWER(lead_status) = 'visited' AND id NOT IN (SELECT DISTINCT lead_id FROM visitor_codes WHERE status = 'used')) as manual_count
+    `);
+    
+    const stats = statsRows[0] || { verified_count: 0, manual_count: 0 };
 
     res.status(200).json({
       success: true,
       data: rows,
+      stats: {
+        verifiedCount: Number(stats.verified_count || 0),
+        manualCount: Number(stats.manual_count || 0),
+        totalVisited: Number(stats.verified_count || 0) + Number(stats.manual_count || 0)
+      }
     });
   } catch (error) {
     console.error('Error fetching recent visitors:', error);
