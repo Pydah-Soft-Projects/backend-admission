@@ -4,6 +4,7 @@ import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
+import smsService from '../services/sms.service.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -419,6 +420,27 @@ const formatJoining = async (joiningData, pool) => {
     ? JSON.parse(joiningData.qualification_mediums)
     : joiningData.qualification_mediums || [];
 
+  // Managed course/branch IDs live in the secondary `student_database` and are
+  // always exposed as strings to the client (matches `formatCourse` / `formatBranch`
+  // in paymentConfig.controller.js where `_id` is stringified). Legacy joinings
+  // may carry the FK columns (`course_id` / `branch_id`) as MySQL INTs, so we
+  // coerce both sources to strings here — otherwise `course._id === courseId`
+  // checks on the frontend silently fail (e.g. `"5" === 5` is false) and the
+  // managed branches dropdown never lights up for joinings that were saved
+  // before the managed-id columns were introduced.
+  const rawJoiningCourseId =
+    managedJoiningCourseId != null ? managedJoiningCourseId : joiningData.course_id;
+  const rawJoiningBranchId =
+    managedJoiningBranchId != null ? managedJoiningBranchId : joiningData.branch_id;
+  const normalizedJoiningCourseId =
+    rawJoiningCourseId != null && String(rawJoiningCourseId).trim() !== ''
+      ? String(rawJoiningCourseId).trim()
+      : null;
+  const normalizedJoiningBranchId =
+    rawJoiningBranchId != null && String(rawJoiningBranchId).trim() !== ''
+      ? String(rawJoiningBranchId).trim()
+      : null;
+
   return {
     _id: joiningData.id,
     id: joiningData.id,
@@ -427,8 +449,8 @@ const formatJoining = async (joiningData, pool) => {
     registrationFormData,
     status: joiningData.status,
     courseInfo: {
-      courseId: managedJoiningCourseId != null ? managedJoiningCourseId : joiningData.course_id || null,
-      branchId: managedJoiningBranchId != null ? managedJoiningBranchId : joiningData.branch_id || null,
+      courseId: normalizedJoiningCourseId,
+      branchId: normalizedJoiningBranchId,
       course: joiningData.course || '',
       branch: joiningData.branch || '',
       quota: joiningData.quota || '',
@@ -2265,6 +2287,26 @@ export const approveJoining = async (req, res) => {
     });
 
     await connection.commit();
+
+    // Fire-and-forget admission confirmation SMS to the student. Runs strictly
+    // after commit so an SMS gateway hiccup never rolls back the admission.
+    {
+      const studentPhone =
+        formattedJoining?.studentInfo?.phone || lead?.phone || '';
+      const studentName =
+        formattedJoining?.studentInfo?.name || lead?.name || 'Student';
+      if (studentPhone && admissionNumber) {
+        smsService
+          .sendAdmissionConfirmation(studentPhone, studentName, admissionNumber)
+          .catch((err) =>
+            console.error('Admission confirmation SMS dispatch failed:', err?.message || err)
+          );
+      } else {
+        console.warn(
+          `Admission confirmation SMS skipped — missing ${!studentPhone ? 'studentPhone' : 'admissionNumber'} for joining ${joining.id}.`
+        );
+      }
+    }
 
     // Record activity after commit so activity_logs lock contention
     // never delays or interferes with core approval/admission writes.

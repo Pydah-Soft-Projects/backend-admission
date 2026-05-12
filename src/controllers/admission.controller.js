@@ -5,6 +5,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
+import smsService from '../services/sms.service.js';
 import ExcelJS from 'exceljs';
 
 const ensureLeadId = (leadId) => {
@@ -121,8 +122,17 @@ export const formatAdmission = async (admissionData, pool) => {
     status: admissionData.status,
     admissionDate: admissionData.admission_date,
     courseInfo: {
-      courseId: admissionData.course_id,
-      branchId: admissionData.branch_id,
+      // Coerce to strings so frontend equality checks against `courseSettings`
+      // (where `course._id` is always stringified) keep working for legacy
+      // admissions saved with raw INT FK ids.
+      courseId:
+        admissionData.course_id != null && String(admissionData.course_id).trim() !== ''
+          ? String(admissionData.course_id).trim()
+          : null,
+      branchId:
+        admissionData.branch_id != null && String(admissionData.branch_id).trim() !== ''
+          ? String(admissionData.branch_id).trim()
+          : null,
       course: admissionData.course || '',
       branch: admissionData.branch || '',
       quota: admissionData.quota || '',
@@ -286,8 +296,14 @@ const formatAdmissionListItem = (row) => ({
   admissionNumber: row.admission_number,
   status: row.status,
   courseInfo: {
-    courseId: row.course_id,
-    branchId: row.branch_id,
+    courseId:
+      row.course_id != null && String(row.course_id).trim() !== ''
+        ? String(row.course_id).trim()
+        : null,
+    branchId:
+      row.branch_id != null && String(row.branch_id).trim() !== ''
+        ? String(row.branch_id).trim()
+        : null,
     course: row.course || '',
     branch: row.branch || '',
     quota: row.quota || '',
@@ -756,6 +772,115 @@ export const cancelAdmissionById = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to cancel admission',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * Send the DLT-approved admission confirmation SMS to the student on demand.
+ *
+ * Wired to "Send Admission SMS" on the admission detail page so staff can
+ * (re)trigger the message for any admission that already exists in the DB —
+ * including ones approved before the auto-send was wired into `approveJoining`.
+ *
+ * The send is fully synchronous so the UI can surface success / failure /
+ * skip reasons via toast. We never throw on gateway errors; instead we return
+ * a structured payload that the frontend can show to the user.
+ */
+export const sendAdmissionConfirmationSmsById = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    const pool = getPool();
+    const [rows] = await pool.execute(
+      `SELECT id, status, admission_number, student_name, student_phone, lead_id, lead_data
+       FROM admissions WHERE id = ?`,
+      [admissionId]
+    );
+
+    if (rows.length === 0) {
+      return errorResponse(res, 'Admission record not found', 404);
+    }
+
+    const admission = rows[0];
+    if (admission.status === ADMISSION_CANCELLED_STATUS) {
+      return errorResponse(
+        res,
+        'Cannot send confirmation SMS — admission is cancelled.',
+        400
+      );
+    }
+
+    const admissionNumber = String(admission.admission_number || '').trim();
+    if (!admissionNumber) {
+      return errorResponse(
+        res,
+        'Cannot send confirmation SMS — admission number is missing on this record.',
+        400
+      );
+    }
+
+    // Fall back to the lead row if studentInfo on the admission is sparse.
+    let studentName = String(admission.student_name || '').trim();
+    let studentPhone = String(admission.student_phone || '').trim();
+    if ((!studentName || !studentPhone) && admission.lead_id) {
+      const [leadRows] = await pool.execute(
+        'SELECT name, phone FROM leads WHERE id = ? LIMIT 1',
+        [admission.lead_id]
+      );
+      if (leadRows.length > 0) {
+        if (!studentName) studentName = String(leadRows[0].name || '').trim();
+        if (!studentPhone) studentPhone = String(leadRows[0].phone || '').trim();
+      }
+    }
+
+    if (!studentPhone) {
+      return errorResponse(
+        res,
+        'Cannot send confirmation SMS — student phone is not on file for this admission.',
+        400
+      );
+    }
+
+    const result = await smsService.sendAdmissionConfirmation(
+      studentPhone,
+      studentName || 'Student',
+      admissionNumber
+    );
+
+    if (!result?.success) {
+      const reasonMap = {
+        template_not_found:
+          'Confirmation SMS template is not registered. Run `npm run migrate:admission-confirmation-sms-template` and try again.',
+        invalid_mobile_number: 'Cannot send confirmation SMS — student phone is not a valid 10-digit number.',
+        missing_admission_number: 'Cannot send confirmation SMS — admission number is missing.',
+        gateway_rejected:
+          `SMS gateway rejected the request${result?.gatewayMessage ? `: ${result.gatewayMessage}` : ''}. ` +
+          'Verify that DLT template id is whitelisted on the BulkSMSApps account and that sender id matches.',
+      };
+      const message =
+        reasonMap[result?.error] ||
+        `Failed to send confirmation SMS${result?.error ? `: ${result.error}` : ''}.`;
+      return errorResponse(res, message, 502);
+    }
+
+    return successResponse(
+      res,
+      {
+        sentTo: studentPhone.replace(/\D/g, '').slice(-10),
+        admissionNumber,
+        gateway: result.data ?? null,
+      },
+      'Admission confirmation SMS sent.',
+      200
+    );
+  } catch (error) {
+    console.error('Error sending admission confirmation SMS:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to send admission confirmation SMS',
       error.statusCode || 500
     );
   }
@@ -1376,7 +1501,8 @@ export const exportAdmissions = async (req, res) => {
     const conditions = [];
     const params = [];
 
-    if (status && status !== 'all') {
+
+    if (status && status !== 'all') {
       conditions.push('a.status = ?');
       params.push(status);
     }

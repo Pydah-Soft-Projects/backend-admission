@@ -9,42 +9,71 @@ const isMissingTableError = (err) =>
   String(err?.sqlMessage || '').includes("doesn't exist");
 
 /**
- * Distinct program levels from `courses` (active): `level` column or metadata.* keys.
+ * Distinct program levels for the joining workspace dropdown.
+ *
+ * Merged (case-insensitive dedup) from:
+ *  1. `student_database.courses.level` (or `program_level` / `metadata.level`)
+ *  2. Top-level bucket keys of `student_database.settings.certificate_config`
  */
 export const listCourseProgramLevels = async (req, res) => {
   try {
     const pool = getSecondaryPool();
-    const cols = await getTableColumnSet(pool, 'courses');
-    if (cols.size === 0) {
-      return successResponse(res, []);
+    const levels = new Map(); // key: lower-cased label, value: original label
+
+    const addLevel = (raw) => {
+      if (raw == null) return;
+      const trimmed = String(raw).trim();
+      if (!trimmed) return;
+      const key = trimmed.toLowerCase();
+      if (!levels.has(key)) levels.set(key, trimmed);
+    };
+
+    // ── 1. Levels declared on courses ─────────────────────────────────────────
+    try {
+      const cols = await getTableColumnSet(pool, 'courses');
+      if (cols.size > 0) {
+        if (cols.has('level')) {
+          const [rows] = await pool.execute(
+            `SELECT DISTINCT level AS v FROM courses WHERE is_active = 1 AND level IS NOT NULL AND TRIM(level) <> '' ORDER BY level ASC`
+          );
+          rows.forEach((r) => addLevel(r.v));
+        } else if (cols.has('program_level')) {
+          const [rows] = await pool.execute(
+            `SELECT DISTINCT program_level AS v FROM courses WHERE is_active = 1 AND program_level IS NOT NULL AND TRIM(program_level) <> '' ORDER BY program_level ASC`
+          );
+          rows.forEach((r) => addLevel(r.v));
+        } else if (cols.has('metadata')) {
+          const [rows] = await pool.execute(
+            `SELECT metadata FROM courses WHERE is_active = 1`
+          );
+          rows.forEach((row) => addLevel(resolveCourseLevelFromRow(row)));
+        }
+      }
+    } catch (err) {
+      if (!isMissingTableError(err)) {
+        console.warn('[program-levels] courses lookup failed:', err.message || err);
+      }
     }
 
-    const levels = new Set();
-    if (cols.has('level')) {
-      const [rows] = await pool.execute(
-        `SELECT DISTINCT level AS v FROM courses WHERE is_active = 1 AND level IS NOT NULL AND TRIM(level) <> '' ORDER BY level ASC`
-      );
-      rows.forEach((r) => {
-        if (r.v != null && String(r.v).trim()) levels.add(String(r.v).trim());
-      });
-    } else if (cols.has('program_level')) {
-      const [rows] = await pool.execute(
-        `SELECT DISTINCT program_level AS v FROM courses WHERE is_active = 1 AND program_level IS NOT NULL AND TRIM(program_level) <> '' ORDER BY program_level ASC`
-      );
-      rows.forEach((r) => {
-        if (r.v != null && String(r.v).trim()) levels.add(String(r.v).trim());
-      });
-    } else if (cols.has('metadata')) {
-      const [rows] = await pool.execute(
-        `SELECT metadata FROM courses WHERE is_active = 1`
-      );
-      rows.forEach((row) => {
-        const lv = resolveCourseLevelFromRow(row);
-        if (lv) levels.add(lv);
-      });
+    // ── 2. Bucket keys from settings.certificate_config ───────────────────────
+    try {
+      const settingsCols = await getTableColumnSet(pool, 'settings');
+      if (settingsCols.size > 0) {
+        const certRoot = await loadCertificateConfigObject(pool, settingsCols);
+        if (certRoot && typeof certRoot === 'object') {
+          for (const key of Object.keys(certRoot)) {
+            if (Array.isArray(certRoot[key])) addLevel(key);
+          }
+        }
+      }
+    } catch (err) {
+      if (!isMissingTableError(err)) {
+        console.warn('[program-levels] settings.certificate_config lookup failed:', err.message || err);
+      }
     }
 
-    return successResponse(res, Array.from(levels).sort((a, b) => a.localeCompare(b)));
+    const result = Array.from(levels.values()).sort((a, b) => a.localeCompare(b));
+    return successResponse(res, result);
   } catch (error) {
     console.error('listCourseProgramLevels error:', error);
     return errorResponse(res, error.message || 'Failed to load program levels', 500);
@@ -102,34 +131,37 @@ function parseCertificateConfigRoot(raw) {
 }
 
 /**
- * Load `certificate_config` from student_database.settings (key/value style row).
+ * Load `certificate_config` from `student_database.settings`.
+ *
+ * The table is maintained outside this app, so we try the few sensible
+ * `(key, value)` column conventions that appear in the wild. The row we want
+ * is the one whose key equals `'certificate_config'`.
  */
 async function loadCertificateConfigObject(pool, colSet) {
-  const keyCol = pickFirstExistingColumn(colSet, [
-    'setting_key',
-    'config_key',
-    'key',
-    'name',
-    'slug',
-    'code',
-  ]);
-  const valueCol = pickFirstExistingColumn(colSet, [
-    'value',
-    'setting_value',
-    'config_value',
-    'config_data',
-    'data',
-    'content',
-    'json',
-  ]);
-  if (!keyCol || !valueCol) {
-    return null;
-  }
-  const [rows] = await pool.execute(
-    `SELECT \`${valueCol}\` AS cfg_json FROM \`settings\` WHERE LOWER(TRIM(CAST(\`${keyCol}\` AS CHAR))) = 'certificate_config' LIMIT 1`
+  const keyCols = ['setting_key', 'config_key', 'key', 'name'].filter((c) => colSet.has(c));
+  const valueCols = ['value', 'setting_value', 'config_value', 'data'].filter((c) =>
+    colSet.has(c)
   );
-  if (!rows?.length) return null;
-  return parseCertificateConfigRoot(rows[0].cfg_json);
+
+  for (const keyCol of keyCols) {
+    for (const valueCol of valueCols) {
+      if (keyCol === valueCol) continue;
+      try {
+        const [rows] = await pool.execute(
+          `SELECT \`${valueCol}\` AS cfg_json FROM \`settings\` WHERE LOWER(TRIM(CAST(\`${keyCol}\` AS CHAR))) = 'certificate_config' LIMIT 1`
+        );
+        if (rows?.length) {
+          const parsed = parseCertificateConfigRoot(rows[0].cfg_json);
+          if (parsed) return parsed;
+        }
+      } catch (err) {
+        if (err?.code === 'ER_BAD_FIELD_ERROR') continue;
+        throw err;
+      }
+    }
+  }
+
+  return null;
 }
 
 /**

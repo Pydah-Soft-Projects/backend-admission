@@ -13,22 +13,17 @@ import { protect } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
-// Public routes (required for public lead form)
+// Order matters: every static path must be registered before `/:courseId`,
+// otherwise it would swallow `/program-levels`, `/certificate-guidance`, etc.
+
 router.get('/colleges', listColleges);
 router.get('/branches', listBranches);
 router.get('/', listCourses);
+router.get('/program-levels', protect, listCourseProgramLevels);
+router.get('/certificate-guidance', protect, getCertificateGuidanceForLevel);
 router.get('/:courseId', getCourse);
 router.get('/:courseId/branches', listBranches);
 
-// All other routes require authentication
-router.use(protect);
-
-// Must be registered after public routes but captured correctly
-router.get('/program-levels', listCourseProgramLevels);
-router.get('/certificate-guidance', getCertificateGuidanceForLevel);
-
-// Note: Create, Update, and Delete operations are disabled
-// Courses and branches are managed in the external secondary database system
 export default router;
 
 
