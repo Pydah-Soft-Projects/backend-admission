@@ -933,6 +933,21 @@ export const createLead = async (req, res) => {
     const pool = getPool();
     const leadId = uuidv4();
     const userId = req.user.id || req.user._id;
+    const isPro = req.user.roleName === 'PRO';
+    const isStudentCounselor = req.user.roleName === 'Student Counselor';
+
+    // Auto-assignment logic: if a PRO creates the lead, assign it to them.
+    // If a Student Counselor creates it, assign it to them as well.
+    const assignedTo = isStudentCounselor ? userId : null;
+    const assignedAt = isStudentCounselor ? new Date() : null;
+    const assignedBy = isStudentCounselor ? userId : null;
+
+    const assignedToPro = isPro ? userId : null;
+    const proAssignedAt = isPro ? new Date() : null;
+    const proAssignedBy = isPro ? userId : null;
+
+    // Resolved lead status: if assigned to anyone, it becomes "Assigned"
+    const finalLeadStatus = (assignedTo || assignedToPro) ? 'Assigned' : 'New';
 
     // Insert lead
     await pool.execute(
@@ -940,8 +955,11 @@ export const createLead = async (req, res) => {
         id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
         hall_ticket_number, village, address, course_interested, district, mandal, state,
         gender, \`rank\`, inter_college, quota, application_status,
-        dynamic_fields, lead_status, source, student_group, uploaded_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        dynamic_fields, lead_status, source, student_group, uploaded_by, 
+        assigned_to, assigned_at, assigned_by,
+        assigned_to_pro, pro_assigned_at, pro_assigned_by,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         leadId,
         enquiryNumber,
@@ -964,10 +982,16 @@ export const createLead = async (req, res) => {
         quota || 'Not Applicable',
         applicationStatus || 'Not Provided',
         JSON.stringify(dynamicFields || {}),
-        'New',
+        finalLeadStatus,
         source || 'Manual Entry',
         finalStudentGroup,
         userId,
+        assignedTo,
+        assignedAt,
+        assignedBy,
+        assignedToPro,
+        proAssignedAt,
+        proAssignedBy,
       ]
     );
 

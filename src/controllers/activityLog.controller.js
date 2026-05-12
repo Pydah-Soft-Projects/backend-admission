@@ -30,7 +30,7 @@ const formatActivityLog = (logData, performedByUser = null) => {
 export const addActivity = async (req, res) => {
   try {
     const { leadId } = req.params;
-    const { comment, newStatus, newQuota, type = 'comment' } = req.body;
+    const { comment, newStatus, newQuota, statusChannel, type = 'comment' } = req.body;
     const pool = getPool();
     const userId = req.user.id || req.user._id;
 
