@@ -174,6 +174,7 @@ const updatePaymentSummary = async ({
 // Helper function to format payment transaction
 const formatPaymentTransaction = (transaction, collectedByUser = null, course = null, branch = null, joining = null, admission = null) => {
   if (!transaction) return null;
+  const parsedMeta = typeof transaction.meta === 'string' ? JSON.parse(transaction.meta) : transaction.meta || {};
   return {
     _id: transaction.id,
     id: transaction.id,
@@ -192,7 +193,15 @@ const formatPaymentTransaction = (transaction, collectedByUser = null, course = 
     referenceId: transaction.reference_id,
     notes: transaction.notes,
     isAdditionalFee: transaction.is_additional_fee === 1 || transaction.is_additional_fee === true,
-    meta: typeof transaction.meta === 'string' ? JSON.parse(transaction.meta) : transaction.meta || {},
+    // Fee-head tagging (Fee Management DB). Stored inside meta JSON for backward compatibility
+    // with the existing payment_transactions schema — surfaced at top level so the UI can render
+    // "paid against X" badges without parsing meta everywhere.
+    feeHead: parsedMeta.feeHead || null,
+    feeHeadName: parsedMeta.feeHeadName || '',
+    feeHeadCode: parsedMeta.feeHeadCode || '',
+    feeStructureBatch: parsedMeta.feeStructureBatch || '',
+    feeStructureYear: parsedMeta.feeStructureYear || null,
+    meta: parsedMeta,
     processedAt: transaction.processed_at,
     verifiedAt: transaction.verified_at,
     createdAt: transaction.created_at,
@@ -365,6 +374,12 @@ export const recordCashPayment = async (req, res) => {
       currency = 'INR',
       notes,
       isAdditionalFee = false,
+      // Optional fee-head tagging from Fee Management DB
+      feeHead = null,
+      feeHeadName = '',
+      feeHeadCode = '',
+      feeStructureBatch = '',
+      feeStructureYear = null,
     } = req.body;
 
     const pool = getPool();
@@ -477,6 +492,11 @@ export const recordCashPayment = async (req, res) => {
         JSON.stringify({
           recordedBy: req.user?.id || null,
           isAdditionalFee,
+          ...(feeHead ? { feeHead: String(feeHead) } : {}),
+          ...(feeHeadName ? { feeHeadName: String(feeHeadName) } : {}),
+          ...(feeHeadCode ? { feeHeadCode: String(feeHeadCode) } : {}),
+          ...(feeStructureBatch ? { feeStructureBatch: String(feeStructureBatch) } : {}),
+          ...(feeStructureYear != null ? { feeStructureYear } : {}),
         }),
       ]
     );
@@ -532,6 +552,12 @@ export const createCashfreeOrder = async (req, res) => {
       customer = {},
       notes,
       isAdditionalFee = false,
+      // Optional fee-head tagging from Fee Management DB
+      feeHead = null,
+      feeHeadName = '',
+      feeHeadCode = '',
+      feeStructureBatch = '',
+      feeStructureYear = null,
     } = req.body;
 
     const pool = getPool();
@@ -722,6 +748,11 @@ export const createCashfreeOrder = async (req, res) => {
         JSON.stringify({
           cashfree: orderResponse,
           isAdditionalFee,
+          ...(feeHead ? { feeHead: String(feeHead) } : {}),
+          ...(feeHeadName ? { feeHeadName: String(feeHeadName) } : {}),
+          ...(feeHeadCode ? { feeHeadCode: String(feeHeadCode) } : {}),
+          ...(feeStructureBatch ? { feeStructureBatch: String(feeStructureBatch) } : {}),
+          ...(feeStructureYear != null ? { feeStructureYear } : {}),
         }),
       ]
     );
