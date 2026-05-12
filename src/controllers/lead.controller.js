@@ -2139,7 +2139,7 @@ export const getFilterOptions = async (req, res) => {
         params
       ),
       pool.execute(
-        `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} ORDER BY lead_status ASC`,
+        `SELECT DISTINCT lead_status FROM leads ${whereClause(leadStatusCondition)} AND LOWER(lead_status) NOT IN ('eamcet applied', 'polycet applied') ORDER BY lead_status ASC`,
         params
       ),
       pool.execute(

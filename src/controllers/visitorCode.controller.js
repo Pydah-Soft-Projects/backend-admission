@@ -208,10 +208,33 @@ export const consumeVisitorCode = async (req, res) => {
         [leadId]
       );
       const row = lr[0] || {};
-      const nextLead = resolveLeadStatus('Visited', row.call_status ?? null, 'Visited');
+      const nextLead = resolveLeadStatus(row.lead_status || 'New', row.call_status ?? null, 'Visited');
       await connection.execute(
-        'UPDATE leads SET visit_status = ?, lead_status = ? WHERE id = ?',
+        'UPDATE leads SET visit_status = ?, lead_status = ?, updated_at = NOW() WHERE id = ?',
         ['Visited', nextLead, leadId]
+      );
+
+      // 3. Create activity log for the visit
+      const activityLogId = uuidv4();
+      const metadata = {
+        statusChannel: 'visit_status',
+        visitStatus: 'Visited',
+        visitorCodeUsed: code
+      };
+      await connection.execute(
+        `INSERT INTO activity_logs (
+          id, lead_id, type, old_status, new_status, comment, performed_by, metadata, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          activityLogId,
+          leadId,
+          'status_change',
+          row.lead_status || 'New',
+          nextLead,
+          'Visitor verified at campus (Code used)',
+          req.user.id,
+          JSON.stringify(metadata)
+        ]
       );
 
       await connection.commit();
@@ -263,8 +286,14 @@ export const getRecentVisitors = async (req, res) => {
           l.updated_at as created_at,
           l.name as lead_name,
           l.enquiry_number as lead_enquiry_number,
-          'Manual Update' as sender_name
+          COALESCE(u.name, 'Manual Update') as sender_name
         FROM leads l
+        LEFT JOIN activity_logs al ON al.id = (
+          SELECT id FROM activity_logs 
+          WHERE lead_id = l.id AND type = 'status_change' AND new_status = 'Visited' 
+          ORDER BY created_at DESC LIMIT 1
+        )
+        LEFT JOIN users u ON al.performed_by = u.id
         WHERE LOWER(l.lead_status) = 'visited'
         AND l.id NOT IN (SELECT DISTINCT lead_id FROM visitor_codes WHERE status = 'used')
       )

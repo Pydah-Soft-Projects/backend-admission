@@ -70,57 +70,53 @@ export const addActivity = async (req, res) => {
     const nextVisitBase = lead.visit_status ?? null;
 
     if (newStatus) {
-      if (isSuperAdmin || isAdmin) {
-        const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
-        if (resolved !== lead.lead_status) {
+      // Determine which channel to update. 
+      // Defaults: PRO -> visit_status, Student Counselor -> call_status, Others -> lead_status.
+      // Can be overridden by statusChannel in request body.
+      const requestedChannel = statusChannel || (isPro ? 'visit_status' : isStudentCounselor ? 'call_status' : 'lead_status');
+      
+      if (isSuperAdmin || isAdmin || (isStudentCounselor && lead.assigned_to === userId) || (isPro && lead.assigned_to_pro === userId) || (isAssigned && !isPro && !isStudentCounselor)) {
+        
+        if (requestedChannel === 'visit_status') {
+          const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
           oldStatus = lead.lead_status;
           newStatusValue = resolved;
           activityType = 'status_change';
-          metadata.statusChannel = 'lead_status';
+          metadata.statusChannel = 'visit_status';
+          metadata.visitStatus = newStatus;
+          
+          updateFields.push('visit_status = ?');
+          updateValues.push(newStatus);
+          
           updateFields.push('lead_status = ?');
           updateValues.push(resolved);
           leadModified = true;
-        }
-      } else if (isStudentCounselor && lead.assigned_to === userId) {
-        // ALWAYS resolve and update if a status is provided, to ensure lead_status is in sync
-        const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
-        oldStatus = lead.lead_status;
-        newStatusValue = resolved;
-        activityType = 'status_change';
-        metadata.statusChannel = 'call_status';
-        metadata.callStatus = newStatus;
-        
-        updateFields.push('call_status = ?');
-        updateValues.push(newStatus);
-        
-        // Force lead_status update to match the resolved outcome
-        updateFields.push('lead_status = ?');
-        updateValues.push(resolved);
-        leadModified = true;
-      } else if (isPro && lead.assigned_to_pro === userId) {
-        const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
-        oldStatus = lead.lead_status;
-        newStatusValue = resolved;
-        activityType = 'status_change';
-        metadata.statusChannel = 'visit_status';
-        metadata.visitStatus = newStatus;
-        
-        updateFields.push('visit_status = ?');
-        updateValues.push(newStatus);
-        
-        updateFields.push('lead_status = ?');
-        updateValues.push(resolved);
-        leadModified = true;
-      } else if (isAssigned && !isPro && !isStudentCounselor) {
-        const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
-        if (resolved !== lead.lead_status) {
+        } else if (requestedChannel === 'call_status') {
+          const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
           oldStatus = lead.lead_status;
           newStatusValue = resolved;
           activityType = 'status_change';
-          metadata.statusChannel = 'lead_status';
+          metadata.statusChannel = 'call_status';
+          metadata.callStatus = newStatus;
+          
+          updateFields.push('call_status = ?');
+          updateValues.push(newStatus);
+          
           updateFields.push('lead_status = ?');
           updateValues.push(resolved);
           leadModified = true;
+        } else {
+          // Default to lead_status update
+          const resolved = resolveLeadStatus(newStatus, nextCallBase, nextVisitBase);
+          if (resolved !== lead.lead_status) {
+            oldStatus = lead.lead_status;
+            newStatusValue = resolved;
+            activityType = 'status_change';
+            metadata.statusChannel = 'lead_status';
+            updateFields.push('lead_status = ?');
+            updateValues.push(resolved);
+            leadModified = true;
+          }
         }
       }
     }

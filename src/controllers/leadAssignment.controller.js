@@ -3596,9 +3596,13 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
           FROM activity_logs a
           JOIN leads l ON l.id = a.lead_id
           WHERE a.type = 'status_change' 
-            AND (a.target_user_id IN (${cohortUserIdPlaceholders}) OR a.performed_by IN (${cohortUserIdPlaceholders}))
+            AND (
+              a.target_user_id IN (${cohortUserIdPlaceholders}) 
+              OR a.performed_by IN (${cohortUserIdPlaceholders})
+              OR (l.assigned_to_pro IN (${cohortUserIdPlaceholders}) AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status')
+            )
             ${assignmentDateWhere}`,
-          [...cohortScopeUserIds, ...cohortScopeUserIds, ...assignmentDateParams]
+          [...cohortScopeUserIds, ...cohortScopeUserIds, ...cohortScopeUserIds, ...assignmentDateParams]
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
