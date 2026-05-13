@@ -2257,15 +2257,34 @@ function buildStudentGroupLeadClause(tableAlias, studentGroupRaw) {
   return { clause: ` AND ${tableAlias}.student_group = ?`, params: [sg] };
 }
 
-/** Optional `leads` scope for communications roster: student group and/or exact district. */
-function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw) {
+/** Optional `leads` scope for communications roster: student group, exact district, and status filters. */
+function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus) {
   const { clause: sgClause, params: sgParams } = buildStudentGroupLeadClause(tableAlias, studentGroupRaw);
+  let clause = sgClause;
+  let params = [...sgParams];
+
   const d = districtRaw != null ? String(districtRaw).trim() : '';
-  if (!d) return { clause: sgClause, params: sgParams };
-  return {
-    clause: `${sgClause} AND ${tableAlias}.district = ?`,
-    params: [...sgParams, d],
-  };
+  if (d) {
+    clause += ` AND ${tableAlias}.district = ?`;
+    params.push(d);
+  }
+
+  if (leadStatus && String(leadStatus).trim()) {
+    clause += ` AND ${tableAlias}.lead_status = ?`;
+    params.push(String(leadStatus).trim());
+  }
+
+  if (callStatus && String(callStatus).trim()) {
+    clause += ` AND ${tableAlias}.call_status = ?`;
+    params.push(String(callStatus).trim());
+  }
+
+  if (visitStatus && String(visitStatus).trim()) {
+    clause += ` AND ${tableAlias}.visit_status = ?`;
+    params.push(String(visitStatus).trim());
+  }
+
+  return { clause, params };
 }
 
 /**
@@ -2290,13 +2309,17 @@ async function fetchUserIdsWithPortfolioStudentGroup(pool, userIds, studentGroup
   return new Set((rows || []).map((r) => r.uid).filter(Boolean));
 }
 
-/** User ids that have at least one current portfolio lead matching optional student group + district. */
-async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, districtRaw) {
+/** User ids that have at least one current portfolio lead matching optional student group, district, and status filters. */
+async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus) {
   const d = districtRaw != null ? String(districtRaw).trim() : '';
   const sg = studentGroupRaw != null ? String(studentGroupRaw).trim() : '';
-  if (!d && !sg) return new Set(userIds);
+  const ls = leadStatus != null ? String(leadStatus).trim() : '';
+  const cs = callStatus != null ? String(callStatus).trim() : '';
+  const vs = visitStatus != null ? String(visitStatus).trim() : '';
+
+  if (!d && !sg && !ls && !cs && !vs) return new Set(userIds);
   if (!userIds.length) return new Set();
-  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus);
   const ph = userIds.map(() => '?').join(',');
   const [rows] = await pool.execute(
     `SELECT DISTINCT x.uid AS u_id FROM (
@@ -2316,11 +2339,11 @@ async function fetchUserIdsWithRosterScopeMatch(pool, userIds, studentGroupRaw, 
  * Distinct **current portfolio** leads per user (`assigned_to` / `assigned_to_pro`), optional `studentGroup` / `district`.
  * Aligns with Super Admin dashboard “total assigned” (no lead_status window).
  */
-async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, studentGroupRaw, districtRaw) {
+async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus) {
   const map = new Map();
   if (!userIds.length) return map;
   const ph = userIds.map(() => '?').join(',');
-  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus);
   const [rows] = await pool.execute(
     `SELECT user_id, COUNT(DISTINCT lead_id) AS cnt FROM (
        SELECT l.assigned_to AS user_id, l.id AS lead_id
@@ -2344,11 +2367,11 @@ async function fetchActiveLeadCountsForCommunicationsRoster(pool, userIds, stude
 }
 
 /** Distinct non-empty `student_group` values on current portfolio leads per user (same scope as counts). */
-async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGroupRaw, districtRaw) {
+async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus) {
   const map = new Map();
   if (!userIds.length) return map;
   const ph = userIds.map(() => '?').join(',');
-  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw);
+  const { clause, params: scopeParams } = buildRosterLeadScopeFragment('l', studentGroupRaw, districtRaw, leadStatus, callStatus, visitStatus);
   const [rows] = await pool.execute(
     `SELECT x.user_id, GROUP_CONCAT(DISTINCT x.sg ORDER BY x.sg SEPARATOR ', ') AS cats
      FROM (
@@ -2402,6 +2425,9 @@ export const getUserAnalytics = async (req, res) => {
       studentGroup: studentGroupQuery,
       /** Communications roster: only users with ≥1 assigned lead in this `leads.district` (exact match). */
       district: rosterDistrictQuery,
+      leadStatus: leadStatusQuery,
+      callStatus: callStatusQuery,
+      visitStatus: visitStatusQuery,
     } = req.query;
 
     // Allow Super Admin, Sub Super Admin, and Managers
@@ -2470,6 +2496,9 @@ export const getUserAnalytics = async (req, res) => {
       studentGroup: studentGroupQuery != null && String(studentGroupQuery).trim() !== '' ? String(studentGroupQuery).trim() : null,
       rosterDistrict:
         rosterDistrictQuery != null && String(rosterDistrictQuery).trim() !== '' ? String(rosterDistrictQuery).trim() : null,
+      leadStatus: leadStatusQuery || null,
+      callStatus: callStatusQuery || null,
+      visitStatus: visitStatusQuery || null,
     });
 
     if (!isRosterOnly && String(bypassCache || '').toLowerCase() !== 'true') {
@@ -2507,6 +2536,18 @@ export const getUserAnalytics = async (req, res) => {
     if (portfolioStudentGroupNorm) {
       leadFiltersConditions.push('l.student_group = ?');
       leadFiltersParams.push(portfolioStudentGroupNorm);
+    }
+    if (leadStatusQuery) {
+      leadFiltersConditions.push('l.lead_status = ?');
+      leadFiltersParams.push(leadStatusQuery);
+    }
+    if (callStatusQuery) {
+      leadFiltersConditions.push('l.call_status = ?');
+      leadFiltersParams.push(callStatusQuery);
+    }
+    if (visitStatusQuery) {
+      leadFiltersConditions.push('l.visit_status = ?');
+      leadFiltersParams.push(visitStatusQuery);
     }
     const leadFiltersSql = leadFiltersConditions.length > 0 ? ` AND ${leadFiltersConditions.join(' AND ')}` : '';
 
@@ -2907,12 +2948,15 @@ export const getUserAnalytics = async (req, res) => {
           : null;
 
       let rosterUsers = users;
-      if (rosterDistrictTrim || studentGroupRoster) {
+      if (rosterDistrictTrim || studentGroupRoster || leadStatusQuery || callStatusQuery || visitStatusQuery) {
         const allowIds = await fetchUserIdsWithRosterScopeMatch(
           pool,
           users.map((u) => u.id).filter((id) => id != null),
           studentGroupRoster,
-          rosterDistrictTrim
+          rosterDistrictTrim,
+          leadStatusQuery,
+          callStatusQuery,
+          visitStatusQuery
         );
         rosterUsers = users.filter((u) => allowIds.has(u.id));
       }
@@ -2927,13 +2971,19 @@ export const getUserAnalytics = async (req, res) => {
           pool,
           rosterIds,
           studentGroupRoster,
-          rosterDistrictTrim
+          rosterDistrictTrim,
+          leadStatusQuery,
+          callStatusQuery,
+          visitStatusQuery
         ),
         fetchCommunicationsRosterStudentGroups(
           pool,
           rosterIds,
           studentGroupRoster,
-          rosterDistrictTrim
+          rosterDistrictTrim,
+          leadStatusQuery,
+          callStatusQuery,
+          visitStatusQuery
         ),
       ]);
       const sorted = [...rosterUsers].sort((a, b) =>
