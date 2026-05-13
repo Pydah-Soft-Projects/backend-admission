@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import connectSQLDB from './config-sql/database.js';
 import connectSecondaryDB from './config-sql/database-secondary.js';
 import { warmupHrmsMongo } from './config-mongo/hrms.js';
+import { warmupFeeManagementMongo } from './config-mongo/feeManagement.js';
 import { initLeadReclaimer } from './services/leadReclaimer.service.js';
 import { resumeRunningSmsBulkJobsOnStartup } from './services/smsBulkJob.service.js';
 import authRoutes from './routes/auth.routes.js';
@@ -27,6 +28,7 @@ import masterDataRoutes from './routes/masterData.routes.js';
 import locationsRoutes from './routes/locations.routes.js';
 import visitorRoutes from './routes/visitor.routes.js';
 import leadGroupUpdateRoutes from './routes/leadGroupUpdate.routes.js';
+import feeStructureRoutes from './routes/feeStructure.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -62,6 +64,11 @@ if (process.env.DB_SECONDARY_HOST && process.env.DB_SECONDARY_NAME) {
 // HRMS Mongo: warm connection early so first user-analytics / HRMS hydrate is not paying cold-connect latency
 warmupHrmsMongo().catch((err) => {
   console.error('HRMS MongoDB warmup failed (non-fatal):', err?.message || err);
+});
+
+// Fee-Management Mongo: warm connection so first /api/fee-structures call is fast
+warmupFeeManagementMongo().catch((err) => {
+  console.error('Fee-Management MongoDB warmup failed (non-fatal):', err?.message || err);
 });
 
 const app = express();
@@ -146,6 +153,7 @@ app.use('/api/registration-form', registrationFormRoutes);
 app.use('/api/master-data', masterDataRoutes);
 app.use('/api/locations', locationsRoutes);
 app.use('/api/visitors', visitorRoutes);
+app.use('/api/fee-structures', feeStructureRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check
