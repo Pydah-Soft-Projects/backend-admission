@@ -5,11 +5,42 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
+import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
+
+/** Per–fee-structure overrides for this joining (stored in lead_data._joiningStudentFeeDetails). */
+const sanitizeStudentFeeDetailsForDb = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const batch =
+    raw.batch != null && String(raw.batch).trim() !== ''
+      ? String(raw.batch).trim().slice(0, 32)
+      : undefined;
+  const linesIn = Array.isArray(raw.lines) ? raw.lines : [];
+  const lines = linesIn
+    .map((line) => {
+      const structureId = String(line?.structureId ?? '').trim();
+      if (!structureId) return null;
+      let amount = null;
+      if (line?.amount !== undefined && line?.amount !== null && line?.amount !== '') {
+        const n = Number(line.amount);
+        if (Number.isFinite(n) && n >= 0) amount = n;
+      }
+      const remarks = typeof line?.remarks === 'string' ? line.remarks.trim().slice(0, 2000) : '';
+      return { structureId, amount, remarks };
+    })
+    .filter(Boolean);
+  if (lines.length === 0 && !batch) return null;
+  return { ...(batch ? { batch } : {}), lines };
+};
+
+const formatStudentFeeDetailsForClient = (raw) => {
+  const s = sanitizeStudentFeeDetailsForDb(raw);
+  return s || { lines: [] };
+};
 
 /** Managed course/branch IDs may come from the student DB; FK columns on joinings/admissions point at primary `courses` / `branches`. */
 const resolvePrimaryCourseBranchFkIds = async (pool, courseId, branchId) => {
@@ -373,6 +404,7 @@ const formatJoining = async (joiningData, pool) => {
     : joiningData.lead_data || {};
 
   let registrationFormData = {};
+  let studentFeeDetails = { lines: [] };
   let leadData = leadDataRaw;
   let storedProgramLevel = '';
   let managedJoiningCourseId = null;
@@ -395,19 +427,23 @@ const formatJoining = async (joiningData, pool) => {
       };
       const {
         _joiningRegistrationExtras,
+        _joiningStudentFeeDetails,
         _joiningProgramLevel,
         _joiningManagedCourseId: _jmc,
         _joiningManagedBranchId: _jmb,
         ...rest
       } = leadDataRaw;
+      studentFeeDetails = formatStudentFeeDetailsForClient(_joiningStudentFeeDetails);
       leadData = rest;
     } else {
       const {
+        _joiningStudentFeeDetails,
         _joiningProgramLevel,
         _joiningManagedCourseId: _jmc,
         _joiningManagedBranchId: _jmb,
         ...rest
       } = leadDataRaw;
+      studentFeeDetails = formatStudentFeeDetailsForClient(_joiningStudentFeeDetails);
       leadData = rest;
     }
   }
@@ -447,6 +483,7 @@ const formatJoining = async (joiningData, pool) => {
     leadId: joiningData.lead_id,
     leadData,
     registrationFormData,
+    studentFeeDetails,
     status: joiningData.status,
     courseInfo: {
       courseId: normalizedJoiningCourseId,
@@ -1228,6 +1265,10 @@ const normalizeJoiningPayload = (payload) => {
     safePayload.registrationFormData = cleaned;
   }
 
+  if (Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails')) {
+    safePayload.studentFeeDetails = sanitizeStudentFeeDetailsForDb(payload.studentFeeDetails);
+  }
+
   return safePayload;
 };
 
@@ -1577,6 +1618,7 @@ export const saveJoiningDraft = async (req, res) => {
 
       // Update lead data snapshot; preserve registration extras from form builder (unmapped fields)
       let preservedRegistrationExtras = {};
+      let preservedStudentFeeDetails = null;
       try {
         const [existingJoiningRows] = await pool.execute(
           'SELECT lead_data FROM joinings WHERE id = ?',
@@ -1595,6 +1637,14 @@ export const saveJoiningDraft = async (req, res) => {
           ) {
             preservedRegistrationExtras = { ...parsed._joiningRegistrationExtras };
           }
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            parsed._joiningStudentFeeDetails &&
+            typeof parsed._joiningStudentFeeDetails === 'object'
+          ) {
+            preservedStudentFeeDetails = { ...parsed._joiningStudentFeeDetails };
+          }
         }
       } catch {
         /* ignore parse errors */
@@ -1612,6 +1662,14 @@ export const saveJoiningDraft = async (req, res) => {
           : {}),
       };
 
+      const nextStudentFees = Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails')
+        ? sanitizeStudentFeeDetailsForDb(payload.studentFeeDetails)
+        : sanitizeStudentFeeDetailsForDb(preservedStudentFeeDetails);
+      const studentFeeSidecar =
+        nextStudentFees && (nextStudentFees.lines?.length > 0 || nextStudentFees.batch)
+          ? { _joiningStudentFeeDetails: nextStudentFees }
+          : {};
+
       const trimmedProgramLevel =
         courseInfo.programLevel != null && String(courseInfo.programLevel).trim()
           ? String(courseInfo.programLevel).trim()
@@ -1622,6 +1680,7 @@ export const saveJoiningDraft = async (req, res) => {
         ...(Object.keys(mergedRegistrationExtras).length > 0
           ? { _joiningRegistrationExtras: mergedRegistrationExtras }
           : {}),
+        ...studentFeeSidecar,
       };
     } else if (!lead && joiningIdToUse) {
       let base = {};
@@ -1647,7 +1706,23 @@ export const saveJoiningDraft = async (req, res) => {
           ? payload.registrationFormData
           : {}),
       };
-      const { _joiningRegistrationExtras: _strip, ...baseWithout } = base;
+      const prevSfd =
+        base._joiningStudentFeeDetails && typeof base._joiningStudentFeeDetails === 'object'
+          ? base._joiningStudentFeeDetails
+          : null;
+      const nextStudentFees = Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails')
+        ? sanitizeStudentFeeDetailsForDb(payload.studentFeeDetails)
+        : sanitizeStudentFeeDetailsForDb(prevSfd);
+      const studentFeeSidecar =
+        nextStudentFees && (nextStudentFees.lines?.length > 0 || nextStudentFees.batch)
+          ? { _joiningStudentFeeDetails: nextStudentFees }
+          : {};
+
+      const {
+        _joiningRegistrationExtras: _strip,
+        _joiningStudentFeeDetails: _stripSfd,
+        ...baseWithout
+      } = base;
       const trimmedProgramLevelNoLead =
         courseInfo.programLevel != null && String(courseInfo.programLevel).trim()
           ? String(courseInfo.programLevel).trim()
@@ -1658,6 +1733,7 @@ export const saveJoiningDraft = async (req, res) => {
         ...(Object.keys(mergedRegistrationExtras).length > 0
           ? { _joiningRegistrationExtras: mergedRegistrationExtras }
           : {}),
+        ...studentFeeSidecar,
       };
     }
 
@@ -1792,6 +1868,23 @@ export const saveJoiningDraft = async (req, res) => {
 
     // Save related tables
     await saveJoiningRelatedTables(pool, joiningIdToUse, finalPayload);
+
+    const resolvedLeadIdForFeeMirror =
+      (lead && lead.id) ||
+      (finalPayload.leadId != null && String(finalPayload.leadId).trim() !== ''
+        ? String(finalPayload.leadId).trim()
+        : null);
+    const rawStudentFeeFromLeadData =
+      finalPayload.leadData &&
+      typeof finalPayload.leadData === 'object' &&
+      Object.prototype.hasOwnProperty.call(finalPayload.leadData, '_joiningStudentFeeDetails')
+        ? finalPayload.leadData._joiningStudentFeeDetails
+        : null;
+    await syncJoiningStudentFeeDetailsToFeeMongo({
+      joiningId: joiningIdToUse,
+      leadId: resolvedLeadIdForFeeMirror,
+      studentFeeDetails: sanitizeStudentFeeDetailsForDb(rawStudentFeeFromLeadData),
+    });
 
     // Record activity if lead exists
     if (lead) {
@@ -2083,7 +2176,7 @@ export const approveJoining = async (req, res) => {
     
     // Preserve registration extras and other unmapped fields
     if (joiningLeadData && typeof joiningLeadData === 'object') {
-      ['_joiningRegistrationExtras', '_joiningProgramLevel', '_joiningManagedCourseId', '_joiningManagedBranchId'].forEach(key => {
+      ['_joiningRegistrationExtras', '_joiningStudentFeeDetails', '_joiningProgramLevel', '_joiningManagedCourseId', '_joiningManagedBranchId'].forEach(key => {
         if (joiningLeadData[key] != null) {
           leadDataSnapshot[key] = joiningLeadData[key];
         }
