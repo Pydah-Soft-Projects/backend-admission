@@ -288,6 +288,8 @@ CREATE TABLE IF NOT EXISTS joinings (
     status VARCHAR(50) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'pending_approval', 'approved')),
     course_id CHAR(36) NULL,
     branch_id CHAR(36) NULL,
+    managed_course_id VARCHAR(64) NULL COMMENT 'Secondary student DB course id',
+    managed_branch_id VARCHAR(64) NULL COMMENT 'Secondary student DB branch id',
     course VARCHAR(255) DEFAULT '',
     branch VARCHAR(255) DEFAULT '',
     quota VARCHAR(100) DEFAULT '',
@@ -358,6 +360,7 @@ CREATE TABLE IF NOT EXISTS joinings (
     INDEX idx_joinings_status (status),
     INDEX idx_joinings_course_id (course_id),
     INDEX idx_joinings_branch_id (branch_id),
+    INDEX idx_joinings_managed_course_id (managed_course_id),
     INDEX idx_joinings_status_updated_at (status, updated_at DESC),
     INDEX idx_joinings_submitted_at (submitted_at DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -445,6 +448,8 @@ CREATE TABLE IF NOT EXISTS admissions (
     admission_date DATETIME DEFAULT CURRENT_TIMESTAMP,
     course_id CHAR(36) NULL,
     branch_id CHAR(36) NULL,
+    managed_course_id VARCHAR(64) NULL COMMENT 'Secondary student DB course id',
+    managed_branch_id VARCHAR(64) NULL COMMENT 'Secondary student DB branch id',
     course VARCHAR(255) DEFAULT '',
     branch VARCHAR(255) DEFAULT '',
     quota VARCHAR(100) DEFAULT '',
@@ -511,6 +516,7 @@ CREATE TABLE IF NOT EXISTS admissions (
     INDEX idx_admissions_status (status),
     INDEX idx_admissions_course_id (course_id),
     INDEX idx_admissions_branch_id (branch_id),
+    INDEX idx_admissions_managed_course_id (managed_course_id),
     INDEX idx_admissions_lead_admission_number (lead_id, admission_number)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

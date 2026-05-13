@@ -27,6 +27,18 @@ const ensureAdmissionId = (admissionId) => {
 
 const ADMISSION_CANCELLED_STATUS = 'Admission Cancelled';
 
+/** Primary `course_id` when set; else student-DB id in `managed_course_id` (no FK). Same for branch. */
+const SQL_A_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(a.course_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_course_id AS CHAR)), ''))`;
+const SQL_A_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(a.branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_branch_id AS CHAR)), ''))`;
+const SQL_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(course_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_course_id AS CHAR)), ''))`;
+const SQL_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_branch_id AS CHAR)), ''))`;
+
+const normalizeManagedIdForDb = (value) => {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  return s === '' ? null : s;
+};
+
 const parseAdmissionLeadData = (value) => {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -129,11 +141,17 @@ export const formatAdmission = async (admissionData, pool) => {
       courseId:
         admissionData.course_id != null && String(admissionData.course_id).trim() !== ''
           ? String(admissionData.course_id).trim()
-          : null,
+          : admissionData.managed_course_id != null &&
+              String(admissionData.managed_course_id).trim() !== ''
+            ? String(admissionData.managed_course_id).trim()
+            : null,
       branchId:
         admissionData.branch_id != null && String(admissionData.branch_id).trim() !== ''
           ? String(admissionData.branch_id).trim()
-          : null,
+          : admissionData.managed_branch_id != null &&
+              String(admissionData.managed_branch_id).trim() !== ''
+            ? String(admissionData.managed_branch_id).trim()
+            : null,
       course: admissionData.course || '',
       branch: admissionData.branch || '',
       quota: admissionData.quota || '',
@@ -289,6 +307,39 @@ const resolvePrimaryCourseBranchIds = async (pool, courseId, branchId) => {
   return { resolvedCourseId, resolvedBranchId };
 };
 
+async function applyAdmissionCourseInfoUpdates(pool, courseInfo, updateFields, updateParams) {
+  if (!courseInfo || typeof courseInfo !== 'object') return;
+  const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
+    pool,
+    courseInfo.courseId,
+    courseInfo.branchId
+  );
+  if (courseInfo.courseId !== undefined) {
+    updateFields.push('course_id = ?');
+    updateParams.push(resolvedCourseId);
+    updateFields.push('managed_course_id = ?');
+    updateParams.push(normalizeManagedIdForDb(courseInfo.courseId));
+  }
+  if (courseInfo.branchId !== undefined) {
+    updateFields.push('branch_id = ?');
+    updateParams.push(resolvedBranchId);
+    updateFields.push('managed_branch_id = ?');
+    updateParams.push(normalizeManagedIdForDb(courseInfo.branchId));
+  }
+  if (courseInfo.course !== undefined) {
+    updateFields.push('course = ?');
+    updateParams.push(courseInfo.course || '');
+  }
+  if (courseInfo.branch !== undefined) {
+    updateFields.push('branch = ?');
+    updateParams.push(courseInfo.branch || '');
+  }
+  if (courseInfo.quota !== undefined) {
+    updateFields.push('quota = ?');
+    updateParams.push(courseInfo.quota || '');
+  }
+}
+
 const formatAdmissionListItem = (row) => ({
   _id: row.id,
   id: row.id,
@@ -300,11 +351,15 @@ const formatAdmissionListItem = (row) => ({
     courseId:
       row.course_id != null && String(row.course_id).trim() !== ''
         ? String(row.course_id).trim()
-        : null,
+        : row.managed_course_id != null && String(row.managed_course_id).trim() !== ''
+          ? String(row.managed_course_id).trim()
+          : null,
     branchId:
       row.branch_id != null && String(row.branch_id).trim() !== ''
         ? String(row.branch_id).trim()
-        : null,
+        : row.managed_branch_id != null && String(row.managed_branch_id).trim() !== ''
+          ? String(row.managed_branch_id).trim()
+          : null,
     course: row.course || '',
     branch: row.branch || '',
     quota: row.quota || '',
@@ -445,20 +500,20 @@ export const listAdmissions = async (req, res) => {
     }
     if (courseId || courseName) {
       if (courseId && courseName) {
-        conditions.push('(a.course_id = ? OR a.course = ?)');
+        conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
         params.push(courseId, courseName);
       } else {
-        conditions.push('(a.course_id = ? OR a.course = ?)');
+        conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
         const val = courseId || courseName;
         params.push(val, val);
       }
     }
     if (branchId || branchName) {
       if (branchId && branchName) {
-        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
         params.push(branchId, branchName);
       } else {
-        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
         const val = branchId || branchName;
         params.push(val, val);
       }
@@ -498,7 +553,7 @@ export const listAdmissions = async (req, res) => {
     // Keep this query narrow (avoid a.*) so MySQL does not sort huge TEXT/BLOB payloads.
     const [admissions] = await pool.execute(
       `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
-              a.course_id, a.branch_id, a.course, a.branch, a.quota,
+              a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
               a.student_name, a.student_phone, a.created_at, a.updated_at,
               a.reservation_general, a.reservation_other, a.payment_total_paid,
               a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
@@ -917,31 +972,7 @@ export const updateAdmissionById = async (req, res) => {
 
     // Main admission fields
     if (payload.courseInfo !== undefined) {
-      const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
-        pool,
-        payload.courseInfo.courseId,
-        payload.courseInfo.branchId
-      );
-      if (payload.courseInfo.courseId !== undefined) {
-        updateFields.push('course_id = ?');
-        updateParams.push(resolvedCourseId);
-      }
-      if (payload.courseInfo.branchId !== undefined) {
-        updateFields.push('branch_id = ?');
-        updateParams.push(resolvedBranchId);
-      }
-      if (payload.courseInfo.course !== undefined) {
-        updateFields.push('course = ?');
-        updateParams.push(payload.courseInfo.course || '');
-      }
-      if (payload.courseInfo.branch !== undefined) {
-        updateFields.push('branch = ?');
-        updateParams.push(payload.courseInfo.branch || '');
-      }
-      if (payload.courseInfo.quota !== undefined) {
-        updateFields.push('quota = ?');
-        updateParams.push(payload.courseInfo.quota || '');
-      }
+      await applyAdmissionCourseInfoUpdates(pool, payload.courseInfo, updateFields, updateParams);
     }
 
     if (payload.studentInfo !== undefined) {
@@ -1179,31 +1210,7 @@ export const updateAdmissionByLead = async (req, res) => {
 
     // Main admission fields (same logic as updateAdmissionById)
     if (payload.courseInfo !== undefined) {
-      const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
-        pool,
-        payload.courseInfo.courseId,
-        payload.courseInfo.branchId
-      );
-      if (payload.courseInfo.courseId !== undefined) {
-        updateFields.push('course_id = ?');
-        updateParams.push(resolvedCourseId);
-      }
-      if (payload.courseInfo.branchId !== undefined) {
-        updateFields.push('branch_id = ?');
-        updateParams.push(resolvedBranchId);
-      }
-      if (payload.courseInfo.course !== undefined) {
-        updateFields.push('course = ?');
-        updateParams.push(payload.courseInfo.course || '');
-      }
-      if (payload.courseInfo.branch !== undefined) {
-        updateFields.push('branch = ?');
-        updateParams.push(payload.courseInfo.branch || '');
-      }
-      if (payload.courseInfo.quota !== undefined) {
-        updateFields.push('quota = ?');
-        updateParams.push(payload.courseInfo.quota || '');
-      }
+      await applyAdmissionCourseInfoUpdates(pool, payload.courseInfo, updateFields, updateParams);
     }
 
     if (payload.studentInfo !== undefined) {
@@ -1423,20 +1430,20 @@ export const getAdmissionStats = async (req, res) => {
     }
     if (courseId || courseName) {
       if (courseId && courseName) {
-        conditions.push('(course_id = ? OR course = ?)');
+        conditions.push(`(${SQL_EFF_COURSE_ID} = ? OR course = ?)`);
         params.push(courseId, courseName);
       } else {
-        conditions.push('(course_id = ? OR course = ?)');
+        conditions.push(`(${SQL_EFF_COURSE_ID} = ? OR course = ?)`);
         const val = courseId || courseName;
         params.push(val, val);
       }
     }
     if (branchId || branchName) {
       if (branchId && branchName) {
-        conditions.push('(branch_id = ? OR branch = ?)');
+        conditions.push(`(${SQL_EFF_BRANCH_ID} = ? OR branch = ?)`);
         params.push(branchId, branchName);
       } else {
-        conditions.push('(branch_id = ? OR branch = ?)');
+        conditions.push(`(${SQL_EFF_BRANCH_ID} = ? OR branch = ?)`);
         const val = branchId || branchName;
         params.push(val, val);
       }
@@ -1444,28 +1451,28 @@ export const getAdmissionStats = async (req, res) => {
     const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
     const query = `
       SELECT 
-        course_id as courseId, 
+        ${SQL_EFF_COURSE_ID} as courseId, 
         MAX(course) as courseName,
         COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
         COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
       FROM admissions
       ${whereClause}
-      GROUP BY course_id, course
+      GROUP BY ${SQL_EFF_COURSE_ID}
       ORDER BY totalAdmissions DESC
     `;
     const [stats] = await pool.execute(query, params);
 
     const queryBranches = `
       SELECT 
-        course_id as courseId,
-        branch_id as branchId,
+        ${SQL_EFF_COURSE_ID} as courseId,
+        ${SQL_EFF_BRANCH_ID} as branchId,
         MAX(course) as courseName,
         MAX(branch) as branchName,
         COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
         COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
       FROM admissions
       ${whereClause}
-      GROUP BY course_id, course, branch_id, branch
+      GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}
       ORDER BY courseName, branchName
     `;
     const [branchStats] = await pool.execute(queryBranches, params);
@@ -1510,20 +1517,20 @@ const buildAdmissionPivotFilters = (query) => {
   }
   if (courseId || courseName) {
     if (courseId && courseName) {
-      conditions.push(`(${c('course_id')} = ? OR ${c('course')} = ?)`);
+      conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR ${c('course')} = ?)`);
       params.push(courseId, courseName);
     } else {
-      conditions.push(`(${c('course_id')} = ? OR ${c('course')} = ?)`);
+      conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR ${c('course')} = ?)`);
       const val = courseId || courseName;
       params.push(val, val);
     }
   }
   if (branchId || branchName) {
     if (branchId && branchName) {
-      conditions.push(`(${c('branch_id')} = ? OR ${c('branch')} = ?)`);
+      conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR ${c('branch')} = ?)`);
       params.push(branchId, branchName);
     } else {
-      conditions.push(`(${c('branch_id')} = ? OR ${c('branch')} = ?)`);
+      conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR ${c('branch')} = ?)`);
       const val = branchId || branchName;
       params.push(val, val);
     }
@@ -1538,68 +1545,138 @@ const buildAdmissionPivotFilters = (query) => {
   return { conditions, params };
 };
 
+/** Normalize course header text so "B.Tech", "B.TECH", "b.tech " map to one bucket. */
+const normalizeAdmissionCourseColumnName = (name) =>
+  String(name ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+
+const sumCountsForCourseColumn = (countsRaw, col) => {
+  const ids = col.courseIds || [col.courseId];
+  let sum = 0;
+  for (const rawId of ids) {
+    const id = String(rawId);
+    let v = countsRaw[id];
+    if (v === undefined && /^\d+$/.test(id)) {
+      const n = Number(id);
+      if (Number.isSafeInteger(n)) v = countsRaw[n];
+    }
+    if (v !== undefined && v !== null) sum += Number(v) || 0;
+  }
+  return sum;
+};
+
 /**
- * Active courses plus any course ids present in the filtered admission set (legacy / inactive),
- * each with a stable column key and display name.
+ * Build pivot columns aligned with how admissions store data:
+ * - `admissions.course_id` (primary catalog FK when present) or `admissions.managed_course_id`
+ *   (student DB id, no FK) plus denormalized `admissions.course` text.
+ * - Secondary `courses` may list multiple ids or different ids than stored on older rows.
+ *
+ * We bucket by **normalized label** derived from admission `MAX(course)` when present, else
+ * secondary name for that id. All ids that share the same bucket get merged so counts sum
+ * into one column (fixes duplicate "DIPLOMA" / B.TECH showing 0).
  */
-const getAdmissionReportCourses = async (pool, whereClause, params) => {
-  const [activeCourses] = await pool.execute(
-    'SELECT id, name FROM courses WHERE is_active = 1 ORDER BY name ASC'
-  );
-  const [distinctCourseRows] = await pool.execute(
-    `SELECT a.course_id AS courseId, MAX(a.course) AS courseName
+const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
+  let activeCourses = [];
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [rows] = await secondaryPool.execute(
+      'SELECT id, name FROM courses WHERE is_active = 1 ORDER BY name ASC'
+    );
+    activeCourses = rows || [];
+  } catch (err) {
+    console.error(
+      'getAdmissionReportCourses: secondary courses query failed, using primary:',
+      err?.message || err
+    );
+    const [rows] = await primaryPool.execute(
+      'SELECT id, name FROM courses WHERE is_active = 1 ORDER BY name ASC'
+    );
+    activeCourses = rows || [];
+  }
+
+  const [distinctCourseRows] = await primaryPool.execute(
+    `SELECT ${SQL_A_EFF_COURSE_ID} AS courseId, MAX(a.course) AS courseName
      FROM admissions a
      ${whereClause}
-     GROUP BY a.course_id`,
+     GROUP BY ${SQL_A_EFF_COURSE_ID}`,
     params
   );
-  const idToName = new Map(activeCourses.map((r) => [String(r.id), r.name]));
-  const extras = [];
-  for (const row of distinctCourseRows) {
-    const rawId = row.courseId;
-    const key =
-      rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '__none__';
-    const label =
-      (key !== '__none__' && idToName.get(key)) ||
-      (row.courseName && String(row.courseName).trim()) ||
-      (key === '__none__' ? '—' : 'Unknown course');
-    if (key !== '__none__' && !idToName.has(key)) {
-      idToName.set(key, label);
-    }
-    if (key === '__none__') {
-      idToName.set('__none__', label);
-    }
-  }
-  const activeIds = new Set(activeCourses.map((r) => String(r.id)));
-  const ordered = [];
-  for (const r of activeCourses) {
-    ordered.push({ courseId: String(r.id), courseName: r.name });
-  }
-  const extraKeys = [...new Set(distinctCourseRows.map((r) => {
-    const rawId = r.courseId;
-    return rawId != null && String(rawId).trim() !== ''
-      ? String(rawId).trim()
-      : '__none__';
-  }))].filter((k) => {
-    if (k === '__none__') return true;
-    return !activeIds.has(k);
-  });
-  extraKeys.sort((a, b) => {
-    const na = idToName.get(a) || a;
-    const nb = idToName.get(b) || b;
-    return String(na).localeCompare(String(nb));
-  });
-  for (const k of extraKeys) {
-    if (k === '__none__') {
-      ordered.push({ courseId: '__none__', courseName: idToName.get('__none__') || '—' });
-    } else {
-      ordered.push({
-        courseId: k,
-        courseName: idToName.get(k) || 'Unknown course',
+
+  const idToSecondaryName = new Map(
+    activeCourses.map((r) => [String(r.id), String(r.name || '').trim()])
+  );
+
+  const buckets = new Map();
+
+  const addToBucket = (bucketKey, displayLabel, idStr) => {
+    if (!buckets.has(bucketKey)) {
+      buckets.set(bucketKey, {
+        courseName: String(displayLabel || '').trim() || '—',
+        mergeIds: new Set(),
       });
     }
+    const b = buckets.get(bucketKey);
+    b.mergeIds.add(String(idStr));
+    const next = String(displayLabel || '').trim();
+    if (next.length > String(b.courseName || '').trim().length) {
+      b.courseName = next;
+    }
+  };
+
+  for (const r of activeCourses) {
+    const id = String(r.id);
+    const nm = String(r.name || '').trim() || 'Unknown';
+    const k = normalizeAdmissionCourseColumnName(nm);
+    addToBucket(k, nm, id);
   }
-  return ordered;
+
+  for (const row of distinctCourseRows) {
+    const rawId = row.courseId;
+    const idStr =
+      rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '__none__';
+    const fromAdmissionText = String(row.courseName || '').trim();
+    const label =
+      idStr === '__none__'
+        ? '—'
+        : fromAdmissionText || idToSecondaryName.get(idStr) || 'Unknown';
+    const k = idStr === '__none__' ? '__none__' : normalizeAdmissionCourseColumnName(label);
+    addToBucket(k, label, idStr);
+  }
+
+  const orderedKeys = [...buckets.keys()].filter((key) => key !== '__none__');
+  orderedKeys.sort((a, b) => {
+    const na = buckets.get(a).courseName;
+    const nb = buckets.get(b).courseName;
+    return String(na).localeCompare(String(nb), undefined, { sensitivity: 'base' });
+  });
+
+  const out = [];
+  for (const k of orderedKeys) {
+    const b = buckets.get(k);
+    const ids = [...b.mergeIds]
+      .filter((id) => id !== '__none__')
+      .sort((x, y) => String(x).localeCompare(String(y)));
+    if (ids.length === 0) continue;
+    out.push({
+      courseId: ids.length === 1 ? ids[0] : ids.join('|'),
+      courseName: b.courseName,
+      courseIds: ids,
+    });
+  }
+
+  if (buckets.has('__none__')) {
+    const b = buckets.get('__none__');
+    const ids = [...b.mergeIds].sort((x, y) => String(x).localeCompare(String(y)));
+    out.push({
+      courseId: ids.length === 1 ? ids[0] : ids.join('|'),
+      courseName: b.courseName,
+      courseIds: ids,
+    });
+  }
+
+  return out;
 };
 
 /**
@@ -1615,10 +1692,10 @@ export const getAdmissionStatsByReference = async (req, res) => {
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
 
     const [agg] = await pool.execute(
-      `SELECT a.created_by AS userId, a.course_id AS courseId, COUNT(*) AS cnt
+      `SELECT a.created_by AS userId, ${SQL_A_EFF_COURSE_ID} AS courseId, COUNT(*) AS cnt
        FROM admissions a
        ${whereClause}
-       GROUP BY a.created_by, a.course_id`,
+       GROUP BY a.created_by, ${SQL_A_EFF_COURSE_ID}`,
       params
     );
 
@@ -1642,10 +1719,13 @@ export const getAdmissionStatsByReference = async (req, res) => {
       userById = Object.fromEntries(formattedUsers.map((u) => [String(u.id), u]));
     }
 
-    const courseKey = (courseId) =>
-      courseId != null && String(courseId).trim() !== ''
-        ? String(courseId).trim()
-        : '__none__';
+    const courseKey = (courseId) => {
+      if (courseId === undefined || courseId === null) return '__none__';
+      const s = String(courseId).trim();
+      if (s === '') return '__none__';
+      if (typeof courseId === 'bigint') return String(courseId);
+      return s;
+    };
 
     const byUser = new Map();
     for (const row of agg) {
@@ -1669,7 +1749,7 @@ export const getAdmissionStatsByReference = async (req, res) => {
       const countsRaw = byUser.get(uidKey) || {};
       const counts = {};
       for (const c of courses) {
-        counts[c.courseId] = countsRaw[c.courseId] ?? 0;
+        counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
       }
       if (uidKey === '__unassigned__') {
         rows.push({
@@ -1716,17 +1796,20 @@ export const getAdmissionStatsByDate = async (req, res) => {
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
 
     const [agg] = await pool.execute(
-      `SELECT DATE_FORMAT(a.created_at, '%Y-%m-%d') AS d, a.course_id AS courseId, COUNT(*) AS cnt
+      `SELECT DATE_FORMAT(a.created_at, '%Y-%m-%d') AS d, ${SQL_A_EFF_COURSE_ID} AS courseId, COUNT(*) AS cnt
        FROM admissions a
        ${whereClause}
-       GROUP BY DATE_FORMAT(a.created_at, '%Y-%m-%d'), a.course_id`,
+       GROUP BY DATE_FORMAT(a.created_at, '%Y-%m-%d'), ${SQL_A_EFF_COURSE_ID}`,
       params
     );
 
-    const courseKey = (courseId) =>
-      courseId != null && String(courseId).trim() !== ''
-        ? String(courseId).trim()
-        : '__none__';
+    const courseKey = (courseId) => {
+      if (courseId === undefined || courseId === null) return '__none__';
+      const s = String(courseId).trim();
+      if (s === '') return '__none__';
+      if (typeof courseId === 'bigint') return String(courseId);
+      return s;
+    };
 
     const byDate = new Map();
     for (const row of agg) {
@@ -1744,7 +1827,7 @@ export const getAdmissionStatsByDate = async (req, res) => {
         const countsRaw = byDate.get(date) || {};
         const counts = {};
         for (const c of courses) {
-          counts[c.courseId] = countsRaw[c.courseId] ?? 0;
+          counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
         }
         return { date, counts };
       });
@@ -1791,10 +1874,10 @@ export const exportAdmissions = async (req, res) => {
 
     if (courseId || courseName) {
       if (courseId && courseName) {
-        conditions.push('(a.course_id = ? OR a.course = ?)');
+        conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
         params.push(courseId, courseName);
       } else {
-        conditions.push('(a.course_id = ? OR a.course = ?)');
+        conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
         const val = courseId || courseName;
         params.push(val, val);
       }
@@ -1802,10 +1885,10 @@ export const exportAdmissions = async (req, res) => {
 
     if (branchId || branchName) {
       if (branchId && branchName) {
-        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
         params.push(branchId, branchName);
       } else {
-        conditions.push('(a.branch_id = ? OR a.branch = ?)');
+        conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
         const val = branchId || branchName;
         params.push(val, val);
       }

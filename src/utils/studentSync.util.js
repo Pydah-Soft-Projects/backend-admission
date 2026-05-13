@@ -213,6 +213,16 @@ const buildStudentDataForSecondaryStorage = (
     _synced_at: new Date().toISOString(),
   };
 
+  const ci = admissionData?.courseInfo;
+  if (ci && typeof ci === 'object') {
+    if (ci.courseId != null && String(ci.courseId).trim() !== '') {
+      payload._crm_managed_course_id = String(ci.courseId).trim();
+    }
+    if (ci.branchId != null && String(ci.branchId).trim() !== '') {
+      payload._crm_managed_branch_id = String(ci.branchId).trim();
+    }
+  }
+
   // Do not dump primary admission workflow `status` (active/withdrawn) into student_data as
   // a generic `status` field — legacy apps treat it like student_status.
   if ('status' in payload) {

@@ -12,6 +12,13 @@ const DEFAULT_GENERAL_RESERVATION = 'oc';
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
 
+/** Raw UI / student-DB course or branch id for `managed_*` columns (no FK to primary catalog). */
+const normalizeManagedIdForDb = (value) => {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  return s === '' ? null : s;
+};
+
 /** Per–fee-structure overrides for this joining (stored in lead_data._joiningStudentFeeDetails). */
 const sanitizeStudentFeeDetailsForDb = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
@@ -464,10 +471,20 @@ const formatJoining = async (joiningData, pool) => {
   // checks on the frontend silently fail (e.g. `"5" === 5` is false) and the
   // managed branches dropdown never lights up for joinings that were saved
   // before the managed-id columns were introduced.
+  const fromRowManagedCourse = normalizeManagedIdForDb(joiningData.managed_course_id);
+  const fromRowManagedBranch = normalizeManagedIdForDb(joiningData.managed_branch_id);
   const rawJoiningCourseId =
-    managedJoiningCourseId != null ? managedJoiningCourseId : joiningData.course_id;
+    fromRowManagedCourse != null
+      ? fromRowManagedCourse
+      : managedJoiningCourseId != null
+        ? managedJoiningCourseId
+        : joiningData.course_id;
   const rawJoiningBranchId =
-    managedJoiningBranchId != null ? managedJoiningBranchId : joiningData.branch_id;
+    fromRowManagedBranch != null
+      ? fromRowManagedBranch
+      : managedJoiningBranchId != null
+        ? managedJoiningBranchId
+        : joiningData.branch_id;
   const normalizedJoiningCourseId =
     rawJoiningCourseId != null && String(rawJoiningCourseId).trim() !== ''
       ? String(rawJoiningCourseId).trim()
@@ -1759,6 +1776,8 @@ export const saveJoiningDraft = async (req, res) => {
         status = ?,
         course_id = ?,
         branch_id = ?,
+        managed_course_id = ?,
+        managed_branch_id = ?,
         course = ?,
         branch = ?,
         quota = ?,
@@ -1817,6 +1836,8 @@ export const saveJoiningDraft = async (req, res) => {
         'draft',
         joiningFkCourseId,
         joiningFkBranchId,
+        normalizeManagedIdForDb(courseInfo.courseId),
+        normalizeManagedIdForDb(courseInfo.branchId),
         courseInfo.course || '',
         courseInfo.branch || '',
         courseInfo.quota || '',
@@ -2195,11 +2216,18 @@ export const approveJoining = async (req, res) => {
 
     const admissionId = existingAdmissions.length > 0 ? existingAdmissions[0].id : uuidv4();
 
+    const managedCourseIdForAdmission = normalizeManagedIdForDb(
+      formattedJoining.courseInfo?.courseId
+    );
+    const managedBranchIdForAdmission = normalizeManagedIdForDb(
+      formattedJoining.courseInfo?.branchId
+    );
+
     if (existingAdmissions.length > 0) {
       await connection.execute(
         `UPDATE admissions SET
           lead_id = ?, enquiry_number = ?, lead_data = ?, admission_number = ?,
-          course_id = ?, branch_id = ?, course = ?, branch = ?, quota = ?,
+          course_id = ?, branch_id = ?, managed_course_id = ?, managed_branch_id = ?, course = ?, branch = ?, quota = ?,
           student_name = ?, student_phone = ?, student_gender = ?, student_date_of_birth = ?, student_notes = ?, student_aadhaar_number = ?,
           father_name = ?, father_phone = ?, father_aadhaar_number = ?,
           mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?,
@@ -2220,6 +2248,8 @@ export const approveJoining = async (req, res) => {
           admissionNumber,
           admissionFkCourseId,
           admissionFkBranchId,
+          managedCourseIdForAdmission,
+          managedBranchIdForAdmission,
           formattedJoining.courseInfo?.course || '',
           formattedJoining.courseInfo?.branch || '',
           formattedJoining.courseInfo?.quota || '',
@@ -2273,7 +2303,7 @@ export const approveJoining = async (req, res) => {
       await connection.execute(
         `INSERT INTO admissions (
           id, lead_id, enquiry_number, lead_data, joining_id, admission_number, status,
-          course_id, branch_id, course, branch, quota,
+          course_id, branch_id, managed_course_id, managed_branch_id, course, branch, quota,
           student_name, student_phone, student_gender, student_date_of_birth, student_notes, student_aadhaar_number,
           father_name, father_phone, father_aadhaar_number,
           mother_name, mother_phone, mother_aadhaar_number,
@@ -2286,7 +2316,7 @@ export const approveJoining = async (req, res) => {
           document_bank_passbook, document_ration_card,
           reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -2297,10 +2327,12 @@ export const approveJoining = async (req, res) => {
           'active', // 7
           admissionFkCourseId, // 8
           admissionFkBranchId, // 9
-          formattedJoining.courseInfo?.course || '', // 10
-          formattedJoining.courseInfo?.branch || '', // 11
-          formattedJoining.courseInfo?.quota || '', // 12
-          formattedJoining.studentInfo?.name || '', // 13
+          managedCourseIdForAdmission, // 10
+          managedBranchIdForAdmission, // 11
+          formattedJoining.courseInfo?.course || '', // 12
+          formattedJoining.courseInfo?.branch || '', // 13
+          formattedJoining.courseInfo?.quota || '', // 14
+          formattedJoining.studentInfo?.name || '', // 15
           formattedJoining.studentInfo?.phone || '', // 14
           formattedJoining.studentInfo?.gender || '', // 15
           formattedJoining.studentInfo?.dateOfBirth || '', // 16
@@ -2372,8 +2404,22 @@ export const approveJoining = async (req, res) => {
       }
     }
 
+    await connection.execute(
+      `UPDATE joinings SET managed_course_id = ?, managed_branch_id = ? WHERE id = ?`,
+      [managedCourseIdForAdmission, managedBranchIdForAdmission, joining.id]
+    );
+
+    const [joiningAfterManagedRows] = await connection.execute(
+      'SELECT * FROM joinings WHERE id = ?',
+      [joining.id]
+    );
+    const joiningForSecondarySync =
+      joiningAfterManagedRows.length > 0
+        ? await formatJoining(joiningAfterManagedRows[0], connection)
+        : formattedJoining;
+
     // 7. Sync to Secondary DB
-    await syncToSecondaryDatabase(formattedJoining, admissionNumber, {
+    await syncToSecondaryDatabase(joiningForSecondarySync, admissionNumber, {
       leadId: joining.lead_id,
       joiningId: joining.id,
       email: lead?.email || ''
@@ -2414,11 +2460,14 @@ export const approveJoining = async (req, res) => {
 
       // Update performance summary (conversion)
       // We attribute the conversion to the user currently assigned to the lead
-      if (lead) {
-        const [assignedUser] = await pool.execute('SELECT role_name FROM users WHERE id = ?', [lead.assigned_to || lead.assigned_to_pro]);
+      const assigneeId = lead?.assigned_to || lead?.assigned_to_pro || null;
+      if (lead && assigneeId) {
+        const [assignedUser] = await pool.execute('SELECT role_name FROM users WHERE id = ?', [
+          assigneeId,
+        ]);
         if (assignedUser.length > 0) {
           updatePerformanceMetric({
-            userId: lead.assigned_to || lead.assigned_to_pro,
+            userId: assigneeId,
             academicYear: lead.academicYear,
             studentGroup: lead.studentGroup,
             roleName: assignedUser[0].role_name,
