@@ -74,7 +74,6 @@ const PRO_VISIT_STATUS_CANONICAL = [
   'Assigned',
   'Interested',
   'Not Interested',
-  'Not Available',
   'Scheduled Revisit',
   'Wrong Data',
   'Confirmed',
@@ -85,6 +84,10 @@ const canonicalProVisitStatusForReports = (label) => {
   const t = String(label ?? '').trim();
   if (!t || /^not\s*set$/i.test(t)) return 'Assigned';
   const lower = t.toLowerCase();
+
+  // Normalize deprecated 'Not Available' to 'Scheduled Revisit'
+  if (lower === 'not available') return 'Scheduled Revisit';
+
   const hit = PRO_VISIT_STATUS_CANONICAL.find((s) => s.toLowerCase() === lower);
   if (hit) return hit;
   return 'Assigned';
@@ -3651,7 +3654,8 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
               OR a.performed_by IN (${cohortUserIdPlaceholders})
               OR (l.assigned_to_pro IN (${cohortUserIdPlaceholders}) AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status')
             )
-            ${assignmentDateWhere}`,
+            ${assignmentDateWhere}
+          ORDER BY a.created_at ASC`,
           [...cohortScopeUserIds, ...cohortScopeUserIds, ...cohortScopeUserIds, ...assignmentDateParams]
         ),
         pool.execute(
@@ -3879,6 +3883,7 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
               dateBucket.details.push({
                 name: row.name || 'Unknown',
                 phone: row.phone || '-',
+                mandal: row.mandal || '-',
                 village: row.village || row.mandal || '-',
                 visitStatus: statusToDisplay,
                 visitDate: row.log_created_at,
@@ -4226,7 +4231,20 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         visitDiaryUpdates: (() => {
           const userUpdates = visitDiaryUpdatesMap.get(String(user.id || '').trim().toLowerCase());
           if (!userUpdates) return [];
-          return Array.from(userUpdates.values()).sort((a, b) => b.date.localeCompare(a.date));
+          return Array.from(userUpdates.values()).map(bucket => {
+            // Deduplicate by leadId (since we ordered by created_at ASC, later records will overwrite earlier ones)
+            const unique = new Map();
+            bucket.details.forEach(d => unique.set(d.leadId, d));
+            const deduplicatedDetails = Array.from(unique.values());
+            
+            // Recompute statusCounts based on deduplicated students
+            const statusCounts = {};
+            deduplicatedDetails.forEach(d => {
+              statusCounts[d.visitStatus] = (statusCounts[d.visitStatus] || 0) + 1;
+            });
+            
+            return { ...bucket, details: deduplicatedDetails, statusCounts };
+          }).sort((a, b) => b.date.localeCompare(a.date));
         })(),
       };
     });
