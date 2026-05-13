@@ -9,6 +9,8 @@ import {
   updateAdmissionById,
   updateAdmissionByLead,
   getAdmissionStats,
+  getAdmissionStatsByReference,
+  getAdmissionStatsByDate,
   exportAdmissions,
   sendAdmissionConfirmationSmsById,
 } from '../controllers/admission.controller.js';
@@ -17,6 +19,8 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get('/stats/by-reference', getAdmissionStatsByReference);
+router.get('/stats/by-date', getAdmissionStatsByDate);
 router.get('/stats', getAdmissionStats);
 router.get('/export', isSuperAdmin, exportAdmissions);
 router.get('/', listAdmissions);

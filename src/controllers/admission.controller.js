@@ -1,6 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { v4 as uuidv4 } from 'uuid';
+import { hydrateUserRowsFromHrms } from './user.controller.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
@@ -1476,6 +1477,287 @@ export const getAdmissionStats = async (req, res) => {
   } catch (error) {
     console.error('Error getting admission stats:', error);
     return errorResponse(res, error.message || 'Failed to get admission stats', 500);
+  }
+};
+
+/**
+ * Shared filters for admission pivot reports (alias `a`).
+ * When status is omitted or `all`, excludes "Admission Cancelled" to match course-wise stats.
+ */
+const buildAdmissionPivotFilters = (query) => {
+  const {
+    startDate,
+    endDate,
+    courseId,
+    branchId,
+    courseName,
+    branchName,
+    status,
+  } = query;
+  const conditions = [];
+  const params = [];
+  const c = (field) => `a.${field}`;
+
+  if (startDate) {
+    conditions.push(`${c('created_at')} >= ?`);
+    params.push(new Date(startDate));
+  }
+  if (endDate) {
+    conditions.push(`${c('created_at')} <= ?`);
+    const end = new Date(endDate);
+    end.setDate(end.getDate() + 1);
+    params.push(end);
+  }
+  if (courseId || courseName) {
+    if (courseId && courseName) {
+      conditions.push(`(${c('course_id')} = ? OR ${c('course')} = ?)`);
+      params.push(courseId, courseName);
+    } else {
+      conditions.push(`(${c('course_id')} = ? OR ${c('course')} = ?)`);
+      const val = courseId || courseName;
+      params.push(val, val);
+    }
+  }
+  if (branchId || branchName) {
+    if (branchId && branchName) {
+      conditions.push(`(${c('branch_id')} = ? OR ${c('branch')} = ?)`);
+      params.push(branchId, branchName);
+    } else {
+      conditions.push(`(${c('branch_id')} = ? OR ${c('branch')} = ?)`);
+      const val = branchId || branchName;
+      params.push(val, val);
+    }
+  }
+  if (status && status !== 'all') {
+    conditions.push(`${c('status')} = ?`);
+    params.push(status);
+  } else {
+    conditions.push(`${c('status')} != ?`);
+    params.push(ADMISSION_CANCELLED_STATUS);
+  }
+  return { conditions, params };
+};
+
+/**
+ * Active courses plus any course ids present in the filtered admission set (legacy / inactive),
+ * each with a stable column key and display name.
+ */
+const getAdmissionReportCourses = async (pool, whereClause, params) => {
+  const [activeCourses] = await pool.execute(
+    'SELECT id, name FROM courses WHERE is_active = 1 ORDER BY name ASC'
+  );
+  const [distinctCourseRows] = await pool.execute(
+    `SELECT a.course_id AS courseId, MAX(a.course) AS courseName
+     FROM admissions a
+     ${whereClause}
+     GROUP BY a.course_id`,
+    params
+  );
+  const idToName = new Map(activeCourses.map((r) => [String(r.id), r.name]));
+  const extras = [];
+  for (const row of distinctCourseRows) {
+    const rawId = row.courseId;
+    const key =
+      rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '__none__';
+    const label =
+      (key !== '__none__' && idToName.get(key)) ||
+      (row.courseName && String(row.courseName).trim()) ||
+      (key === '__none__' ? '—' : 'Unknown course');
+    if (key !== '__none__' && !idToName.has(key)) {
+      idToName.set(key, label);
+    }
+    if (key === '__none__') {
+      idToName.set('__none__', label);
+    }
+  }
+  const activeIds = new Set(activeCourses.map((r) => String(r.id)));
+  const ordered = [];
+  for (const r of activeCourses) {
+    ordered.push({ courseId: String(r.id), courseName: r.name });
+  }
+  const extraKeys = [...new Set(distinctCourseRows.map((r) => {
+    const rawId = r.courseId;
+    return rawId != null && String(rawId).trim() !== ''
+      ? String(rawId).trim()
+      : '__none__';
+  }))].filter((k) => {
+    if (k === '__none__') return true;
+    return !activeIds.has(k);
+  });
+  extraKeys.sort((a, b) => {
+    const na = idToName.get(a) || a;
+    const nb = idToName.get(b) || b;
+    return String(na).localeCompare(String(nb));
+  });
+  for (const k of extraKeys) {
+    if (k === '__none__') {
+      ordered.push({ courseId: '__none__', courseName: idToName.get('__none__') || '—' });
+    } else {
+      ordered.push({
+        courseId: k,
+        courseName: idToName.get(k) || 'Unknown course',
+      });
+    }
+  }
+  return ordered;
+};
+
+/**
+ * @desc    Admissions counts by reference staff (created_by) × course
+ * @route   GET /api/admissions/stats/by-reference
+ */
+export const getAdmissionStatsByReference = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { conditions, params } = buildAdmissionPivotFilters(req.query);
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const courses = await getAdmissionReportCourses(pool, whereClause, params);
+
+    const [agg] = await pool.execute(
+      `SELECT a.created_by AS userId, a.course_id AS courseId, COUNT(*) AS cnt
+       FROM admissions a
+       ${whereClause}
+       GROUP BY a.created_by, a.course_id`,
+      params
+    );
+
+    const userIds = [...new Set(agg.map((r) => r.userId).filter(Boolean))];
+    let userById = {};
+    if (userIds.length) {
+      const ph = userIds.map(() => '?').join(',');
+      const [userRows] = await pool.execute(
+        `SELECT id, hrms_id, emp_no, name, designation FROM users WHERE id IN (${ph})`,
+        userIds
+      );
+      const formattedUsers = userRows.map((u) => ({
+        id: u.id,
+        _id: u.id,
+        hrms_id: u.hrms_id,
+        emp_no: u.emp_no,
+        name: u.name,
+        designation: u.designation || '',
+      }));
+      await hydrateUserRowsFromHrms(formattedUsers, 'admissionStatsByReference');
+      userById = Object.fromEntries(formattedUsers.map((u) => [String(u.id), u]));
+    }
+
+    const courseKey = (courseId) =>
+      courseId != null && String(courseId).trim() !== ''
+        ? String(courseId).trim()
+        : '__none__';
+
+    const byUser = new Map();
+    for (const row of agg) {
+      const uidKey = row.userId ? String(row.userId) : '__unassigned__';
+      if (!byUser.has(uidKey)) byUser.set(uidKey, {});
+      const ck = courseKey(row.courseId);
+      const cur = byUser.get(uidKey);
+      cur[ck] = (cur[ck] || 0) + (Number(row.cnt) || 0);
+    }
+
+    const rows = [];
+    const sortedKeys = [...byUser.keys()].sort((a, b) => {
+      if (a === '__unassigned__') return 1;
+      if (b === '__unassigned__') return -1;
+      const na = userById[a]?.name || '';
+      const nb = userById[b]?.name || '';
+      return String(na).localeCompare(String(nb));
+    });
+
+    for (const uidKey of sortedKeys) {
+      const countsRaw = byUser.get(uidKey) || {};
+      const counts = {};
+      for (const c of courses) {
+        counts[c.courseId] = countsRaw[c.courseId] ?? 0;
+      }
+      if (uidKey === '__unassigned__') {
+        rows.push({
+          userId: null,
+          name: '—',
+          department: '—',
+          designation: '—',
+          counts,
+        });
+      } else {
+        const u = userById[uidKey];
+        rows.push({
+          userId: uidKey,
+          name: u?.name || 'Unknown user',
+          department: u?.department ?? '—',
+          designation: u?.designation || '—',
+          counts,
+        });
+      }
+    }
+
+    return successResponse(
+      res,
+      { courses, rows },
+      'Admission reference stats retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting admission reference stats:', error);
+    return errorResponse(res, error.message || 'Failed to get admission reference stats', 500);
+  }
+};
+
+/**
+ * @desc    Admissions counts by calendar date × course
+ * @route   GET /api/admissions/stats/by-date
+ */
+export const getAdmissionStatsByDate = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { conditions, params } = buildAdmissionPivotFilters(req.query);
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const courses = await getAdmissionReportCourses(pool, whereClause, params);
+
+    const [agg] = await pool.execute(
+      `SELECT DATE_FORMAT(a.created_at, '%Y-%m-%d') AS d, a.course_id AS courseId, COUNT(*) AS cnt
+       FROM admissions a
+       ${whereClause}
+       GROUP BY DATE_FORMAT(a.created_at, '%Y-%m-%d'), a.course_id`,
+      params
+    );
+
+    const courseKey = (courseId) =>
+      courseId != null && String(courseId).trim() !== ''
+        ? String(courseId).trim()
+        : '__none__';
+
+    const byDate = new Map();
+    for (const row of agg) {
+      const dateStr = row.d ? String(row.d).slice(0, 10) : '';
+      if (!dateStr) continue;
+      if (!byDate.has(dateStr)) byDate.set(dateStr, {});
+      const ck = courseKey(row.courseId);
+      const cur = byDate.get(dateStr);
+      cur[ck] = (cur[ck] || 0) + (Number(row.cnt) || 0);
+    }
+
+    const rows = [...byDate.keys()]
+      .sort((a, b) => b.localeCompare(a))
+      .map((date) => {
+        const countsRaw = byDate.get(date) || {};
+        const counts = {};
+        for (const c of courses) {
+          counts[c.courseId] = countsRaw[c.courseId] ?? 0;
+        }
+        return { date, counts };
+      });
+
+    return successResponse(
+      res,
+      { courses, rows },
+      'Admission date-wise stats retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting admission date-wise stats:', error);
+    return errorResponse(res, error.message || 'Failed to get admission date-wise stats', 500);
   }
 };
 

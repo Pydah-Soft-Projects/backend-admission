@@ -38,7 +38,7 @@ export const resolveHrmsOrgNamesFindById = async (employee, Division, Department
  * Mutates each user row that has `emp_no` and/or `hrms_id` to set `division`, `department`, `group` from HRMS.
  * Rows must be plain objects (same shape as `formatUser` output for getUsers, or assignable list rows with emp_no/hrms_id).
  */
-async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'users') {
+export async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'users') {
   if (!formattedUsers?.length) return;
   const empNoStrings = [
     ...new Set(
