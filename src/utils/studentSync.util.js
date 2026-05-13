@@ -223,18 +223,31 @@ const buildStudentDataForSecondaryStorage = (
     }
   }
 
-  // Do not dump primary admission workflow `status` (active/withdrawn) into student_data as
-  // a generic `status` field — legacy apps treat it like student_status.
+  // Never leave primary joining/admission workflow on top-level `status` — other apps treat it like student_status.
   if ('status' in payload) {
-    const s = String(payload.status ?? '').trim().toLowerCase();
-    if (s === 'active' || s === 'withdrawn') {
-      payload.admission_status = payload.status;
-      delete payload.status;
+    const raw = payload.status;
+    const s = String(raw ?? '').trim().toLowerCase();
+    if (s === 'active' || s === 'withdrawn' || s === 'admission cancelled') {
+      payload.admission_status = raw;
     }
+    delete payload.status;
   }
   payload.student_status = secondaryStudentStatus;
   payload.dob = normalizedDob || '';
   Object.assign(payload, certificationCompat || {});
+
+  /** Registration extras sometimes copy joining workflow into `student_status` — strip from JSON blob. */
+  const stripWorkflowStudentStatus = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    const v = String(obj.student_status ?? '').trim().toLowerCase();
+    const joiningLike = new Set(['draft', 'pending_approval', 'approved']);
+    if (joiningLike.has(v)) delete obj.student_status;
+  };
+  stripWorkflowStudentStatus(payload.registrationFormData);
+  if (payload.leadData && typeof payload.leadData === 'object') {
+    stripWorkflowStudentStatus(payload.leadData._joiningRegistrationExtras);
+  }
+
   if (payload?.studentInfo && typeof payload.studentInfo === 'object') {
     payload.studentInfo = {
       ...payload.studentInfo,
