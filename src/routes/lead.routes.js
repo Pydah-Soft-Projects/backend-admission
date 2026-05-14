@@ -44,6 +44,9 @@ import {
   clearUserAnalyticsCacheHandler,
   getMyAssignmentHistory,
   getAssignmentDetailsByDate,
+  getProLeaves,
+  markProLeave,
+  deleteProLeave
 } from '../controllers/leadAssignment.controller.js';
 import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
@@ -109,8 +112,13 @@ router.get('/analytics/me/assignments', getMyAssignmentHistory);
 router.get('/analytics/me/assignments/details', getAssignmentDetailsByDate);
 // Allow managers to access user analytics (they can only see their team members)
 router.get('/analytics/users', getUserAnalytics);
-router.post('/analytics/users/cache', isSuperAdmin, clearUserAnalyticsCacheHandler);
 router.get('/analytics/:userId', getUserLeadAnalytics);
+router.post('/analytics/users/cache', isSuperAdmin, clearUserAnalyticsCacheHandler);
+
+// PRO Leave Management routes (Super Admin only)
+router.get('/pro/leaves', isSuperAdmin, getProLeaves);
+router.post('/pro/leaves', isSuperAdmin, markProLeave);
+router.delete('/pro/leaves/:id', isSuperAdmin, deleteProLeave);
 
 // Activity log routes (must come before /:id routes)
 router.post('/:leadId/activity', addActivity);
