@@ -1109,3 +1109,37 @@ CREATE TABLE IF NOT EXISTS sms_bulk_job_items (
     INDEX idx_sms_bulk_job_items_job (job_id, sort_order),
     INDEX idx_sms_bulk_job_items_lead (lead_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE whatsapp_conversations (
+    id VARCHAR(36) PRIMARY KEY,
+    lead_id VARCHAR(36) NULL,
+    contact_number VARCHAR(20) NOT NULL,
+    last_message_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_message_preview TEXT,
+    unread_count INT DEFAULT 0,
+    status ENUM('active', 'archived', 'blocked') DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY (contact_number),
+    INDEX (lead_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+DESCRIBE leads;
+
+CREATE TABLE whatsapp_messages (
+    id VARCHAR(36) PRIMARY KEY,
+    conversation_id VARCHAR(36) NOT NULL,
+    whatsapp_message_id VARCHAR(255) UNIQUE, -- Meta's message ID (wamid.xxx)
+    direction ENUM('inbound', 'outbound') NOT NULL,
+    type ENUM('text', 'image', 'video', 'document', 'audio', 'location', 'template', 'interactive') DEFAULT 'text',
+    content TEXT, -- The actual text or caption
+    media_url TEXT NULL,
+    media_id VARCHAR(255) NULL,
+    status ENUM('sent', 'delivered', 'read', 'failed', 'received') DEFAULT 'received',
+    sent_by VARCHAR(36) NULL, -- User ID if sent by a staff member
+    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metadata JSON NULL, -- To store extra info like button clicks
+    INDEX (conversation_id),
+    INDEX (sent_at),
+    FOREIGN KEY (conversation_id) REFERENCES whatsapp_conversations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
