@@ -456,7 +456,7 @@ export const getWhatsAppConversations = async (req, res) => {
   try {
     const pool = getPool();
     const [rows] = await pool.execute(
-      `SELECT c.*, l.name as lead_name, l.enquiryNumber as lead_enquiry_number
+      `SELECT c.*, l.name as lead_name, l.enquiry_number as lead_enquiry_number
        FROM whatsapp_conversations c
        LEFT JOIN leads l ON c.lead_id = l.id
        ORDER BY c.last_message_at DESC`
