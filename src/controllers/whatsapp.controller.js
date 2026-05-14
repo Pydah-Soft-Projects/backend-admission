@@ -12,69 +12,142 @@ import { v4 as uuidv4 } from 'uuid';
 export const sendWhatsAppCommunication = async (req, res) => {
   try {
     const { leadId } = req.params;
-    const { templateName, languageCode, variables, contactNumber } = req.body;
+    const { 
+      templateName, 
+      templateId, // Support both
+      languageCode, 
+      variables, 
+      contactNumber, // Single
+      contactNumbers, // Array (Frontend sends this)
+      headerHandle 
+    } = req.body;
+    
     const pool = getPool();
     const userId = req.user.id || req.user._id;
 
-    if (!templateName) {
-      return errorResponse(res, 'Template name is required', 400);
+    const technicalTemplateName = templateId || templateName;
+
+    if (!technicalTemplateName) {
+      return errorResponse(res, 'Template name/ID is required', 400);
     }
 
-    const { lead, validatedNumbers } = await ensureLeadAndNumbers(leadId, [contactNumber]);
-    const recipientNumber = validatedNumbers[0];
+    // Determine target numbers
+    const targetNumbers = contactNumbers || (contactNumber ? [contactNumber] : []);
+    if (!targetNumbers.length) {
+      return errorResponse(res, 'At least one contact number is required', 400);
+    }
 
-    // 0. Fetch template metadata for headers
+    const { lead, validatedNumbers } = await ensureLeadAndNumbers(leadId, targetNumbers);
+
+    // 0. Fetch template metadata
     const [templates] = await pool.execute(
-      'SELECT header_type, header_handle, header_text, variable_count FROM message_templates WHERE (name = ? OR dlt_template_id = ?) AND category = "whatsapp" LIMIT 1',
-      [templateName, templateName]
+      'SELECT id, name, dlt_template_id, language, header_type, header_handle, header_text, variable_count FROM message_templates WHERE (name = ? OR dlt_template_id = ?) AND category = "whatsapp" LIMIT 1',
+      [technicalTemplateName, technicalTemplateName]
     );
     
     const template = templates[0];
-    const headerConfig = template ? {
-      type: template.header_type,
-      handle: template.header_handle,
-      text: template.header_text
-    } : null;
+    if (!template) {
+      return errorResponse(res, 'Template not found', 404);
+    }
 
-    // Format variables for WhatsApp API
-    const components = whatsappService.formatVariables(variables, headerConfig);
+    const headerConfig = {
+      type: template.header_type || 'NONE',
+      handle: headerHandle || template.header_handle || null,
+      text: template.header_text || null
+    };
 
-    // 1. Send via Service using the technical name (dlt_template_id)
-    const technicalName = template?.dlt_template_id || templateName;
-    const result = await whatsappService.sendTemplateMessage(
-      recipientNumber,
-      technicalName,
-      languageCode || 'en_US',
-      components
-    );
+    // Format variables once (Convert object to array if needed)
+    const variablesArray = variables && typeof variables === 'object' 
+      ? Object.keys(variables)
+          .sort((a, b) => parseInt(a) - parseInt(b))
+          .map(key => variables[key])
+      : (Array.isArray(variables) ? variables : []);
 
-    // 2. Log in Communications table
-    const communicationId = uuidv4();
-    await pool.execute(
-      `INSERT INTO communications (
-        id, lead_id, contact_number, type, direction, 
-        template_name, template_rendered_content, template_variables,
-        sent_by, sent_at, status, provider_message_ids, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
-      [
-        communicationId,
-        lead.id,
-        recipientNumber,
-        'whatsapp',
-        'outgoing',
-        templateName,
-        `WhatsApp Template: ${templateName}`, // Simplified content for log
-        JSON.stringify(variables),
-        userId,
-        result.success ? 'success' : 'failed',
-        JSON.stringify([result.messageId]),
-      ]
-    );
+    const components = whatsappService.formatVariables(variablesArray, headerConfig);
+    const technicalName = template.dlt_template_id || template.name;
+    const finalLanguageCode = languageCode || template.language || 'en';
 
-    return successResponse(res, { 
-      communicationId, 
-      messageId: result.messageId 
-    }, 'WhatsApp message sent successfully');
+    const results = [];
+    for (const recipientNumber of validatedNumbers) {
+      try {
+        // 1. Send via Service
+        const result = await whatsappService.sendTemplateMessage(
+          recipientNumber,
+          technicalName,
+          finalLanguageCode,
+          components
+        );
+
+        // 2. Log in Communications table (Aligned with system schema)
+        const communicationId = uuidv4();
+        await pool.execute(
+          `INSERT INTO communications (
+            id, lead_id, contact_number, type, direction, status, sent_by, sent_at,
+            template_id, template_dlt_template_id, template_name, template_language,
+            template_original_content, template_rendered_content, template_variables,
+            provider_message_ids, metadata, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            communicationId,
+            lead.id || null,
+            recipientNumber,
+            'whatsapp',
+            'outgoing',
+            result.success ? 'success' : 'failed',
+            userId || null,
+            template.id || null,
+            template.dlt_template_id || null,
+            template.name || null,
+            template.language || null,
+            template.content || null, // template_original_content
+            `WhatsApp Template: ${template.name}`, // template_rendered_content
+            JSON.stringify(variables || {}),
+            JSON.stringify([result.messageId].filter(Boolean)),
+            JSON.stringify({ headerConfig, apiResponse: result.data || {} }),
+          ]
+        );
+
+        // 3. Add Activity Log
+        const activityLogId = uuidv4();
+        const statusLabel = result.success ? 'sent' : 'failed';
+        await pool.execute(
+          `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            activityLogId,
+            lead.id || null,
+            'comment',
+            `WhatsApp "${template.name}" ${statusLabel} to ${recipientNumber}`,
+            userId || null,
+            JSON.stringify({
+              communicationType: 'whatsapp',
+              templateId: template.id,
+              templateName: template.name,
+              number: recipientNumber,
+              status: result.success ? 'success' : 'failed',
+              messageId: result.messageId,
+              communicationId
+            }),
+          ]
+        );
+
+        // 4. Update Lead follows
+        await pool.execute('UPDATE leads SET last_follow_up = NOW(), updated_at = NOW() WHERE id = ?', [lead.id]);
+
+        results.push({ number: recipientNumber, success: true, messageId: result.messageId });
+      } catch (err) {
+        console.error(`[WhatsApp Loop Error] Number: ${recipientNumber}`, err);
+        results.push({ number: recipientNumber, success: false, error: err.message });
+      }
+    }
+
+    const someSuccess = results.some(r => r.success);
+
+    if (someSuccess) {
+      return successResponse(res, { results }, 'WhatsApp dispatch process completed');
+    } else {
+      const firstError = results[0]?.error || 'Unknown error';
+      return errorResponse(res, `Failed to send any WhatsApp messages: ${firstError}`, 500, { results });
+    }
 
   } catch (error) {
     console.error('WhatsApp Controller Error:', error);
