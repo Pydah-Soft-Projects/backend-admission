@@ -322,10 +322,222 @@ export const syncWhatsAppTemplates = async (req, res) => {
 
     return successResponse(res, { syncCount }, `Successfully synced ${syncCount} templates from WhatsApp`);
   } catch (error) {
-    console.error('WhatsApp Sync Error:', error);
-    return errorResponse(res, error.message || 'Failed to sync WhatsApp templates', 500);
+    console.error('Sync WhatsApp Templates Error:', error);
+    return errorResponse(res, error.message || 'Failed to sync templates', 500);
   }
 };
+
+/**
+ * Webhook Verification (GET)
+ */
+export const verifyWhatsAppWebhook = (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'pydah_whatsapp_token';
+
+  if (mode && token) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+      console.log('[WhatsApp Webhook] Verified');
+      return res.status(200).send(challenge);
+    } else {
+      return res.sendStatus(403);
+    }
+  }
+  return res.sendStatus(400);
+};
+
+/**
+ * Webhook Reception (POST)
+ */
+export const receiveWhatsAppWebhook = async (req, res) => {
+  try {
+    const { body } = req;
+    console.log('[WhatsApp Webhook Received]', JSON.stringify(body, null, 2));
+
+    if (body.object === 'whatsapp_business_account') {
+      const entry = body.entry?.[0];
+      const changes = entry?.changes?.[0];
+      const value = changes?.value;
+      const messages = value?.messages;
+
+      if (messages && messages[0]) {
+        const msg = messages[0];
+        const from = msg.from; // Phone number
+        const msgId = msg.id;
+        const timestamp = msg.timestamp;
+        const type = msg.type;
+        
+        let content = '';
+        let mediaId = null;
+
+        if (type === 'text') {
+          content = msg.text.body;
+        } else if (type === 'image') {
+          content = msg.image.caption || 'Image';
+          mediaId = msg.image.id;
+        } else if (type === 'video') {
+          content = msg.video.caption || 'Video';
+          mediaId = msg.video.id;
+        } else if (type === 'document') {
+          content = msg.document.filename || 'Document';
+          mediaId = msg.document.id;
+        } else if (type === 'button') {
+          content = msg.button.text;
+        } else if (type === 'interactive') {
+          if (msg.interactive.type === 'button_reply') {
+            content = msg.interactive.button_reply.title;
+          } else if (msg.interactive.type === 'list_reply') {
+            content = msg.interactive.list_reply.title;
+          }
+        }
+
+        const pool = getPool();
+
+        // 1. Find the lead by phone number (last 10 digits)
+        const cleanFrom = from.replace(/\D/g, '').slice(-10);
+        const [leads] = await pool.execute(
+          'SELECT id, name FROM leads WHERE phone LIKE ? OR alternateMobile LIKE ? LIMIT 1',
+          [`%${cleanFrom}`, `%${cleanFrom}`]
+        );
+        const lead = leads[0];
+
+        // 2. Find or create conversation
+        let [conversations] = await pool.execute(
+          'SELECT id FROM whatsapp_conversations WHERE contact_number = ?',
+          [from]
+        );
+
+        let conversationId;
+        if (conversations.length === 0) {
+          conversationId = uuidv4();
+          await pool.execute(
+            `INSERT INTO whatsapp_conversations (id, lead_id, contact_number, last_message_preview, unread_count) 
+             VALUES (?, ?, ?, ?, 1)`,
+            [conversationId, lead?.id || null, from, content]
+          );
+        } else {
+          conversationId = conversations[0].id;
+          await pool.execute(
+            `UPDATE whatsapp_conversations SET 
+              lead_id = COALESCE(lead_id, ?), 
+              last_message_preview = ?, 
+              unread_count = unread_count + 1, 
+              last_message_at = NOW(),
+              updated_at = NOW() 
+             WHERE id = ?`,
+            [lead?.id || null, content, conversationId]
+          );
+        }
+
+        // 3. Save message
+        await pool.execute(
+          `INSERT INTO whatsapp_messages (id, conversation_id, whatsapp_message_id, direction, type, content, media_id, status, sent_at)
+           VALUES (?, ?, ?, 'inbound', ?, ?, ?, 'received', FROM_UNIXTIME(?))`,
+          [uuidv4(), conversationId, msgId, type, content, mediaId, timestamp]
+        );
+
+        console.log(`[WhatsApp Webhook] Message saved for ${from}`);
+      }
+    }
+
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (error) {
+    console.error('WhatsApp Webhook Error:', error);
+    return res.status(200).send('EVENT_RECEIVED'); // Always return 200 to Meta to avoid retry loops
+  }
+};
+
+/**
+ * Get List of WhatsApp Conversations
+ */
+export const getWhatsAppConversations = async (req, res) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.execute(
+      `SELECT c.*, l.name as lead_name, l.enquiryNumber as lead_enquiry_number
+       FROM whatsapp_conversations c
+       LEFT JOIN leads l ON c.lead_id = l.id
+       ORDER BY c.last_message_at DESC`
+    );
+    return successResponse(res, rows);
+  } catch (error) {
+    return errorResponse(res, error.message, 500);
+  }
+};
+
+/**
+ * Get Message History for a Conversation
+ */
+export const getWhatsAppMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const pool = getPool();
+    
+    // Mark as read when fetching
+    await pool.execute(
+      'UPDATE whatsapp_conversations SET unread_count = 0 WHERE id = ?',
+      [conversationId]
+    );
+
+    const [rows] = await pool.execute(
+      `SELECT m.*, u.name as sent_by_name
+       FROM whatsapp_messages m
+       LEFT JOIN users u ON m.sent_by = u.id
+       WHERE m.conversation_id = ?
+       ORDER BY m.sent_at ASC`,
+      [conversationId]
+    );
+    return successResponse(res, rows);
+  } catch (error) {
+    return errorResponse(res, error.message, 500);
+  }
+};
+
+/**
+ * Send a manual reply (Chat)
+ */
+export const sendWhatsAppChatReply = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { text } = req.body;
+    const userId = req.user.id || req.user._id;
+
+    if (!text) return errorResponse(res, 'Message text is required', 400);
+
+    const pool = getPool();
+    const [conversations] = await pool.execute(
+      'SELECT id, contact_number FROM whatsapp_conversations WHERE id = ?',
+      [conversationId]
+    );
+
+    if (conversations.length === 0) return errorResponse(res, 'Conversation not found', 404);
+    const conversation = conversations[0];
+
+    // 1. Send via WhatsApp Service
+    const result = await whatsappService.sendTextMessage(conversation.contact_number, text);
+
+    // 2. Save Message
+    const msgId = uuidv4();
+    await pool.execute(
+      `INSERT INTO whatsapp_messages (id, conversation_id, whatsapp_message_id, direction, type, content, status, sent_by, sent_at)
+       VALUES (?, ?, ?, 'outbound', 'text', ?, 'sent', ?, NOW())`,
+      [msgId, conversationId, result.messageId, text, userId]
+    );
+
+    // 3. Update Conversation
+    await pool.execute(
+      'UPDATE whatsapp_conversations SET last_message_preview = ?, last_message_at = NOW(), updated_at = NOW() WHERE id = ?',
+      [text, conversationId]
+    );
+
+    return successResponse(res, { id: msgId, status: 'sent' }, 'Message sent');
+  } catch (error) {
+    return errorResponse(res, error.message, 500);
+  }
+};
+
 export const uploadWhatsAppMedia = async (req, res) => {
   try {
     if (!req.file) {
