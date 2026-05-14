@@ -10,7 +10,8 @@ import {
 import { 
   sendWhatsAppCommunication, 
   syncWhatsAppTemplates,
-  uploadWhatsAppMedia
+  uploadWhatsAppMedia,
+  verifyWhatsAppContact
 } from '../controllers/whatsapp.controller.js';
 import multer from 'multer';
 import os from 'os';
@@ -73,6 +74,7 @@ router.post('/lead/:leadId/sms', sendSmsCommunication);
 router.get('/lead/:leadId/history', getLeadCommunications);
 router.get('/lead/:leadId/stats', getLeadCommunicationStats);
 router.post('/lead/:leadId/whatsapp', sendWhatsAppCommunication);
+router.get('/whatsapp/verify', verifyWhatsAppContact);
 
 // Bulk SMS & WhatsApp Jobs
 router.post('/sms-bulk/jobs', isSuperAdmin, createBulkSmsJob);

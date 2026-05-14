@@ -155,6 +155,35 @@ export const sendWhatsAppCommunication = async (req, res) => {
   }
 };
 
+export const verifyWhatsAppContact = async (req, res) => {
+  try {
+    const { phone } = req.query;
+    if (!phone) {
+      return errorResponse(res, 'Phone number is required', 400);
+    }
+
+    const cleanPhone = phone.replace(/\D/g, '').slice(-10); // Match last 10 digits
+    const pool = getPool();
+
+    // Check if we have any successful WhatsApp communication records for this number
+    const [rows] = await pool.execute(
+      `SELECT id FROM communications 
+       WHERE contact_number LIKE ? AND type = 'whatsapp' AND status IN ('success', 'accepted') 
+       LIMIT 1`,
+      [`%${cleanPhone}`]
+    );
+
+    return successResponse(res, {
+      success: true,
+      status: rows.length > 0 ? 'valid' : 'unknown',
+      source: 'local_history'
+    }, 'WhatsApp contact status checked against history');
+  } catch (error) {
+    console.error('Verify WhatsApp Contact Error:', error);
+    return errorResponse(res, error.message || 'Failed to verify contact', 500);
+  }
+};
+
 export const syncWhatsAppTemplates = async (req, res) => {
   try {
     const remoteTemplates = await whatsappService.fetchRemoteTemplates();
