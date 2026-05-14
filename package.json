@@ -23,6 +23,7 @@
     "migrate:user-analytics-indexes": "node src/scripts-sql/addUserAnalyticsPerformanceIndexes.js",
     "migrate:joining-public-edit-tokens": "node src/scripts-sql/migrateJoiningPublicEditTokens.js",
     "migrate:joining-online-admission-sms-template": "node src/scripts-sql/migrateJoiningOnlineAdmissionSmsTemplate.js",
+    "migrate:qualification-merit": "node src/scripts/ensureQualificationMeritColumns.js",
     "migrate:admission-confirmation-sms-template": "node src/scripts-sql/migrateAdmissionConfirmationSmsTemplate.js",
     "migrate:parent-portrait-columns": "node src/scripts-sql/runParentPortraitColumnsMigration.js",
     "db:analyze-admissions-2026": "node src/scripts/analyzeAdmissions2026PrimaryVsSecondary.js",

@@ -4,6 +4,7 @@ import {
   listJoinings,
   getJoining,
   saveJoiningDraft,
+  patchJoiningStepTwo,
   submitJoiningForApproval,
   approveJoining,
 } from '../controllers/joining.controller.js';
@@ -20,6 +21,7 @@ router.get('/', listJoinings);
 router.post('/send-public-link', createJoiningDraftAndPublicLink);
 router.post('/:leadId/public-edit-link', createJoiningPublicEditLink);
 router.get('/:leadId', getJoining);
+router.patch('/:leadId/step-two', isSuperAdmin, patchJoiningStepTwo);
 router.post('/:leadId', saveJoiningDraft);
 router.post('/:leadId/submit', submitJoiningForApproval);
 router.post('/:leadId/approve', isSuperAdmin, approveJoining);
