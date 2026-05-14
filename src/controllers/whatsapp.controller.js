@@ -398,8 +398,8 @@ export const receiveWhatsAppWebhook = async (req, res) => {
         // 1. Find the lead by phone number (last 10 digits)
         const cleanFrom = from.replace(/\D/g, '').slice(-10);
         const [leads] = await pool.execute(
-          'SELECT id, name FROM leads WHERE phone LIKE ? OR alternateMobile LIKE ? LIMIT 1',
-          [`%${cleanFrom}`, `%${cleanFrom}`]
+          'SELECT id, name FROM leads WHERE phone LIKE ? OR alternate_mobile LIKE ? OR father_phone LIKE ? LIMIT 1',
+          [`%${cleanFrom}`, `%${cleanFrom}`, `%${cleanFrom}`]
         );
         const lead = leads[0];
 
