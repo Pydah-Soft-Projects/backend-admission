@@ -1,5 +1,6 @@
 import { getPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { getTableColumnSet } from '../utils/secondarySchema.util.js';
 import {
   buildCoursesSelectList,
   resolveCourseLevelFromRow,
@@ -78,15 +79,31 @@ export const listCourses = async (req, res) => {
     const pool = getPool();
     const courseCols = await buildCoursesSelectList(pool);
 
+    const rawCollege = req.query.collegeId ?? req.query.college_id;
+    let collegeIdInt = null;
+    if (rawCollege !== undefined && rawCollege !== null && String(rawCollege).trim() !== '') {
+      const parsed = parseInt(String(rawCollege).trim(), 10);
+      if (!Number.isNaN(parsed)) collegeIdInt = parsed;
+    }
+    const courseTableCols = await getTableColumnSet(pool, 'courses');
+    const hasCollegeIdCol = courseTableCols.has('college_id');
+
     // Build query for secondary database
     let query = `SELECT ${courseCols} FROM courses`;
     const params = [];
-    
+    const conditions = [];
     if (!showInactive) {
-      query += ' WHERE is_active = ?';
+      conditions.push('is_active = ?');
       params.push(1); // tinyint(1) uses 1 for true
     }
-    
+    if (collegeIdInt != null && hasCollegeIdCol) {
+      conditions.push('college_id = ?');
+      params.push(collegeIdInt);
+    }
+    if (conditions.length) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+
     query += ' ORDER BY name ASC';
 
     const [courses] = await pool.execute(query, params);

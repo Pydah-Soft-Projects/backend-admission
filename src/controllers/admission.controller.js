@@ -8,6 +8,10 @@ import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import ExcelJS from 'exceljs';
+import {
+  FATHER_PHOTO_REG_KEYS,
+  MOTHER_PHOTO_REG_KEYS,
+} from '../utils/joiningParentPhotos.util.js';
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -52,6 +56,30 @@ const parseAdmissionLeadData = (value) => {
   return value && typeof value === 'object' ? value : {};
 };
 
+const qualificationMeritFromSql = (value) => {
+  if (value === null || value === undefined) return null;
+  if (value === 1 || value === true) return true;
+  return false;
+};
+
+const qualificationMeritToSql = (merit) => {
+  if (merit === true) return 1;
+  if (merit === false) return 0;
+  return null;
+};
+
+function pickFromRegistrationFormData(registrationFormData, keys) {
+  if (!registrationFormData || typeof registrationFormData !== 'object') return '';
+  const want = new Set(keys.map((k) => String(k).toLowerCase()));
+  for (const [k, v] of Object.entries(registrationFormData)) {
+    if (!want.has(String(k).toLowerCase())) continue;
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
 // Helper function to format lead data from SQL
 const formatLead = (leadData) => {
   if (!leadData) return null;
@@ -94,12 +122,12 @@ export const formatAdmission = async (admissionData, pool) => {
   const leadDataRaw = typeof admissionData.lead_data === 'string'
     ? JSON.parse(admissionData.lead_data)
     : admissionData.lead_data || {};
-  const registrationFormData =
+  let registrationFormData =
     leadDataRaw &&
     typeof leadDataRaw === 'object' &&
     leadDataRaw._joiningRegistrationExtras &&
     typeof leadDataRaw._joiningRegistrationExtras === 'object'
-      ? leadDataRaw._joiningRegistrationExtras
+      ? { ...leadDataRaw._joiningRegistrationExtras }
       : {};
   const leadData =
     leadDataRaw && typeof leadDataRaw === 'object'
@@ -114,6 +142,25 @@ export const formatAdmission = async (admissionData, pool) => {
           return rest;
         })()
       : leadDataRaw;
+
+  const fromRegFatherPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    FATHER_PHOTO_REG_KEYS
+  );
+  const fromRegMotherPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    MOTHER_PHOTO_REG_KEYS
+  );
+  const colFatherPhoto = String(admissionData.father_photo || '').trim();
+  const colMotherPhoto = String(admissionData.mother_photo || '').trim();
+  const fatherPortrait = (fromRegFatherPhoto || colFatherPhoto || '').trim();
+  const motherPortrait = (fromRegMotherPhoto || colMotherPhoto || '').trim();
+  if (colFatherPhoto && !fromRegFatherPhoto) {
+    registrationFormData = { ...registrationFormData, father_photo: colFatherPhoto };
+  }
+  if (colMotherPhoto && !fromRegMotherPhoto) {
+    registrationFormData = { ...registrationFormData, mother_photo: colMotherPhoto };
+  }
 
   const reservationOther = typeof admissionData.reservation_other === 'string'
     ? JSON.parse(admissionData.reservation_other)
@@ -177,11 +224,13 @@ export const formatAdmission = async (admissionData, pool) => {
         name: admissionData.father_name || '',
         phone: admissionData.father_phone || '',
         aadhaarNumber: admissionData.father_aadhaar_number || '',
+        photo: fatherPortrait,
       },
       mother: {
         name: admissionData.mother_name || '',
         phone: admissionData.mother_phone || '',
         aadhaarNumber: admissionData.mother_aadhaar_number || '',
+        photo: motherPortrait,
       },
     },
     reservation: {
@@ -213,6 +262,7 @@ export const formatAdmission = async (admissionData, pool) => {
       ssc: admissionData.qualification_ssc === 1 || admissionData.qualification_ssc === true,
       interOrDiploma: admissionData.qualification_inter_diploma === 1 || admissionData.qualification_inter_diploma === true,
       ug: admissionData.qualification_ug === 1 || admissionData.qualification_ug === true,
+      merit: qualificationMeritFromSql(admissionData.qualification_merit),
       mediums: qualificationMediums,
       otherMediumLabel: admissionData.qualification_other_medium_label || '',
     },
@@ -1016,6 +1066,11 @@ export const updateAdmissionById = async (req, res) => {
           updateFields.push('father_aadhaar_number = ?');
           updateParams.push(payload.parents.father.aadhaarNumber || null);
         }
+        if (payload.parents.father.photo !== undefined) {
+          updateFields.push('father_photo = ?');
+          const p = String(payload.parents.father.photo || '').trim();
+          updateParams.push(p || null);
+        }
       }
       if (payload.parents.mother !== undefined) {
         if (payload.parents.mother.name !== undefined) {
@@ -1029,6 +1084,11 @@ export const updateAdmissionById = async (req, res) => {
         if (payload.parents.mother.aadhaarNumber !== undefined) {
           updateFields.push('mother_aadhaar_number = ?');
           updateParams.push(payload.parents.mother.aadhaarNumber || null);
+        }
+        if (payload.parents.mother.photo !== undefined) {
+          updateFields.push('mother_photo = ?');
+          const p = String(payload.parents.mother.photo || '').trim();
+          updateParams.push(p || null);
         }
       }
     }
@@ -1088,6 +1148,10 @@ export const updateAdmissionById = async (req, res) => {
       if (payload.qualifications.ug !== undefined) {
         updateFields.push('qualification_ug = ?');
         updateParams.push(payload.qualifications.ug === true ? 1 : 0);
+      }
+      if (payload.qualifications.merit !== undefined) {
+        updateFields.push('qualification_merit = ?');
+        updateParams.push(qualificationMeritToSql(payload.qualifications.merit));
       }
       if (payload.qualifications.mediums !== undefined) {
         updateFields.push('qualification_mediums = ?');
@@ -1254,6 +1318,11 @@ export const updateAdmissionByLead = async (req, res) => {
           updateFields.push('father_aadhaar_number = ?');
           updateParams.push(payload.parents.father.aadhaarNumber || null);
         }
+        if (payload.parents.father.photo !== undefined) {
+          updateFields.push('father_photo = ?');
+          const p = String(payload.parents.father.photo || '').trim();
+          updateParams.push(p || null);
+        }
       }
       if (payload.parents.mother !== undefined) {
         if (payload.parents.mother.name !== undefined) {
@@ -1268,6 +1337,11 @@ export const updateAdmissionByLead = async (req, res) => {
           updateFields.push('mother_aadhaar_number = ?');
           updateParams.push(payload.parents.mother.aadhaarNumber || null);
         }
+        if (payload.parents.mother.photo !== undefined) {
+          updateFields.push('mother_photo = ?');
+          const p = String(payload.parents.mother.photo || '').trim();
+          updateParams.push(p || null);
+        }
       }
     }
 
@@ -1279,6 +1353,10 @@ export const updateAdmissionByLead = async (req, res) => {
       if (payload.reservation.other !== undefined) {
         updateFields.push('reservation_other = ?');
         updateParams.push(JSON.stringify(payload.reservation.other || []));
+      }
+      if (payload.reservation.isEws !== undefined) {
+        updateFields.push('reservation_is_ews = ?');
+        updateParams.push(payload.reservation.isEws === true ? 1 : 0);
       }
     }
 
@@ -1322,6 +1400,10 @@ export const updateAdmissionByLead = async (req, res) => {
       if (payload.qualifications.ug !== undefined) {
         updateFields.push('qualification_ug = ?');
         updateParams.push(payload.qualifications.ug === true ? 1 : 0);
+      }
+      if (payload.qualifications.merit !== undefined) {
+        updateFields.push('qualification_merit = ?');
+        updateParams.push(qualificationMeritToSql(payload.qualifications.merit));
       }
       if (payload.qualifications.mediums !== undefined) {
         updateFields.push('qualification_mediums = ?');

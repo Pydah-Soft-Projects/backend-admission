@@ -1,6 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { getTableColumnSet } from '../utils/secondarySchema.util.js';
 import {
   buildCoursesSelectList,
   resolveCourseLevelFromRow,
@@ -83,18 +84,29 @@ const formatPaymentConfig = (configData) => {
 /**
  * Course/branch directory + fee configs (same shape as GET /payments/settings data payload).
  * @param {boolean} showInactive
+ * @param {number|null} [collegeIdInt] — when set, only courses for this secondary `colleges.id` (requires `courses.college_id`).
  * @returns {Promise<Array<{ course: object; branches: object[]; payment: object }>>}
  */
-export async function fetchCoursePaymentCatalogPayload(showInactive = false) {
+export async function fetchCoursePaymentCatalogPayload(showInactive = false, collegeIdInt = null) {
   const secondaryPool = getSecondaryPool();
   const primaryPool = getPool();
   const courseCols = await buildCoursesSelectList(secondaryPool);
+  const courseTableCols = await getTableColumnSet(secondaryPool, 'courses');
+  const hasCollegeIdCol = courseTableCols.has('college_id');
 
   let courseQuery = `SELECT ${courseCols} FROM courses`;
   const courseParams = [];
+  const conditions = [];
   if (!showInactive) {
-    courseQuery += ' WHERE is_active = ?';
+    conditions.push('is_active = ?');
     courseParams.push(1);
+  }
+  if (collegeIdInt != null && hasCollegeIdCol) {
+    conditions.push('college_id = ?');
+    courseParams.push(collegeIdInt);
+  }
+  if (conditions.length) {
+    courseQuery += ` WHERE ${conditions.join(' AND ')}`;
   }
   courseQuery += ' ORDER BY name ASC';
 
@@ -188,7 +200,13 @@ export async function fetchCoursePaymentCatalogPayload(showInactive = false) {
 export const getPaymentSettings = async (req, res) => {
   try {
     const showInactive = req.query.showInactive === 'true';
-    const payload = await fetchCoursePaymentCatalogPayload(showInactive);
+    const rawCollege = req.query.collegeId ?? req.query.college_id;
+    let collegeIdInt = null;
+    if (rawCollege !== undefined && rawCollege !== null && String(rawCollege).trim() !== '') {
+      const parsed = parseInt(String(rawCollege).trim(), 10);
+      if (!Number.isNaN(parsed)) collegeIdInt = parsed;
+    }
+    const payload = await fetchCoursePaymentCatalogPayload(showInactive, collegeIdInt);
     return successResponse(res, payload);
   } catch (error) {
     console.error('Get payment settings error:', error);

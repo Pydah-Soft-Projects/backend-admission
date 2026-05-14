@@ -135,6 +135,7 @@ const admissionSchema = new Schema(
       ssc: { type: Boolean, default: false },
       interOrDiploma: { type: Boolean, default: false },
       ug: { type: Boolean, default: false },
+      merit: { type: Boolean, default: null },
       mediums: {
         type: [String],
         enum: ['english', 'telugu', 'other'],

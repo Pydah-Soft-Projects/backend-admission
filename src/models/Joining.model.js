@@ -69,11 +69,13 @@ const joiningSchema = new Schema(
         name: { type: String, trim: true, default: '' },
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
+        photo: { type: String, default: '' },
       },
       mother: {
         name: { type: String, trim: true, default: '' },
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
+        photo: { type: String, default: '' },
       },
     },
     reservation: {
@@ -114,6 +116,7 @@ const joiningSchema = new Schema(
       ssc: { type: Boolean, default: false },
       interOrDiploma: { type: Boolean, default: false },
       ug: { type: Boolean, default: false },
+      merit: { type: Boolean, default: null },
       mediums: {
         type: [String],
         enum: ['english', 'telugu', 'other'],

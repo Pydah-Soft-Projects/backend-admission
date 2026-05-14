@@ -6,6 +6,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
+import {
+  FATHER_PHOTO_REG_KEYS,
+  MOTHER_PHOTO_REG_KEYS,
+} from '../utils/joiningParentPhotos.util.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -384,6 +388,18 @@ const ensureLeadForApprovedJoining = async ({
 };
 
 // Helper function to format joining data from SQL to camelCase
+const qualificationMeritToSql = (merit) => {
+  if (merit === true) return 1;
+  if (merit === false) return 0;
+  return null;
+};
+
+const qualificationMeritFromSql = (value) => {
+  if (value === null || value === undefined) return null;
+  if (value === 1 || value === true) return true;
+  return false;
+};
+
 const formatJoining = async (joiningData, pool) => {
   if (!joiningData) return null;
 
@@ -494,6 +510,25 @@ const formatJoining = async (joiningData, pool) => {
       ? String(rawJoiningBranchId).trim()
       : null;
 
+  const fromRegFatherPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    FATHER_PHOTO_REG_KEYS
+  );
+  const fromRegMotherPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    MOTHER_PHOTO_REG_KEYS
+  );
+  const colFatherPhoto = String(joiningData.father_photo || '').trim();
+  const colMotherPhoto = String(joiningData.mother_photo || '').trim();
+  const fatherPortrait = (fromRegFatherPhoto || colFatherPhoto || '').trim();
+  const motherPortrait = (fromRegMotherPhoto || colMotherPhoto || '').trim();
+  if (colFatherPhoto && !fromRegFatherPhoto) {
+    registrationFormData = { ...registrationFormData, father_photo: colFatherPhoto };
+  }
+  if (colMotherPhoto && !fromRegMotherPhoto) {
+    registrationFormData = { ...registrationFormData, mother_photo: colMotherPhoto };
+  }
+
   return {
     _id: joiningData.id,
     id: joiningData.id,
@@ -531,11 +566,13 @@ const formatJoining = async (joiningData, pool) => {
         name: joiningData.father_name || '',
         phone: joiningData.father_phone || '',
         aadhaarNumber: joiningData.father_aadhaar_number || '',
+        photo: fatherPortrait,
       },
       mother: {
         name: joiningData.mother_name || '',
         phone: joiningData.mother_phone || '',
         aadhaarNumber: joiningData.mother_aadhaar_number || '',
+        photo: motherPortrait,
       },
     },
     reservation: {
@@ -567,6 +604,7 @@ const formatJoining = async (joiningData, pool) => {
       ssc: joiningData.qualification_ssc === 1 || joiningData.qualification_ssc === true,
       interOrDiploma: joiningData.qualification_inter_diploma === 1 || joiningData.qualification_inter_diploma === true,
       ug: joiningData.qualification_ug === 1 || joiningData.qualification_ug === true,
+      merit: qualificationMeritFromSql(joiningData.qualification_merit),
       mediums: qualificationMediums,
       otherMediumLabel: joiningData.qualification_other_medium_label || '',
     },
@@ -923,11 +961,13 @@ export const getJoining = async (req, res) => {
             name: '',
             phone: '',
             aadhaarNumber: '',
+            photo: '',
           },
           mother: {
             name: '',
             phone: '',
             aadhaarNumber: '',
+            photo: '',
           },
         },
         reservation: {
@@ -949,6 +989,7 @@ export const getJoining = async (req, res) => {
           ssc: false,
           interOrDiploma: false,
           ug: false,
+          merit: null,
           mediums: [],
           otherMediumLabel: '',
         },
@@ -1768,6 +1809,24 @@ export const saveJoiningDraft = async (req, res) => {
       };
     }
 
+    const regExtrasForParentPhotos =
+      finalPayload.leadData &&
+      typeof finalPayload.leadData === 'object' &&
+      finalPayload.leadData._joiningRegistrationExtras &&
+      typeof finalPayload.leadData._joiningRegistrationExtras === 'object'
+        ? finalPayload.leadData._joiningRegistrationExtras
+        : {};
+    const fatherPhotoForRowPick = pickFromRegistrationFormData(
+      regExtrasForParentPhotos,
+      FATHER_PHOTO_REG_KEYS
+    );
+    const motherPhotoForRowPick = pickFromRegistrationFormData(
+      regExtrasForParentPhotos,
+      MOTHER_PHOTO_REG_KEYS
+    );
+    const fatherPhotoForRow = fatherPhotoForRowPick ? fatherPhotoForRowPick : null;
+    const motherPhotoForRow = motherPhotoForRowPick ? motherPhotoForRowPick : null;
+
     // Update main joining record
     await pool.execute(
       `UPDATE joinings SET
@@ -1793,6 +1852,8 @@ export const saveJoiningDraft = async (req, res) => {
         mother_name = ?,
         mother_phone = ?,
         mother_aadhaar_number = ?,
+        father_photo = ?,
+        mother_photo = ?,
         reservation_general = ?,
         reservation_other = ?,
         address_door_street = ?,
@@ -1804,6 +1865,7 @@ export const saveJoiningDraft = async (req, res) => {
         qualification_ssc = ?,
         qualification_inter_diploma = ?,
         qualification_ug = ?,
+        qualification_merit = ?,
         qualification_mediums = ?,
         qualification_other_medium_label = ?,
         document_ssc = ?,
@@ -1853,6 +1915,8 @@ export const saveJoiningDraft = async (req, res) => {
         parents.mother?.name || '',
         parents.mother?.phone || '',
         parents.mother?.aadhaarNumber || null,
+        fatherPhotoForRow,
+        motherPhotoForRow,
         reservation.general || DEFAULT_GENERAL_RESERVATION,
         JSON.stringify(reservation.other || []),
         address.communication?.doorOrStreet || '',
@@ -1864,6 +1928,7 @@ export const saveJoiningDraft = async (req, res) => {
         qualifications.ssc === true ? 1 : 0,
         qualifications.interOrDiploma === true ? 1 : 0,
         qualifications.ug === true ? 1 : 0,
+        qualificationMeritToSql(qualifications.merit),
         JSON.stringify(qualifications.mediums || []),
         qualifications.otherMediumLabel || '',
         documents.ssc || 'pending',
@@ -2229,11 +2294,11 @@ export const approveJoining = async (req, res) => {
           lead_id = ?, enquiry_number = ?, lead_data = ?, admission_number = ?,
           course_id = ?, branch_id = ?, managed_course_id = ?, managed_branch_id = ?, course = ?, branch = ?, quota = ?,
           student_name = ?, student_phone = ?, student_gender = ?, student_date_of_birth = ?, student_notes = ?, student_aadhaar_number = ?,
-          father_name = ?, father_phone = ?, father_aadhaar_number = ?,
-          mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?,
+          father_name = ?, father_phone = ?, father_aadhaar_number = ?, father_photo = ?,
+          mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?, mother_photo = ?,
           reservation_general = ?, reservation_other = ?,
           address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?,
-          qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
+          qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_merit = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
           document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?, document_transfer_certificate = ?, document_study_certificate = ?,
           document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?, document_caste_certificate = ?,
           document_cet_rank_card = ?, document_cet_hall_ticket = ?, document_allotment_letter = ?, document_joining_report = ?,
@@ -2262,9 +2327,11 @@ export const approveJoining = async (req, res) => {
           formattedJoining.parents?.father?.name || '',
           formattedJoining.parents?.father?.phone || '',
           formattedJoining.parents?.father?.aadhaarNumber || null,
+          String(formattedJoining.parents?.father?.photo || '').trim() || null,
           formattedJoining.parents?.mother?.name || '',
           formattedJoining.parents?.mother?.phone || '',
           formattedJoining.parents?.mother?.aadhaarNumber || null,
+          String(formattedJoining.parents?.mother?.photo || '').trim() || null,
           formattedJoining.reservation?.general || 'oc',
           JSON.stringify(formattedJoining.reservation?.other || []),
           formattedJoining.address?.communication?.doorOrStreet || '',
@@ -2276,6 +2343,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.qualifications?.ssc === true ? 1 : 0,
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0,
           formattedJoining.qualifications?.ug === true ? 1 : 0,
+          qualificationMeritToSql(formattedJoining.qualifications?.merit),
           JSON.stringify(formattedJoining.qualifications?.mediums || []),
           formattedJoining.qualifications?.otherMediumLabel || '',
           formattedJoining.documents?.ssc || 'pending',
@@ -2305,18 +2373,18 @@ export const approveJoining = async (req, res) => {
           id, lead_id, enquiry_number, lead_data, joining_id, admission_number, status,
           course_id, branch_id, managed_course_id, managed_branch_id, course, branch, quota,
           student_name, student_phone, student_gender, student_date_of_birth, student_notes, student_aadhaar_number,
-          father_name, father_phone, father_aadhaar_number,
-          mother_name, mother_phone, mother_aadhaar_number,
+          father_name, father_phone, father_aadhaar_number, father_photo,
+          mother_name, mother_phone, mother_aadhaar_number, mother_photo,
           reservation_general, reservation_other,
           address_door_street, address_landmark, address_village_city, address_mandal, address_district, address_pin_code,
-          qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_mediums, qualification_other_medium_label,
+          qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_merit, qualification_mediums, qualification_other_medium_label,
           document_ssc, document_inter, document_ug_pg_cmm, document_transfer_certificate, document_study_certificate,
           document_aadhaar_card, document_photos, document_income_certificate, document_caste_certificate,
           document_cet_rank_card, document_cet_hall_ticket, document_allotment_letter, document_joining_report,
           document_bank_passbook, document_ration_card,
           reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -2341,11 +2409,13 @@ export const approveJoining = async (req, res) => {
           formattedJoining.parents?.father?.name || '', // 19
           formattedJoining.parents?.father?.phone || '', // 20
           formattedJoining.parents?.father?.aadhaarNumber || null, // 21
-          formattedJoining.parents?.mother?.name || '', // 22
-          formattedJoining.parents?.mother?.phone || '', // 23
-          formattedJoining.parents?.mother?.aadhaarNumber || null, // 24
-          formattedJoining.reservation?.general || 'oc', // 25
-          JSON.stringify(formattedJoining.reservation?.other || []), // 26
+          String(formattedJoining.parents?.father?.photo || '').trim() || null, // 22
+          formattedJoining.parents?.mother?.name || '', // 23
+          formattedJoining.parents?.mother?.phone || '', // 24
+          formattedJoining.parents?.mother?.aadhaarNumber || null, // 25
+          String(formattedJoining.parents?.mother?.photo || '').trim() || null, // 26
+          formattedJoining.reservation?.general || 'oc', // 27
+          JSON.stringify(formattedJoining.reservation?.other || []), // 28
           formattedJoining.address?.communication?.doorOrStreet || '', // 27
           formattedJoining.address?.communication?.landmark || '', // 28
           formattedJoining.address?.communication?.villageOrCity || '', // 29
@@ -2355,6 +2425,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.qualifications?.ssc === true ? 1 : 0, // 33
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0, // 34
           formattedJoining.qualifications?.ug === true ? 1 : 0, // 35
+          qualificationMeritToSql(formattedJoining.qualifications?.merit),
           JSON.stringify(formattedJoining.qualifications?.mediums || []), // 36
           formattedJoining.qualifications?.otherMediumLabel || '', // 37
           formattedJoining.documents?.ssc || 'pending', // 38
