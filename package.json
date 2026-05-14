@@ -24,6 +24,7 @@
     "migrate:joining-public-edit-tokens": "node src/scripts-sql/migrateJoiningPublicEditTokens.js",
     "migrate:joining-online-admission-sms-template": "node src/scripts-sql/migrateJoiningOnlineAdmissionSmsTemplate.js",
     "migrate:admission-confirmation-sms-template": "node src/scripts-sql/migrateAdmissionConfirmationSmsTemplate.js",
+    "migrate:parent-portrait-columns": "node src/scripts-sql/runParentPortraitColumnsMigration.js",
     "db:analyze-admissions-2026": "node src/scripts/analyzeAdmissions2026PrimaryVsSecondary.js",
     "db:sync-managed-ids-verify-secondary": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js",
     "db:sync-managed-ids-verify-secondary:dry": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js --dry-run",
