@@ -272,7 +272,7 @@ export const getLeadCommunications = async (req, res) => {
     const conditions = ['c.lead_id = ?'];
     const params = [leadId];
 
-    if (type && ['call', 'sms'].includes(type)) {
+    if (type && ['call', 'sms', 'whatsapp'].includes(type)) {
       conditions.push('c.type = ?');
       params.push(type);
     }
@@ -282,8 +282,8 @@ export const getLeadCommunications = async (req, res) => {
 
     // Get total count (no alias needed for simple count query)
     const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM communications WHERE lead_id = ?${type && ['call', 'sms'].includes(type) ? ' AND type = ?' : ''}`,
-      type && ['call', 'sms'].includes(type) ? [leadId, type] : [leadId]
+      `SELECT COUNT(*) as total FROM communications WHERE lead_id = ?${type && ['call', 'sms', 'whatsapp'].includes(type) ? ' AND type = ?' : ''}`,
+      type && ['call', 'sms', 'whatsapp'].includes(type) ? [leadId, type] : [leadId]
     );
     const total = countResult[0].total;
 
@@ -373,9 +373,11 @@ export const getLeadCommunicationStats = async (req, res) => {
         contact_number,
         SUM(CASE WHEN type = 'call' THEN 1 ELSE 0 END) as call_count,
         SUM(CASE WHEN type = 'sms' THEN 1 ELSE 0 END) as sms_count,
+        SUM(CASE WHEN type = 'whatsapp' THEN 1 ELSE 0 END) as whatsapp_count,
         MAX(sent_at) as last_contacted_at,
         MAX(CASE WHEN type = 'call' THEN sent_at ELSE NULL END) as last_call_at,
-        MAX(CASE WHEN type = 'sms' THEN sent_at ELSE NULL END) as last_sms_at
+        MAX(CASE WHEN type = 'sms' THEN sent_at ELSE NULL END) as last_sms_at,
+        MAX(CASE WHEN type = 'whatsapp' THEN sent_at ELSE NULL END) as last_whatsapp_at
        FROM communications
        WHERE lead_id = ?
        GROUP BY contact_number
@@ -392,7 +394,7 @@ export const getLeadCommunicationStats = async (req, res) => {
         sent_at,
         status
        FROM communications
-       WHERE lead_id = ? AND type = 'sms' AND template_id IS NOT NULL
+       WHERE lead_id = ? AND type IN ('sms', 'whatsapp') AND template_id IS NOT NULL
        ORDER BY sent_at DESC`,
       [leadId]
     );
@@ -435,9 +437,11 @@ export const getLeadCommunicationStats = async (req, res) => {
         contactNumber: item.contact_number,
         callCount: item.call_count || 0,
         smsCount: item.sms_count || 0,
+        whatsappCount: item.whatsapp_count || 0,
         lastContactedAt: item.last_contacted_at,
         lastCallAt: item.last_call_at,
         lastSmsAt: item.last_sms_at,
+        lastWhatsappAt: item.last_whatsapp_at,
         templateUsage: Array.from(templateUsageMap.values()),
       };
     });

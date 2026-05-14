@@ -46,6 +46,49 @@ class WhatsAppService {
   }
 
   /**
+   * Send a standard text message (for two-way chat)
+   * @param {string} to - Recipient phone number
+   * @param {string} text - Message text
+   */
+  async sendTextMessage(to, text) {
+    if (!this.accessToken || !this.phoneNumberId) {
+      console.warn('WhatsApp credentials not set. Message sending skipped (Dev Mode).');
+      return { success: true, messageId: 'sim_msg_' + Date.now() };
+    }
+
+    let cleanTo = to.replace(/\D/g, '');
+    if (cleanTo.length === 10) {
+      cleanTo = '91' + cleanTo;
+    }
+
+    const payload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanTo,
+      type: 'text',
+      text: { body: text }
+    };
+
+    try {
+      const response = await axios.post(this.baseUrl, payload, {
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      return {
+        success: true,
+        messageId: response.data.messages[0].id,
+        data: response.data
+      };
+    } catch (error) {
+      console.error('[WhatsApp API Text Error]', JSON.stringify(error.response?.data || error.message, null, 2));
+      throw new Error(error.response?.data?.error?.message || 'Failed to send WhatsApp text message');
+    }
+  }
+
+  /**
    * Send a template-based message
    * @param {string} to - Recipient phone number (with country code, no +)
    * @param {string} templateName - Name of the approved WhatsApp template

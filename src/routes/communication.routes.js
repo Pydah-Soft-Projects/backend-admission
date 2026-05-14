@@ -10,7 +10,13 @@ import {
 import { 
   sendWhatsAppCommunication, 
   syncWhatsAppTemplates,
-  uploadWhatsAppMedia
+  uploadWhatsAppMedia,
+  verifyWhatsAppContact,
+  verifyWhatsAppWebhook,
+  receiveWhatsAppWebhook,
+  getWhatsAppConversations,
+  getWhatsAppMessages,
+  sendWhatsAppChatReply
 } from '../controllers/whatsapp.controller.js';
 import multer from 'multer';
 import os from 'os';
@@ -49,6 +55,10 @@ import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
+// Webhook for WhatsApp (Public)
+router.get('/whatsapp/webhook', verifyWhatsAppWebhook);
+router.post('/whatsapp/webhook', receiveWhatsAppWebhook);
+
 router.use(protect);
 
 // Template management
@@ -73,6 +83,7 @@ router.post('/lead/:leadId/sms', sendSmsCommunication);
 router.get('/lead/:leadId/history', getLeadCommunications);
 router.get('/lead/:leadId/stats', getLeadCommunicationStats);
 router.post('/lead/:leadId/whatsapp', sendWhatsAppCommunication);
+router.get('/whatsapp/verify', verifyWhatsAppContact);
 
 // Bulk SMS & WhatsApp Jobs
 router.post('/sms-bulk/jobs', isSuperAdmin, createBulkSmsJob);
@@ -80,5 +91,10 @@ router.post('/whatsapp-bulk/jobs', isSuperAdmin, createBulkSmsJob);
 router.get('/sms-bulk/jobs', isSuperAdmin, listBulkSmsJobs);
 router.get('/sms-bulk/jobs/:id', isSuperAdmin, getBulkSmsJob);
 router.post('/sms-bulk/jobs/:id/resume', resumeBulkSmsJob);
+
+// WhatsApp Chat APIs
+router.get('/whatsapp/conversations', getWhatsAppConversations);
+router.get('/whatsapp/conversations/:conversationId/messages', getWhatsAppMessages);
+router.post('/whatsapp/conversations/:conversationId/reply', sendWhatsAppChatReply);
 
 export default router;
