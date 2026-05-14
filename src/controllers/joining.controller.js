@@ -401,26 +401,34 @@ const qualificationMeritFromSql = (value) => {
   return false;
 };
 
-const formatJoining = async (joiningData, pool) => {
+const formatJoining = async (joiningData, pool, options = {}) => {
+  const listMode = Boolean(options?.listMode);
   if (!joiningData) return null;
 
   const joiningId = joiningData.id;
 
-  // Fetch related data
-  const [relatives] = await pool.execute(
-    'SELECT * FROM joining_relatives WHERE joining_id = ?',
-    [joiningId]
-  );
+  let relatives = [];
+  let educationHistory = [];
+  let siblings = [];
+  if (!listMode && pool) {
+    const [relativesRows] = await pool.execute(
+      'SELECT * FROM joining_relatives WHERE joining_id = ?',
+      [joiningId]
+    );
+    relatives = relativesRows;
 
-  const [educationHistory] = await pool.execute(
-    'SELECT * FROM joining_education_history WHERE joining_id = ? ORDER BY created_at ASC',
-    [joiningId]
-  );
+    const [educationHistoryRows] = await pool.execute(
+      'SELECT * FROM joining_education_history WHERE joining_id = ? ORDER BY created_at ASC',
+      [joiningId]
+    );
+    educationHistory = educationHistoryRows;
 
-  const [siblings] = await pool.execute(
-    'SELECT * FROM joining_siblings WHERE joining_id = ? ORDER BY created_at ASC',
-    [joiningId]
-  );
+    const [siblingsRows] = await pool.execute(
+      'SELECT * FROM joining_siblings WHERE joining_id = ? ORDER BY created_at ASC',
+      [joiningId]
+    );
+    siblings = siblingsRows;
+  }
 
   // Parse JSON fields
   const leadDataRaw = typeof joiningData.lead_data === 'string'
@@ -638,6 +646,11 @@ const formatJoining = async (joiningData, pool) => {
             enquiryNumber: joiningData.lead_enquiry_number || '',
             hallTicketNumber: joiningData.lead_hall_ticket_number || '',
             leadStatus: joiningData.lead_lead_status || '',
+            courseInterested: joiningData.lead_course_interested || '',
+            mandal: joiningData.lead_mandal || '',
+            district: joiningData.lead_district || '',
+            quota: joiningData.lead_quota || '',
+            fatherPhone: joiningData.lead_father_phone || '',
           },
         }
       : {}),
@@ -678,6 +691,7 @@ export const listJoinings = async (req, res) => {
       limit = 20,
       search = '',
       leadStatus,
+      requireEnquiry,
     } = req.query;
 
     const pool = getPool();
@@ -726,6 +740,18 @@ export const listJoinings = async (req, res) => {
       );
     }
 
+    const enquiryRequired =
+      requireEnquiry === true ||
+      requireEnquiry === 'true' ||
+      requireEnquiry === '1' ||
+      String(requireEnquiry || '').toLowerCase() === 'yes';
+    if (enquiryRequired) {
+      conditions.push(`(
+        (l.id IS NOT NULL AND TRIM(COALESCE(l.enquiry_number, '')) <> '')
+        OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.enquiryNumber')), '')) <> ''
+      )`);
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Get total count
@@ -742,7 +768,9 @@ export const listJoinings = async (req, res) => {
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const [joinings] = await pool.execute(
       `SELECT j.*, l.name as lead_name, l.phone as lead_phone, l.hall_ticket_number as lead_hall_ticket_number,
-              l.enquiry_number as lead_enquiry_number, l.lead_status as lead_lead_status
+              l.enquiry_number as lead_enquiry_number, l.lead_status as lead_lead_status,
+              l.course_interested as lead_course_interested, l.mandal as lead_mandal, l.district as lead_district,
+              l.quota as lead_quota, l.father_phone as lead_father_phone
        FROM joinings j
        LEFT JOIN leads l ON j.lead_id = l.id
        ${whereClause}
@@ -751,9 +779,9 @@ export const listJoinings = async (req, res) => {
       params
     );
 
-    // Format joinings
+    // List view: skip relatives / education / siblings queries (3 round-trips per row).
     const formattedJoinings = await Promise.all(
-      joinings.map((j) => formatJoining(j, pool))
+      joinings.map((j) => formatJoining(j, pool, { listMode: true }))
     );
 
     return successResponse(
@@ -1548,23 +1576,10 @@ export const saveJoiningDraft = async (req, res) => {
           return errorResponse(res, 'Joining form not found', 404);
         }
       } else {
-        // Create new joining form
-        joiningIdToUse = uuidv4();
-        isNewRecord = true;
-        await pool.execute(
-          `INSERT INTO joinings (id, lead_id, lead_data, status, reservation_general, reservation_other,
-           created_by, updated_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-          [
-            joiningIdToUse,
-            null,
-            JSON.stringify({}),
-            'draft',
-            DEFAULT_GENERAL_RESERVATION,
-            JSON.stringify([]),
-            req.user.id,
-            req.user.id,
-          ]
+        return errorResponse(
+          res,
+          'Standalone joining drafts without an enquiry number are no longer allowed. Use "Send Joining Form" on the joining pipeline to create a lead with an enquiry and a linked draft.',
+          400
         );
       }
     } else {
@@ -1589,6 +1604,14 @@ export const saveJoiningDraft = async (req, res) => {
           joiningIdToUse = joinings[0].id;
           previousStatus = joinings[0].status;
         } else {
+          const enq = String(lead?.enquiryNumber || '').trim();
+          if (!enq) {
+            return errorResponse(
+              res,
+              'This lead does not have an enquiry number yet. Assign an enquiry before creating a joining form.',
+              400
+            );
+          }
           // Create new joining for this lead
           joiningIdToUse = uuidv4();
           isNewRecord = true;
@@ -1621,6 +1644,40 @@ export const saveJoiningDraft = async (req, res) => {
               req.user.id,
               req.user.id,
             ]
+          );
+        }
+      }
+    }
+
+    if (!joiningIdToUse) {
+      return errorResponse(res, 'Joining form not found', 404);
+    }
+
+    const [orphanGuard] = await pool.execute(
+      `SELECT j.lead_id, j.lead_data, j.status,
+        TRIM(COALESCE(l.enquiry_number, '')) AS lead_enquiry
+       FROM joinings j
+       LEFT JOIN leads l ON j.lead_id = l.id
+       WHERE j.id = ? LIMIT 1`,
+      [joiningIdToUse]
+    );
+    if (orphanGuard.length > 0) {
+      const g = orphanGuard[0];
+      if (String(g.status || '').toLowerCase() === 'draft') {
+        let enqSnap = '';
+        try {
+          const ld =
+            typeof g.lead_data === 'string' ? JSON.parse(g.lead_data || '{}') : g.lead_data || {};
+          enqSnap = String(ld.enquiryNumber || '').trim();
+        } catch {
+          enqSnap = '';
+        }
+        const hasEnquiry = String(g.lead_enquiry || '').trim() !== '' || enqSnap !== '';
+        if (!hasEnquiry) {
+          return errorResponse(
+            res,
+            'This joining draft has no enquiry number (on the lead or on the form snapshot) and cannot be saved. Remove it from the joining desk and use "Send Joining Form" instead.',
+            400
           );
         }
       }
@@ -2201,6 +2258,34 @@ const getEffectiveManagedCourseBranchIds = (joiningData) => {
   return { courseId: normalizedJoiningCourseId, branchId: normalizedJoiningBranchId };
 };
 
+/** `_joiningRegistrationExtras` on `lead_data` — college is chosen there (not a top-level joinings column). */
+const getJoiningRegistrationExtrasObject = (joiningData) => {
+  if (!joiningData) return {};
+  let leadDataRaw = {};
+  try {
+    leadDataRaw =
+      typeof joiningData.lead_data === 'string'
+        ? JSON.parse(joiningData.lead_data || '{}')
+        : joiningData.lead_data || {};
+  } catch {
+    leadDataRaw = {};
+  }
+  const ex = leadDataRaw._joiningRegistrationExtras;
+  if (ex && typeof ex === 'object') return ex;
+  return {};
+};
+
+const registrationExtrasHaveCollegeSelection = (joiningData) => {
+  const o = getJoiningRegistrationExtrasObject(joiningData);
+  for (const k of ['college_id', 'collegeId', 'school_or_college_id', 'schoolOrCollegeId']) {
+    const v = o[k];
+    if (v != null && String(v).trim() !== '') return true;
+  }
+  const nm = o.school_or_college_name ?? o.college;
+  if (typeof nm === 'string' && nm.trim() !== '') return true;
+  return false;
+};
+
 const validateBeforeSubmit = (joining) => {
   const errors = [];
   const { phoneDigits, dobVal } = getEffectiveStudentPhoneAndDob(joining);
@@ -2353,10 +2438,12 @@ export const approveJoining = async (req, res) => {
 
     if (joining.status === 'pending_approval') {
       const { courseId, branchId } = getEffectiveManagedCourseBranchIds(joining);
-      if (!courseId || !branchId) {
+      const quotaOk = String(joining.quota ?? '').trim() !== '';
+      const collegeOk = registrationExtrasHaveCollegeSelection(joining);
+      if (!courseId || !branchId || !quotaOk || !collegeOk) {
         return errorResponse(
           res,
-          'Managed course and branch must be selected before approving. Open the joining form and complete Course & Quota.',
+          'College, quota, managed course, and managed branch must all be set before approving. Open the joining form and complete Course & Quota.',
           400
         );
       }

@@ -30,6 +30,7 @@
     "db:sync-managed-ids-verify-secondary": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js",
     "db:sync-managed-ids-verify-secondary:dry": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js --dry-run",
     "db:secondary-strip-workflow-student-data": "node src/scripts/runSecondaryStudentDataWorkflowCleanup.js",
+    "db:delete-draft-joinings-without-enquiry": "node src/scripts/deleteDraftJoiningsWithoutEnquiry.js",
     "db:diagnose-status-mismatch": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js",
     "db:diagnose-status-apply": "node src/scripts/diagnoseLeadStatusVsCallVisitStatus.js --apply",
     "generate:vapid-keys": "node src/scripts/generateVapidKeys.js",

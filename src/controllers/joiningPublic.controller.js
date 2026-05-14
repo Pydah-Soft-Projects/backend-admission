@@ -203,7 +203,7 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
     const courseId = sanitizeString(req.body?.courseId);
     const branchId = sanitizeString(req.body?.branchId);
     const branch = sanitizeString(req.body?.branch);
-    const quota = sanitizeString(req.body?.quota) || 'Not Applicable';
+    const quota = sanitizeString(req.body?.quota);
     const programLevel = sanitizeString(req.body?.programLevel);
 
     if (!studentName) return errorResponse(res, 'Student name is required', 400);
@@ -214,6 +214,7 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
       return errorResponse(res, 'Father mobile number must be 10 digits', 400);
     }
     if (!courseInterested) return errorResponse(res, 'Interested course is required', 400);
+    if (!quota) return errorResponse(res, 'Quota is required', 400);
 
     const enquiryNumber = await generateEnquiryNumber();
     const leadId = uuidv4();
