@@ -315,6 +315,16 @@ const validateAdmissionPayload = (payload = {}) => {
   if (!payload.reservation?.general) {
     errors.push('General reservation category is required');
   }
+  if (payload.courseInfo !== undefined && payload.courseInfo !== null && typeof payload.courseInfo === 'object') {
+    const cid = String(payload.courseInfo.courseId ?? '').trim();
+    const bid = String(payload.courseInfo.branchId ?? '').trim();
+    if (!cid) {
+      errors.push('Managed course selection is required');
+    }
+    if (!bid) {
+      errors.push('Managed branch selection is required');
+    }
+  }
   return errors;
 };
 

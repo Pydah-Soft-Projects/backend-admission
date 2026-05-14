@@ -2147,6 +2147,60 @@ export const patchJoiningStepTwo = async (req, res) => {
   }
 };
 
+/**
+ * Resolve managed course/branch ids from a joinings row (same precedence as `formatJoining`).
+ * @returns {{ courseId: string | null, branchId: string | null }}
+ */
+const getEffectiveManagedCourseBranchIds = (joiningData) => {
+  if (!joiningData) return { courseId: null, branchId: null };
+
+  let leadDataRaw = {};
+  try {
+    leadDataRaw =
+      typeof joiningData.lead_data === 'string'
+        ? JSON.parse(joiningData.lead_data || '{}')
+        : joiningData.lead_data || {};
+  } catch {
+    leadDataRaw = {};
+  }
+
+  let managedJoiningCourseId = null;
+  let managedJoiningBranchId = null;
+  if (leadDataRaw && typeof leadDataRaw === 'object') {
+    if (leadDataRaw._joiningManagedCourseId != null && String(leadDataRaw._joiningManagedCourseId) !== '') {
+      managedJoiningCourseId = leadDataRaw._joiningManagedCourseId;
+    }
+    if (leadDataRaw._joiningManagedBranchId != null && String(leadDataRaw._joiningManagedBranchId) !== '') {
+      managedJoiningBranchId = leadDataRaw._joiningManagedBranchId;
+    }
+  }
+
+  const fromRowManagedCourse = normalizeManagedIdForDb(joiningData.managed_course_id);
+  const fromRowManagedBranch = normalizeManagedIdForDb(joiningData.managed_branch_id);
+  const rawJoiningCourseId =
+    fromRowManagedCourse != null
+      ? fromRowManagedCourse
+      : managedJoiningCourseId != null
+        ? managedJoiningCourseId
+        : joiningData.course_id;
+  const rawJoiningBranchId =
+    fromRowManagedBranch != null
+      ? fromRowManagedBranch
+      : managedJoiningBranchId != null
+        ? managedJoiningBranchId
+        : joiningData.branch_id;
+  const normalizedJoiningCourseId =
+    rawJoiningCourseId != null && String(rawJoiningCourseId).trim() !== ''
+      ? String(rawJoiningCourseId).trim()
+      : null;
+  const normalizedJoiningBranchId =
+    rawJoiningBranchId != null && String(rawJoiningBranchId).trim() !== ''
+      ? String(rawJoiningBranchId).trim()
+      : null;
+
+  return { courseId: normalizedJoiningCourseId, branchId: normalizedJoiningBranchId };
+};
+
 const validateBeforeSubmit = (joining) => {
   const errors = [];
   const { phoneDigits, dobVal } = getEffectiveStudentPhoneAndDob(joining);
@@ -2295,6 +2349,17 @@ export const approveJoining = async (req, res) => {
         'Only submissions awaiting approval can be approved',
         400
       );
+    }
+
+    if (joining.status === 'pending_approval') {
+      const { courseId, branchId } = getEffectiveManagedCourseBranchIds(joining);
+      if (!courseId || !branchId) {
+        return errorResponse(
+          res,
+          'Managed course and branch must be selected before approving. Open the joining form and complete Course & Quota.',
+          400
+        );
+      }
     }
 
     const previousStatus = joining.status;
