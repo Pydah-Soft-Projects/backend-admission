@@ -3616,12 +3616,10 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
 
       const cohortUserIdSet = new Set(cohortScopeUserIds);
 
-      const [
-        [rawAssignments],
-        [validMandalsRows]
-      ] = await Promise.all([
+      const tripleResults = await Promise.all([
         pool.execute(
           `SELECT 
+            a.id as log_id,
             a.target_user_id, 
             a.performed_by,
             DATE(a.created_at) as assigned_date, 
@@ -3660,8 +3658,21 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         ),
         pool.execute(
           `SELECT DISTINCT LOWER(TRIM(name)) as name FROM mandals WHERE is_active = 1`
+        ),
+        pool.execute(
+          `SELECT id, user_id, DATE_FORMAT(leave_date, '%Y-%m-%d') as leave_date, reason
+           FROM pro_leave_logs
+           WHERE user_id IN (${cohortUserIdPlaceholders})
+             AND leave_date BETWEEN ? AND ?`,
+          [...cohortScopeUserIds, startDate, endDate]
         )
       ]);
+
+      const [
+        [rawAssignments],
+        [validMandalsRows],
+        [leaveRows]
+      ] = tripleResults;
 
       const validMandalsSet = new Set(validMandalsRows.map(m => String(m.name || '').trim().toLowerCase()));
 
@@ -3887,11 +3898,36 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
                 village: row.village || row.mandal || '-',
                 visitStatus: statusToDisplay,
                 visitDate: row.log_created_at,
-                leadId: row.lead_id
+                leadId: row.lead_id,
+                logId: row.log_id
               });
             }
           }
         });
+      });
+
+      // 3. Merge Leaves into Visit Diary
+      leaveRows.forEach(row => {
+        const userKey = String(row.user_id).trim().toLowerCase();
+        let userUpdates = visitDiaryUpdatesMap.get(userKey);
+        if (!userUpdates) {
+          userUpdates = new Map();
+          visitDiaryUpdatesMap.set(userKey, userUpdates);
+        }
+        const dateKey = row.leave_date;
+        if (!userUpdates.has(dateKey)) {
+          userUpdates.set(dateKey, {
+            date: dateKey,
+            statusCounts: {},
+            details: [],
+            isOnLeave: true,
+            leaveReason: row.reason
+          });
+        } else {
+          const bucket = userUpdates.get(dateKey);
+          bucket.isOnLeave = true;
+          bucket.leaveReason = row.reason;
+        }
       });
 
 
@@ -4359,6 +4395,94 @@ export const getAssignmentDetailsByDate = async (req, res) => {
   } catch (error) {
     console.error('Error getting assignment details:', error);
     return errorResponse(res, error.message || 'Failed to get assignment details', 500);
+  }
+};
+
+/**
+ * @desc    Get all PRO leaves with filtering
+ * @route   GET /api/leads/pro/leaves
+ * @access  Private (Super Admin)
+ */
+export const getProLeaves = async (req, res) => {
+  try {
+    const { startDate, endDate, userId } = req.query;
+    const pool = getPool();
+
+    let sql = `
+      SELECT l.*, u.name as user_name, u.user_name as user_handle
+      FROM pro_leave_logs l
+      JOIN users u ON l.user_id = u.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (startDate) {
+      sql += ` AND l.leave_date >= ?`;
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ` AND l.leave_date <= ?`;
+      params.push(endDate);
+    }
+    if (userId) {
+      sql += ` AND l.user_id = ?`;
+      params.push(userId);
+    }
+
+    sql += ` ORDER BY l.leave_date DESC`;
+
+    const [rows] = await pool.execute(sql, params);
+    return successResponse(res, rows, 'Leaves retrieved successfully');
+  } catch (error) {
+    console.error('Error getting PRO leaves:', error);
+    return errorResponse(res, error.message || 'Failed to get leaves', 500);
+  }
+};
+
+/**
+ * @desc    Mark a PRO as on leave for a specific date
+ * @route   POST /api/leads/pro/leaves
+ * @access  Private (Super Admin)
+ */
+export const markProLeave = async (req, res) => {
+  try {
+    const { userId, date, reason } = req.body;
+    const pool = getPool();
+
+    if (!userId || !date) {
+      return errorResponse(res, 'User ID and date are required', 400);
+    }
+
+    await pool.execute(
+      `INSERT INTO pro_leave_logs (user_id, leave_date, reason) 
+       VALUES (?, ?, ?) 
+       ON DUPLICATE KEY UPDATE reason = VALUES(reason)`,
+      [userId, date, reason || null]
+    );
+
+    return successResponse(res, null, 'Leave marked successfully');
+  } catch (error) {
+    console.error('Error marking PRO leave:', error);
+    return errorResponse(res, error.message || 'Failed to mark leave', 500);
+  }
+};
+
+/**
+ * @desc    Delete a leave record
+ * @route   DELETE /api/leads/pro/leaves/:id
+ * @access  Private (Super Admin)
+ */
+export const deleteProLeave = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+
+    await pool.execute(`DELETE FROM pro_leave_logs WHERE id = ?`, [id]);
+
+    return successResponse(res, null, 'Leave record deleted successfully');
+  } catch (error) {
+    console.error('Error deleting PRO leave:', error);
+    return errorResponse(res, error.message || 'Failed to delete leave record', 500);
   }
 };
 
