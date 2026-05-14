@@ -145,6 +145,12 @@ const sanitizePermissions = (permissions = {}) => {
   }
   const sanitized = {};
   Object.entries(permissions).forEach(([key, value]) => {
+    if (key === 'allowedSources') {
+      if (Array.isArray(value)) {
+        sanitized[key] = value.filter((v) => typeof v === 'string');
+      }
+      return;
+    }
     if (!value || typeof value !== 'object') return;
     const access = Boolean(value.access);
     const permission = value.permission === 'write' ? 'write' : value.permission === 'read' ? 'read' : 'read';
@@ -345,8 +351,7 @@ export const createUser = async (req, res) => {
       }
     }
 
-    const sanitizedPermissions =
-      roleName === 'Sub Super Admin' ? sanitizePermissions(permissions) : {};
+    const sanitizedPermissions = sanitizePermissions(permissions);
 
     // Hash password (only if not an HRMS user)
     let hashedPassword = null;
@@ -535,26 +540,21 @@ export const updateUser = async (req, res) => {
     }
 
     // Handle designation and permissions based on role
+    if (permissions && typeof permissions === 'object') {
+      const sanitizedPerms = sanitizePermissions(permissions);
+      updateFields.push('permissions = ?');
+      updateValues.push(JSON.stringify(sanitizedPerms));
+    }
     if (finalRoleName === 'Student Counselor' || finalRoleName === 'Data Entry User' || finalRoleName === 'PRO') {
       if (designation !== undefined) {
         updateFields.push('designation = ?');
         updateValues.push(designation && designation.trim() ? designation.trim() : null);
       }
-      updateFields.push('permissions = ?');
-      updateValues.push(JSON.stringify({}));
     } else if (finalRoleName === 'Sub Super Admin') {
-      if (permissions && typeof permissions !== 'object') {
-        return errorResponse(res, 'Permissions must be provided as an object for sub super admins', 400);
-      }
-      const sanitizedPerms = sanitizePermissions(permissions);
-      updateFields.push('permissions = ?');
-      updateValues.push(JSON.stringify(sanitizedPerms));
       updateFields.push('designation = ?');
       updateValues.push(null);
     } else {
       // Super Admin
-      updateFields.push('permissions = ?');
-      updateValues.push(JSON.stringify({}));
       updateFields.push('designation = ?');
       updateValues.push(null);
     }

@@ -329,6 +329,14 @@ export const getLeads = async (req, res) => {
       params.push(req.query.source);
     }
 
+    // Lead source restriction from user permissions
+    const allowedSources = req.user.permissions?.allowedSources;
+    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
+      const placeholders = allowedSources.map(() => '?').join(',');
+      conditions.push(`l.source IN (${placeholders})`);
+      params.push(...allowedSources);
+    }
+
     // Date filtering
     if (req.query.startDate) {
       conditions.push('l.created_at >= ?');
@@ -1976,6 +1984,14 @@ export const getAllLeadIds = async (req, res) => {
       }
     }
 
+    // Lead source restriction from user permissions
+    const allowedSources = req.user.permissions?.allowedSources;
+    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
+      const placeholders = allowedSources.map(() => '?').join(',');
+      conditions.push(`source IN (${placeholders})`);
+      params.push(...allowedSources);
+    }
+
     // Optionally exclude leads that were "touched today" by the current user (call, SMS, or activity log)
     const excludeTouchedToday = req.query.excludeTouchedToday === 'true' || req.query.excludeTouchedToday === '1';
     if (excludeTouchedToday) {
@@ -2065,12 +2081,25 @@ export const getFilterOptions = async (req, res) => {
 
     const adminLike = hasElevatedAdminPrivileges(req.user.roleName) || req.user.roleName === 'Admin';
     const userId = req.user.id || req.user._id;
+    
+    const params = !adminLike
+      ? (req.user.roleName === 'PRO' ? [userId, userId] : [userId])
+      : [];
+
     if (!adminLike) {
       if (req.user.roleName === 'PRO') {
         conditions.push('(assigned_to_pro = ? OR assigned_to = ?)');
       } else {
         conditions.push('assigned_to = ?');
       }
+    }
+
+    // Lead source restriction from user permissions
+    const allowedSources = req.user.permissions?.allowedSources;
+    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
+      const placeholders = allowedSources.map(() => '?').join(',');
+      conditions.push(`source IN (${placeholders})`);
+      params.push(...allowedSources);
     }
 
     // Add field-specific conditions
@@ -2086,9 +2115,6 @@ export const getFilterOptions = async (req, res) => {
     const appStatusCondition = [...conditions, 'application_status IS NOT NULL AND application_status != ""'];
 
     const whereClause = (conditions) => conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const params = !adminLike
-      ? (req.user.roleName === 'PRO' ? [userId, userId] : [userId])
-      : [];
 
     const districtFilter = (req.query.district && String(req.query.district).trim()) || '';
     const mandalFilter = (req.query.mandal && String(req.query.mandal).trim()) || '';
@@ -2440,6 +2466,14 @@ export const exportLeads = async (req, res) => {
         conditions.push('l.assigned_to = ?');
         params.push(userId);
       }
+    }
+
+    // Lead source restriction from user permissions
+    const allowedSources = req.user.permissions?.allowedSources;
+    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
+      const placeholders = allowedSources.map(() => '?').join(',');
+      conditions.push(`l.source IN (${placeholders})`);
+      params.push(...allowedSources);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
