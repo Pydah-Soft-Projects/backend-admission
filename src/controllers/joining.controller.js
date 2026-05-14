@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
+import { formatAdmission } from './admission.controller.js';
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
@@ -2001,6 +2002,146 @@ export const saveJoiningDraft = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to save joining draft',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * Merge certificate-related registration extras and/or student fee line overrides into
+ * `joinings.lead_data`, mirror the same keys into the linked `admissions.lead_data` snapshot,
+ * and re-sync fee Mongo when fee details change. Only allowed once the joining is approved.
+ */
+export const patchJoiningStepTwo = async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    if (!leadId || leadId === 'new' || leadId === 'undefined') {
+      return errorResponse(res, 'Invalid joining identifier', 400);
+    }
+
+    const pool = getPool();
+    const [joiningRows] = await pool.execute(
+      'SELECT * FROM joinings WHERE id = ? OR lead_id = ? LIMIT 1',
+      [leadId, leadId]
+    );
+    if (!joiningRows.length) {
+      return errorResponse(res, 'Joining not found', 404);
+    }
+    const joining = joiningRows[0];
+    if (joining.status !== 'approved') {
+      return errorResponse(
+        res,
+        'Certificate checklist and fee lines can only be edited after the joining is approved.',
+        400
+      );
+    }
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const patchReg =
+      body.registrationFormData && typeof body.registrationFormData === 'object'
+        ? body.registrationFormData
+        : {};
+    const hasStudentFees = Object.prototype.hasOwnProperty.call(body, 'studentFeeDetails');
+
+    let ld =
+      typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {};
+    if (!ld || typeof ld !== 'object') ld = {};
+
+    const prevExtras =
+      ld._joiningRegistrationExtras && typeof ld._joiningRegistrationExtras === 'object'
+        ? { ...ld._joiningRegistrationExtras }
+        : {};
+    const mergedExtras = { ...prevExtras, ...patchReg };
+
+    const nextLd = {
+      ...ld,
+      ...(Object.keys(mergedExtras).length > 0 ? { _joiningRegistrationExtras: mergedExtras } : {}),
+    };
+
+    let rawFees = null;
+    if (hasStudentFees) {
+      rawFees = sanitizeStudentFeeDetailsForDb(body.studentFeeDetails);
+      if (rawFees && (rawFees.lines?.length > 0 || rawFees.batch)) {
+        nextLd._joiningStudentFeeDetails = rawFees;
+      } else {
+        delete nextLd._joiningStudentFeeDetails;
+        rawFees = null;
+      }
+    }
+
+    await pool.execute(
+      `UPDATE joinings SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+      [JSON.stringify(nextLd), req.user.id, joining.id]
+    );
+
+    const resolvedLeadIdForFeeMirror =
+      joining.lead_id != null && String(joining.lead_id).trim() !== ''
+        ? String(joining.lead_id).trim()
+        : null;
+
+    if (hasStudentFees) {
+      await syncJoiningStudentFeeDetailsToFeeMongo({
+        joiningId: joining.id,
+        leadId: resolvedLeadIdForFeeMirror,
+        studentFeeDetails: rawFees,
+      });
+    }
+
+    const [admRows] = await pool.execute('SELECT * FROM admissions WHERE joining_id = ? LIMIT 1', [
+      joining.id,
+    ]);
+    if (admRows.length > 0) {
+      const adm = admRows[0];
+      let admLd =
+        typeof adm.lead_data === 'string' ? JSON.parse(adm.lead_data) : adm.lead_data || {};
+      if (!admLd || typeof admLd !== 'object') admLd = {};
+
+      const admPrevExtras =
+        admLd._joiningRegistrationExtras && typeof admLd._joiningRegistrationExtras === 'object'
+          ? { ...admLd._joiningRegistrationExtras }
+          : {};
+      const admMergedExtras = { ...admPrevExtras, ...patchReg };
+      const admNextLd = {
+        ...admLd,
+        ...(Object.keys(admMergedExtras).length > 0
+          ? { _joiningRegistrationExtras: admMergedExtras }
+          : {}),
+      };
+      if (hasStudentFees) {
+        if (rawFees && (rawFees.lines?.length > 0 || rawFees.batch)) {
+          admNextLd._joiningStudentFeeDetails = rawFees;
+        } else {
+          delete admNextLd._joiningStudentFeeDetails;
+        }
+      }
+
+      await pool.execute(
+        `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+        [JSON.stringify(admNextLd), req.user.id, adm.id]
+      );
+
+      const [admFresh] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [adm.id]);
+      const formattedAdmission = await formatAdmission(admFresh[0], pool);
+      await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+        leadId: formattedAdmission.leadId,
+        joiningId: formattedAdmission.joiningId,
+        email: formattedAdmission.leadData?.email || '',
+      });
+    }
+
+    const [updatedJoining] = await pool.execute('SELECT * FROM joinings WHERE id = ?', [joining.id]);
+    const formattedJoining = await formatJoining(updatedJoining[0], pool);
+    return successResponse(
+      res,
+      { joining: formattedJoining },
+      'Certificate checklist and fee lines saved',
+      200
+    );
+  } catch (error) {
+    console.error('Error patching joining step two:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to save certificate and fee details',
       error.statusCode || 500
     );
   }
