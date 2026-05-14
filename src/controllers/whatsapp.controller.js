@@ -4,6 +4,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import whatsappService from '../services/whatsapp.service.js';
 import { ensureLeadAndNumbers } from '../services/communicationSmsDispatch.js';
 import { v4 as uuidv4 } from 'uuid';
+import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 
 /**
  * WhatsApp Communication Controller
@@ -455,12 +456,32 @@ export const receiveWhatsAppWebhook = async (req, res) => {
 export const getWhatsAppConversations = async (req, res) => {
   try {
     const pool = getPool();
-    const [rows] = await pool.execute(
-      `SELECT c.*, l.name as lead_name, l.enquiry_number as lead_enquiry_number
-       FROM whatsapp_conversations c
-       LEFT JOIN leads l ON c.lead_id = l.id
-       ORDER BY c.last_message_at DESC`
-    );
+    const userId = req.user.id || req.user._id;
+    const roleName = req.user.roleName;
+
+    let query = `
+      SELECT c.*, l.name as lead_name, l.enquiry_number as lead_enquiry_number
+      FROM whatsapp_conversations c
+      LEFT JOIN leads l ON c.lead_id = l.id
+    `;
+    
+    const params = [];
+    
+    // Filter for non-admin users
+    if (!hasElevatedAdminPrivileges(roleName) && roleName !== 'Admin') {
+      query += `
+        WHERE (
+          l.assigned_to = ? 
+          OR l.assigned_to_pro = ? 
+          OR EXISTS (SELECT 1 FROM whatsapp_messages m WHERE m.conversation_id = c.id AND m.sent_by = ?)
+        )
+      `;
+      params.push(userId, userId, userId);
+    }
+
+    query += ` ORDER BY c.last_message_at DESC`;
+
+    const [rows] = await pool.execute(query, params);
     return successResponse(res, rows);
   } catch (error) {
     return errorResponse(res, error.message, 500);
