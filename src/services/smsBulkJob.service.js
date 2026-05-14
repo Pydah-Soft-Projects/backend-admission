@@ -171,7 +171,7 @@ export async function resumeRunningSmsBulkJobsOnStartup() {
  * @param {string} jobId
  * @param {object} row
  */
-async function processOneJobItem(pool, userId, jobId, row, category = 'sms') {
+async function processOneJobItem(pool, userId, jobId, row, category = 'sms', job = {}) {
   const itemId = row.id;
   const leadId = row.lead_id;
   const templateId = row.template_id;
@@ -211,7 +211,7 @@ async function processOneJobItem(pool, userId, jobId, row, category = 'sms') {
       const headerConfig = {
         type: t.headerType,
         text: t.headerText,
-        handle: t.headerHandle,
+        handle: job.header_handle || t.headerHandle,
       };
 
       const headerVarCount = (t.headerText?.match(/\{#var#\}/g) || []).length;
@@ -535,7 +535,7 @@ export async function processSmsBulkJob(jobId) {
     }
     const userId = job.created_by;
     const category = String(job.category || 'sms');
-    await runWithConcurrencyItems(itemRows, SMS_JOB_CONCURRENCY, (row) => processOneJobItem(pool, userId, jobId, row, category));
+    await runWithConcurrencyItems(itemRows, SMS_JOB_CONCURRENCY, (row) => processOneJobItem(pool, userId, jobId, row, category, job));
     const [p] = await pool.execute(
       `SELECT COUNT(*) AS c FROM sms_bulk_job_items WHERE job_id = ? AND status IN ('pending','processing')`,
       [jobId]
@@ -578,7 +578,7 @@ export async function processSmsBulkJob(jobId) {
  * @param {Array<{ leadId: string, leadName?: string, contactNumbers: string[], variables: object[] }>} p.items
  * @param {object} [p.reportContext] – optional, stored for `user_specific_leads` (selected users, student group, etc.)
  */
-export async function createSmsBulkJobRecord({ pool, userId, source, templateId, items, reportContext: rawContext }) {
+export async function createSmsBulkJobRecord({ pool, userId, source, templateId, items, reportContext: rawContext, headerHandle }) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error('At least one recipient row is required');
   }
@@ -602,8 +602,8 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
 
     await conn.execute(
       `INSERT INTO sms_bulk_jobs (
-        id, created_by, source, category, report_context, template_id, template_name, status, total_items, done_count, success_count, fail_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
+        id, created_by, source, category, report_context, template_id, template_name, header_handle, status, total_items, done_count, success_count, fail_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, 0, 0, 0)`,
       [
         jobId,
         userId,
@@ -612,6 +612,7 @@ export async function createSmsBulkJobRecord({ pool, userId, source, templateId,
         reportContext == null ? null : JSON.stringify(reportContext),
         template.id,
         template.name,
+        headerHandle || null,
         insItems.length,
       ]
     );
@@ -679,6 +680,7 @@ export async function formatJobRow(row) {
     reportContext,
     templateId: row.template_id,
     templateName: row.template_name,
+    headerHandle: row.header_handle,
     status: row.status,
     displayStatus,
     workRemaining,

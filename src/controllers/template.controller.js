@@ -309,7 +309,11 @@ export const createTemplate = async (req, res) => {
       isUnicode,
       variables,
       templateGroupId,
-      category = 'sms'
+      category = 'sms',
+      headerType = 'TEXT',
+      headerText = '',
+      headerHandle = '',
+      mediaGallery = []
     } = req.body;
 
     if (!name?.trim() || !dltTemplateId?.trim() || !content?.trim()) {
@@ -332,8 +336,8 @@ export const createTemplate = async (req, res) => {
     await pool.execute(
       `INSERT INTO message_templates (
         id, name, template_group_id, category, dlt_template_id, language, content, description, is_unicode,
-        variable_count, variables, is_active, created_by, updated_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        variable_count, variables, header_type, header_text, header_handle, media_gallery, is_active, created_by, updated_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         templateId,
         name.trim(),
@@ -346,6 +350,10 @@ export const createTemplate = async (req, res) => {
         Boolean(isUnicode),
         variableCount,
         JSON.stringify(normalizedVars),
+        headerType || 'TEXT',
+        headerText || '',
+        headerHandle || '',
+        JSON.stringify(mediaGallery || []),
         true,
         userId || null,
         userId || null,
@@ -383,7 +391,8 @@ export const updateTemplate = async (req, res) => {
       variables,
       isActive,
       templateGroupId,
-      category
+      category,
+      headerType
     } = req.body;
 
     const pool = getPool();
@@ -451,6 +460,11 @@ export const updateTemplate = async (req, res) => {
           return errorResponse(res, e.message || 'Invalid template group', 400);
         }
       }
+    }
+    
+    if (headerType !== undefined) {
+      updateFields.push('header_type = ?');
+      updateValues.push(headerType || 'TEXT');
     }
 
     if (req.body.headerHandle !== undefined) {
