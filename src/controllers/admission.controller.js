@@ -31,6 +31,144 @@ const ensureAdmissionId = (admissionId) => {
 
 const ADMISSION_CANCELLED_STATUS = 'Admission Cancelled';
 
+/** Convenor quota (CQ / CONV) — matches admissions.quota and lead source labels. */
+const SQL_IS_CONV_QUOTA = `(
+  UPPER(TRIM(COALESCE(quota, ''))) IN ('CONV', 'CONVENOR', 'CONVENER')
+  OR UPPER(TRIM(COALESCE(quota, ''))) LIKE '%CONV%'
+)`;
+/** Management quota (MQ / MANG). */
+const SQL_IS_MANG_QUOTA = `(
+  UPPER(TRIM(COALESCE(quota, ''))) IN ('MANG', 'MANAGEMENT')
+  OR (UPPER(TRIM(COALESCE(quota, ''))) LIKE '%MANG%' AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%CONV%')
+)`;
+const SQL_IS_ACTIVE_ADMISSION = `status != '${ADMISSION_CANCELLED_STATUS}'`;
+const SQL_IS_CANCELLED_ADMISSION = `status = '${ADMISSION_CANCELLED_STATUS}'`;
+
+/** Valid JSON object for lead_data (stats queries on `admissions` without alias). */
+const SQL_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+/** Registration Merit / scholarship field (Eligible vs Not eligible) from joining form extras. */
+const SQL_SCHOLAR_STATUS_RAW = `NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_LEAD_DATA_JSON}, '$._joiningRegistrationExtras.scholar_status')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_LEAD_DATA_JSON}, '$._joiningRegistrationExtras.scholarStatus')),
+  ''
+)), '')`;
+const SQL_SCHOLAR_STATUS_NORM = `LOWER(${SQL_SCHOLAR_STATUS_RAW})`;
+/**
+ * Merit Quota (abstract) = spreadsheet Merit column: **Eligible** only.
+ * Uses `lead_data._joiningRegistrationExtras.scholar_status` (not qualification Merit Yes/No).
+ */
+const SQL_IS_MERIT_QUOTA_ELIGIBLE = `(
+  ${SQL_SCHOLAR_STATUS_NORM} = 'eligible'
+  OR ${SQL_SCHOLAR_STATUS_NORM} = 'e'
+  OR (
+    ${SQL_SCHOLAR_STATUS_NORM} LIKE '%eligible%'
+    AND ${SQL_SCHOLAR_STATUS_NORM} NOT LIKE '%not%'
+    AND ${SQL_SCHOLAR_STATUS_NORM} NOT LIKE '%nil%'
+  )
+)`;
+
+const parseBranchMetadataObject = (metadata) => {
+  if (!metadata) return null;
+  if (typeof metadata === 'string') {
+    try {
+      const parsed = JSON.parse(metadata);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof metadata === 'object' ? metadata : null;
+};
+
+const readIntakeFromMetadata = (metadata, kind) => {
+  const meta = parseBranchMetadataObject(metadata);
+  if (!meta) return null;
+  const keys =
+    kind === 'cq'
+      ? ['cq_intake', 'cqIntake', 'convenor_intake', 'conv_intake', 'CONV_intake']
+      : ['mq_intake', 'mqIntake', 'management_intake', 'mang_intake', 'MANG_intake'];
+  for (const key of keys) {
+    const raw = meta[key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+};
+
+const branchIntakeMapKey = (courseId, branchId) =>
+  `${String(courseId ?? '').trim()}::${String(branchId ?? '').trim()}`;
+
+const parseIntakeInput = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
+  return n;
+};
+
+let admissionBranchIntakeTableReady = false;
+
+const ensureAdmissionBranchIntakeTable = async (pool) => {
+  if (admissionBranchIntakeTableReady) return;
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS admission_branch_intake (
+      id CHAR(36) PRIMARY KEY,
+      course_id VARCHAR(64) NOT NULL DEFAULT '',
+      branch_id VARCHAR(64) NOT NULL DEFAULT '',
+      course_name VARCHAR(255) NOT NULL DEFAULT '',
+      branch_name VARCHAR(255) NOT NULL DEFAULT '',
+      cq_intake INT UNSIGNED NULL DEFAULT NULL,
+      mq_intake INT UNSIGNED NULL DEFAULT NULL,
+      updated_by CHAR(36) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_admission_branch_intake_ids (course_id, branch_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  admissionBranchIntakeTableReady = true;
+};
+
+const loadBranchIntakeMap = async () => {
+  const map = new Map();
+  const pool = getPool();
+  try {
+    await ensureAdmissionBranchIntakeTable(pool);
+    const [crmRows] = await pool.execute(
+      'SELECT course_id, branch_id, cq_intake, mq_intake FROM admission_branch_intake'
+    );
+    for (const row of crmRows || []) {
+      map.set(branchIntakeMapKey(row.course_id, row.branch_id), {
+        cqIntake: row.cq_intake != null ? Number(row.cq_intake) : null,
+        mqIntake: row.mq_intake != null ? Number(row.mq_intake) : null,
+      });
+    }
+  } catch (err) {
+    console.error('loadBranchIntakeMap: CRM intake table failed:', err?.message || err);
+  }
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [rows] = await secondaryPool.execute('SELECT id, metadata FROM course_branches');
+    for (const row of rows || []) {
+      const branchOnlyKey = String(row.id);
+      if (map.has(branchOnlyKey)) continue;
+      map.set(branchOnlyKey, {
+        cqIntake: readIntakeFromMetadata(row.metadata, 'cq'),
+        mqIntake: readIntakeFromMetadata(row.metadata, 'mq'),
+      });
+    }
+  } catch (err) {
+    console.error('loadBranchIntakeMap: secondary course_branches query failed:', err?.message || err);
+  }
+  return map;
+};
+
+const resolveBranchIntakeFromMap = (map, courseId, branchId) => {
+  const byCourseBranch = map.get(branchIntakeMapKey(courseId, branchId));
+  if (byCourseBranch) return byCourseBranch;
+  const branchOnly = map.get(String(branchId ?? '').trim());
+  return branchOnly || {};
+};
+
 /** Primary `course_id` when set; else student-DB id in `managed_course_id` (no FK). Same for branch. */
 const SQL_A_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(a.course_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_course_id AS CHAR)), ''))`;
 const SQL_A_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(a.branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_branch_id AS CHAR)), ''))`;
@@ -1596,22 +1734,97 @@ export const getAdmissionStats = async (req, res) => {
         ${SQL_EFF_BRANCH_ID} as branchId,
         MAX(course) as courseName,
         MAX(branch) as branchName,
-        COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
-        COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
+        COUNT(CASE WHEN ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as totalAdmissions,
+        COUNT(CASE WHEN ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as totalCancelled,
+        COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as cqAdmitted,
+        COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as cqCancelled,
+        COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as mqAdmitted,
+        COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as mqCancelled,
+        COUNT(CASE WHEN ${SQL_IS_MERIT_QUOTA_ELIGIBLE} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as meritQuotaAdmitted,
+        COUNT(CASE WHEN ${SQL_IS_MERIT_QUOTA_ELIGIBLE} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as meritQuotaCancelled
       FROM admissions
       ${whereClause}
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}
       ORDER BY courseName, branchName
     `;
     const [branchStats] = await pool.execute(queryBranches, params);
-    const courseStats = stats.map(course => ({
+    const branchIntakeMap = await loadBranchIntakeMap();
+    const courseStats = stats.map((course) => ({
       ...course,
-      branches: branchStats.filter(b => b.courseId === course.courseId && b.courseName === course.courseName)
+      branches: branchStats
+        .filter((b) => b.courseId === course.courseId && b.courseName === course.courseName)
+        .map((b) => {
+          const intake = resolveBranchIntakeFromMap(branchIntakeMap, b.courseId, b.branchId);
+          return {
+            ...b,
+            cqIntake: intake.cqIntake ?? null,
+            mqIntake: intake.mqIntake ?? null,
+            cqAdmitted: Number(b.cqAdmitted) || 0,
+            cqCancelled: Number(b.cqCancelled) || 0,
+            mqAdmitted: Number(b.mqAdmitted) || 0,
+            mqCancelled: Number(b.mqCancelled) || 0,
+            meritQuotaAdmitted: Number(b.meritQuotaAdmitted) || 0,
+            meritQuotaCancelled: Number(b.meritQuotaCancelled) || 0,
+          };
+        }),
     }));
     return successResponse(res, { stats: courseStats }, 'Admission stats retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting admission stats:', error);
     return errorResponse(res, error.message || 'Failed to get admission stats', 500);
+  }
+};
+
+/** Save CQ / MQ intake seats for a course + branch row on the admissions abstract. */
+export const upsertAdmissionBranchIntake = async (req, res) => {
+  try {
+    const courseId = String(req.body?.courseId ?? '').trim();
+    const branchId = String(req.body?.branchId ?? '').trim();
+    if (!courseId || !branchId) {
+      return errorResponse(res, 'courseId and branchId are required', 400);
+    }
+    const cqIntake = parseIntakeInput(req.body?.cqIntake);
+    const mqIntake = parseIntakeInput(req.body?.mqIntake);
+    if (req.body?.cqIntake != null && req.body?.cqIntake !== '' && cqIntake === null) {
+      return errorResponse(res, 'cqIntake must be a whole number ≥ 0', 400);
+    }
+    if (req.body?.mqIntake != null && req.body?.mqIntake !== '' && mqIntake === null) {
+      return errorResponse(res, 'mqIntake must be a whole number ≥ 0', 400);
+    }
+
+    const pool = getPool();
+    await ensureAdmissionBranchIntakeTable(pool);
+    await pool.execute(
+      `INSERT INTO admission_branch_intake (
+        id, course_id, branch_id, course_name, branch_name, cq_intake, mq_intake, updated_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        course_name = VALUES(course_name),
+        branch_name = VALUES(branch_name),
+        cq_intake = VALUES(cq_intake),
+        mq_intake = VALUES(mq_intake),
+        updated_by = VALUES(updated_by)`,
+      [
+        uuidv4(),
+        courseId,
+        branchId,
+        String(req.body?.courseName ?? '').trim(),
+        String(req.body?.branchName ?? '').trim(),
+        cqIntake,
+        mqIntake,
+        req.user?.id || null,
+      ]
+    );
+
+    return successResponse(
+      res,
+      { courseId, branchId, cqIntake, mqIntake },
+      'Branch intake saved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error saving branch intake:', error);
+    return errorResponse(res, error.message || 'Failed to save branch intake', 500);
   }
 };
 

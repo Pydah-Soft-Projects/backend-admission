@@ -11,6 +11,7 @@ import {
   getAdmissionStats,
   getAdmissionStatsByReference,
   getAdmissionStatsByDate,
+  upsertAdmissionBranchIntake,
   exportAdmissions,
   sendAdmissionConfirmationSmsById,
 } from '../controllers/admission.controller.js';
@@ -22,6 +23,7 @@ router.use(protect);
 router.get('/stats/by-reference', getAdmissionStatsByReference);
 router.get('/stats/by-date', getAdmissionStatsByDate);
 router.get('/stats', getAdmissionStats);
+router.put('/branch-intake', isSuperAdmin, upsertAdmissionBranchIntake);
 router.get('/export', isSuperAdmin, exportAdmissions);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);
