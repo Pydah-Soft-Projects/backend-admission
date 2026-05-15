@@ -2,7 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadAssignment } from '../services/notification.service.js';
-import { isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
+import { isPipelineNewLeadStatus, resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import mongoose from 'mongoose';
 import { connectHRMS } from '../config-mongo/hrms.js';
@@ -341,7 +341,7 @@ export const assignLeads = async (req, res) => {
     // Get leads before update to check status
     const placeholders = leadIdsToAssign.map(() => '?').join(',');
     const [leadsToAssign] = await pool.execute(
-      `SELECT id, lead_status FROM leads WHERE id IN (${placeholders})`,
+      `SELECT id, lead_status, call_status, visit_status FROM leads WHERE id IN (${placeholders})`,
       leadIdsToAssign
     );
 
@@ -354,7 +354,13 @@ export const assignLeads = async (req, res) => {
       const oldStatus = lead.lead_status && String(lead.lead_status).trim() !== ''
         ? String(lead.lead_status).trim()
         : 'New';
-      const newStatus = isPipelineNewLeadStatus(lead.lead_status) ? 'Assigned' : oldStatus;
+      
+      // Use the priority-based resolver to determine the new lead_status.
+      // If we are assigning to PRO, visit_status becomes 'Assigned'.
+      // If we are assigning to a Counselor, call_status becomes 'Assigned'.
+      const newStatus = isProRole
+        ? resolveLeadStatus(oldStatus, lead.call_status, 'Assigned')
+        : resolveLeadStatus(oldStatus, 'Assigned', lead.visit_status);
 
       // Update lead
       const yearNum = academicYear != null && academicYear !== '' ? parseInt(academicYear, 10) : null;

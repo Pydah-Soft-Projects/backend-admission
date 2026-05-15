@@ -104,12 +104,6 @@ let reclaimSchedule = { hour: 23, minute: 11 };
  * Reclaims **per slot** when that slot’s target date is due (counsellor vs PRO).
  * Uses `counsellor_target_date` / `pro_target_date`; legacy `target_date` is cleared when a slot is reclaimed.
  *
- * Rules (unchanged intent):
- * - Pipeline `lead_status` must be `Not Interested`, `Wrong Data`, or `Assigned`
- * - Only slots whose date is `<=` cutoff AND non-null are cleared
- * - When **no** assignees remain: `lead_status` → `New`; cycle increments only for NI/Wrong Data
- * - When one assignee remains: keep `lead_status`; no cycle increment
- *
  * @param {string} [asOfDateYmd] - `YYYY-MM-DD` in Asia/Kolkata; defaults to IST "today" when omitted.
  */
 export const reclaimExpiredLeads = async (asOfDateYmd) => {
@@ -128,13 +122,17 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
       `
       SELECT id, lead_status, cycle_number,
         assigned_to, assigned_to_pro,
-        counsellor_target_date, target_date,
+        counsellor_target_date, pro_target_date, target_date,
         academic_year, student_group
       FROM leads
-      WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned')
-        AND (assigned_to IS NOT NULL AND counsellor_target_date IS NOT NULL AND counsellor_target_date <= ?)
+      WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned', 'Call Back')
+        AND (
+          (assigned_to IS NOT NULL AND counsellor_target_date IS NOT NULL AND counsellor_target_date <= ?)
+          OR
+          (assigned_to_pro IS NOT NULL AND pro_target_date IS NOT NULL AND pro_target_date <= ?)
+        )
     `,
-      [cutoff]
+      [cutoff, cutoff]
     );
 
     if (leadsToReclaim.length === 0) {
@@ -213,53 +211,85 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
         const s = String(v).trim();
         return s.length >= 10 ? s.slice(0, 10) : s;
       };
+
       const hadSc = lead.assigned_to != null && String(lead.assigned_to).trim() !== '';
       const scYmd = slotYmd(lead.counsellor_target_date);
       const scDue = hadSc && scYmd != null && scYmd <= cutoff;
 
-      if (!scDue) continue;
-
-      const stillScAfter = false; // By definition scDue means we clear it
       const hadPro = lead.assigned_to_pro != null && String(lead.assigned_to_pro).trim() !== '';
-      const fullyUnassigned = !stillScAfter && !hadPro;
+      const proYmd = slotYmd(lead.pro_target_date);
+      const proDue = hadPro && proYmd != null && proYmd <= cutoff;
+
+      if (!scDue && !proDue) continue;
+
+      const stillScAfter = hadSc && !scDue;
+      const stillProAfter = hadPro && !proDue;
+      const fullyUnassigned = !stillScAfter && !stillProAfter;
+
       const shouldIncrementCycle =
         fullyUnassigned && (oldStatus === 'Not Interested' || oldStatus === 'Wrong Data');
       const newCycle = shouldIncrementCycle ? currentCycle + 1 : currentCycle;
       const newLeadStatus = fullyUnassigned ? 'New' : oldStatus;
 
-      const setParts = [
-        'assigned_to = NULL',
-        'assigned_at = NULL',
-        'assigned_by = NULL',
-        'counsellor_target_date = NULL',
-        'lead_status = ?',
-        'cycle_number = ?',
-        'target_date = NULL',
-        'updated_at = NOW()'
-      ];
-      const params = [newLeadStatus, newCycle, lead.id];
+      const setParts = [];
+      const params = [];
+
+      if (scDue) {
+        setParts.push('assigned_to = NULL', 'assigned_at = NULL', 'assigned_by = NULL', 'counsellor_target_date = NULL');
+      }
+      if (proDue) {
+        setParts.push('assigned_to_pro = NULL', 'pro_assigned_at = NULL', 'pro_assigned_by = NULL', 'pro_target_date = NULL');
+      }
+
+      setParts.push('lead_status = ?', 'cycle_number = ?', 'target_date = NULL', 'updated_at = NOW()');
+      params.push(newLeadStatus, newCycle, lead.id);
 
       await pool.execute(`UPDATE leads SET ${setParts.join(', ')} WHERE id = ?`, params);
 
-      const baseCommentPartial = shouldIncrementCycle
-        ? `Automated slot reclaim; cycle ${newCycle}. Pipeline was '${oldStatus}'.`
-        : `Automated slot reclaim; cycle ${newCycle} unchanged. Pipeline was '${oldStatus}'.`;
+      // Log and notify for each reclaimed slot
+      if (scDue) {
+        const scComment = shouldIncrementCycle
+          ? `Automated Counselor slot reclaim; cycle ${newCycle}. Pipeline was '${oldStatus}'.`
+          : `Automated Counselor slot reclaim; cycle ${newCycle} unchanged. Pipeline was '${oldStatus}'.`;
 
-      await insertReclaimLog({
-        leadId: lead.id,
-        oldStatus,
-        newStatus: newLeadStatus,
-        comment: `${baseCommentPartial} Counsellor slot cleared (target date reached).`,
-        previousAssignee: lead.assigned_to,
-        currentCycle,
-        newCycle,
-        cycleIncremented: shouldIncrementCycle,
-        reclaimedRole: 'counsellor',
-        academicYear: lead.academic_year,
-        studentGroup: lead.student_group
-      });
-      bumpReclaimedCount(lead.assigned_to);
-      reclaimedCount += 1;
+        await insertReclaimLog({
+          leadId: lead.id,
+          oldStatus,
+          newStatus: newLeadStatus,
+          comment: `${scComment} Target date reached.`,
+          previousAssignee: lead.assigned_to,
+          currentCycle,
+          newCycle,
+          cycleIncremented: shouldIncrementCycle,
+          reclaimedRole: 'counsellor',
+          academicYear: lead.academic_year,
+          studentGroup: lead.student_group
+        });
+        bumpReclaimedCount(lead.assigned_to);
+        reclaimedCount += 1;
+      }
+
+      if (proDue) {
+        const proComment = shouldIncrementCycle
+          ? `Automated PRO slot reclaim; cycle ${newCycle}. Pipeline was '${oldStatus}'.`
+          : `Automated PRO slot reclaim; cycle ${newCycle} unchanged. Pipeline was '${oldStatus}'.`;
+
+        await insertReclaimLog({
+          leadId: lead.id,
+          oldStatus,
+          newStatus: newLeadStatus,
+          comment: `${proComment} Target date reached.`,
+          previousAssignee: lead.assigned_to_pro,
+          currentCycle,
+          newCycle,
+          cycleIncremented: shouldIncrementCycle,
+          reclaimedRole: 'pro',
+          academicYear: lead.academic_year,
+          studentGroup: lead.student_group
+        });
+        bumpReclaimedCount(lead.assigned_to_pro);
+        reclaimedCount += 1;
+      }
     }
 
     try {
