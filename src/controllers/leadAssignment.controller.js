@@ -3691,6 +3691,45 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         uidKeyToRole.set(cohortAnalyticUserKey(u.id), String(u.role_name || '').trim());
       });
 
+      // -----------------------------------------------------------------------
+      // PRE-CALCULATE VISIT NUMBERS FOR PRO DIARY
+      // -----------------------------------------------------------------------
+      const visitLeadsSet = new Set();
+      rawAssignments.forEach(row => {
+        let logMeta = null;
+        try { logMeta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata; } catch (e) { /* ignore */ }
+        if (logMeta?.statusChannel === 'visit_status') {
+          visitLeadsSet.add(row.lead_id);
+        }
+      });
+
+      const leadVisitDateSequenceMap = new Map(); // leadId -> [date1, date2, ...]
+      if (visitLeadsSet.size > 0) {
+        const leadIdArray = Array.from(visitLeadsSet);
+        // Fetch ALL distinct visit dates for these leads across history to get correct absolute visit numbers
+        const [allVisitDates] = await pool.execute(
+          `SELECT lead_id, DATE(created_at) as visit_date
+           FROM activity_logs
+           WHERE lead_id IN (${leadIdArray.map(() => '?').join(',')})
+             AND type = 'status_change'
+             AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.statusChannel')) = 'visit_status'
+           GROUP BY lead_id, DATE(created_at)
+           ORDER BY lead_id, visit_date ASC`,
+          leadIdArray
+        );
+
+        (allVisitDates || []).forEach(row => {
+          const lid = String(row.lead_id);
+          const vDate = row.visit_date instanceof Date 
+            ? row.visit_date.toISOString().slice(0, 10) 
+            : String(row.visit_date).slice(0, 10);
+          
+          if (!leadVisitDateSequenceMap.has(lid)) leadVisitDateSequenceMap.set(lid, []);
+          leadVisitDateSequenceMap.get(lid).push(vDate);
+        });
+      }
+      // -----------------------------------------------------------------------
+
       rawAssignments.forEach(row => {
         // Find users to attribute this activity to
         const uidsToAttribute = new Set();
@@ -3899,7 +3938,15 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
                 visitStatus: statusToDisplay,
                 visitDate: row.log_created_at,
                 leadId: row.lead_id,
-                logId: row.log_id
+                logId: row.log_id,
+                visitNumber: (() => {
+                  const lid = String(row.lead_id);
+                  const vDate = dateKey;
+                  const sequence = leadVisitDateSequenceMap.get(lid);
+                  if (!sequence) return 1;
+                  const idx = sequence.indexOf(vDate);
+                  return idx !== -1 ? idx + 1 : 1;
+                })()
               });
             }
           }
