@@ -37,6 +37,13 @@ const SQL_A_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(a.branch_id AS CHAR)), ''
 const SQL_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(course_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_course_id AS CHAR)), ''))`;
 const SQL_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_branch_id AS CHAR)), ''))`;
 
+/** Valid JSON object for lead_data on admissions (alias `a`). */
+const SQL_A_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(a.lead_data) THEN a.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+/** Excel / student Reference 1 from lead_data. */
+const SQL_A_REFERENCE1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.reference1'))), '')`;
+/** Business admission date; falls back to record created_at when not set. */
+const SQL_A_EFFECTIVE_ADMISSION_DATE = `COALESCE(a.admission_date, a.created_at)`;
+
 const normalizeManagedIdForDb = (value) => {
   if (value === undefined || value === null) return null;
   const s = String(value).trim();
@@ -400,6 +407,18 @@ async function applyAdmissionCourseInfoUpdates(pool, courseInfo, updateFields, u
   }
 }
 
+const parseReferenceNameFromRow = (row) => {
+  const direct = String(row.reference_name ?? '').trim();
+  if (direct) return direct;
+  try {
+    const ld =
+      typeof row.lead_data === 'string' ? JSON.parse(row.lead_data || '{}') : row.lead_data || {};
+    return String(ld.reference1 ?? ld.referenceName ?? '').trim();
+  } catch {
+    return '';
+  }
+};
+
 const formatAdmissionListItem = (row) => ({
   _id: row.id,
   id: row.id,
@@ -453,6 +472,7 @@ const formatAdmissionListItem = (row) => ({
     rationCard: row.document_ration_card,
   },
   leadSource: row.lead_source || '',
+  referenceName: parseReferenceNameFromRow(row),
   updatedAt: row.updated_at,
   createdAt: row.created_at,
 });
@@ -597,38 +617,56 @@ export const listAdmissions = async (req, res) => {
       );
     }
 
+    const needsLeadJoin = Boolean(search);
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const fromClause = needsLeadJoin
+      ? 'FROM admissions a LEFT JOIN leads l ON a.lead_id = l.id'
+      : 'FROM admissions a';
 
     // Get total count
     const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total
-       FROM admissions a
-       LEFT JOIN leads l ON a.lead_id = l.id
-       ${whereClause}`,
+      `SELECT COUNT(*) as total ${fromClause} ${whereClause}`,
       params
     );
     const total = countResult[0]?.total || 0;
 
-    // Get paginated results.
-    // Keep this query narrow (avoid a.*) so MySQL does not sort huge TEXT/BLOB payloads.
-    const [admissions] = await pool.execute(
-      `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
-              a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
-              a.student_name, a.student_phone, a.created_at, a.updated_at,
-              a.reservation_general, a.reservation_other, a.payment_total_paid,
-              a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
-              a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
-              a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
-              a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
-              a.document_bank_passbook, a.document_ration_card,
-              l.name as lead_name, l.phone as lead_phone, l.source as lead_source
-       FROM admissions a
-       LEFT JOIN leads l ON a.lead_id = l.id
-       ${whereClause}
-       ORDER BY a.updated_at DESC
+    // Phase 1: paginate ids only — no lead join unless search needs it; no wide row payload in sort.
+    const [idRowsResult] = await pool.execute(
+      `SELECT a.id ${fromClause} ${whereClause}
+       ORDER BY a.admission_number DESC, a.updated_at DESC
        LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`,
       params
     );
+    const idRows = idRowsResult;
+
+    let admissions = [];
+    if (idRows.length > 0) {
+      const pageIds = idRows.map((row) => row.id);
+      const inMarks = pageIds.map(() => '?').join(',');
+      const orderIndex = new Map(pageIds.map((id, index) => [String(id), index]));
+
+      // Phase 2: fetch page rows by primary key (no ORDER BY — reorder in app to avoid sort buffer).
+      const [pageRows] = await pool.execute(
+        `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
+                a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
+                a.student_name, a.student_phone, a.created_at, a.updated_at,
+                a.reservation_general, a.reservation_other, a.payment_total_paid,
+                a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
+                a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
+                a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
+                a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
+                a.document_bank_passbook, a.document_ration_card,
+                a.lead_data,
+                l.name as lead_name, l.phone as lead_phone, l.source as lead_source
+         FROM admissions a
+         LEFT JOIN leads l ON a.lead_id = l.id
+         WHERE a.id IN (${inMarks})`,
+        pageIds
+      );
+      admissions = pageRows.sort(
+        (a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0)
+      );
+    }
 
     const formattedAdmissions = admissions.map(formatAdmissionListItem);
 
@@ -1511,14 +1549,12 @@ export const getAdmissionStats = async (req, res) => {
     const conditions = [];
     const params = [];
     if (startDate) {
-      conditions.push('created_at >= ?');
-      params.push(new Date(startDate));
+      conditions.push('DATE(COALESCE(admission_date, created_at)) >= ?');
+      params.push(String(startDate).slice(0, 10));
     }
     if (endDate) {
-      conditions.push('created_at <= ?');
-      const end = new Date(endDate);
-      end.setDate(end.getDate() + 1);
-      params.push(end);
+      conditions.push('DATE(COALESCE(admission_date, created_at)) <= ?');
+      params.push(String(endDate).slice(0, 10));
     }
     if (courseId || courseName) {
       if (courseId && courseName) {
@@ -1598,14 +1634,12 @@ const buildAdmissionPivotFilters = (query) => {
   const c = (field) => `a.${field}`;
 
   if (startDate) {
-    conditions.push(`${c('created_at')} >= ?`);
-    params.push(new Date(startDate));
+    conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) >= ?`);
+    params.push(String(startDate).slice(0, 10));
   }
   if (endDate) {
-    conditions.push(`${c('created_at')} <= ?`);
-    const end = new Date(endDate);
-    end.setDate(end.getDate() + 1);
-    params.push(end);
+    conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) <= ?`);
+    params.push(String(endDate).slice(0, 10));
   }
   if (courseId || courseName) {
     if (courseId && courseName) {
@@ -1717,12 +1751,8 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
     }
   };
 
-  for (const r of activeCourses) {
-    const id = String(r.id);
-    const nm = String(r.name || '').trim() || 'Unknown';
-    const k = normalizeAdmissionCourseColumnName(nm);
-    addToBucket(k, nm, id);
-  }
+  /** Each course id must map to one pivot column (avoids double-count when catalog id ≠ admission label). */
+  const assignedCourseIds = new Set();
 
   for (const row of distinctCourseRows) {
     const rawId = row.courseId;
@@ -1735,6 +1765,15 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
         : fromAdmissionText || idToSecondaryName.get(idStr) || 'Unknown';
     const k = idStr === '__none__' ? '__none__' : normalizeAdmissionCourseColumnName(label);
     addToBucket(k, label, idStr);
+    if (idStr !== '__none__') assignedCourseIds.add(idStr);
+  }
+
+  for (const r of activeCourses) {
+    const id = String(r.id);
+    if (assignedCourseIds.has(id)) continue;
+    const nm = String(r.name || '').trim() || 'Unknown';
+    const k = normalizeAdmissionCourseColumnName(nm);
+    addToBucket(k, nm, id);
   }
 
   const orderedKeys = [...buckets.keys()].filter((key) => key !== '__none__');
@@ -1772,7 +1811,7 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
 };
 
 /**
- * @desc    Admissions counts by reference staff (created_by) × course
+ * @desc    Admissions counts by student Reference 1 (lead_data.reference1) × course
  * @route   GET /api/admissions/stats/by-reference
  */
 export const getAdmissionStatsByReference = async (req, res) => {
@@ -1784,32 +1823,16 @@ export const getAdmissionStatsByReference = async (req, res) => {
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
 
     const [agg] = await pool.execute(
-      `SELECT a.created_by AS userId, ${SQL_A_EFF_COURSE_ID} AS courseId, COUNT(*) AS cnt
+      `SELECT
+         COALESCE(${SQL_A_REFERENCE1}, '__none__') AS referenceKey,
+         MAX(${SQL_A_REFERENCE1}) AS referenceName,
+         ${SQL_A_EFF_COURSE_ID} AS courseId,
+         COUNT(*) AS cnt
        FROM admissions a
        ${whereClause}
-       GROUP BY a.created_by, ${SQL_A_EFF_COURSE_ID}`,
+       GROUP BY COALESCE(${SQL_A_REFERENCE1}, '__none__'), ${SQL_A_EFF_COURSE_ID}`,
       params
     );
-
-    const userIds = [...new Set(agg.map((r) => r.userId).filter(Boolean))];
-    let userById = {};
-    if (userIds.length) {
-      const ph = userIds.map(() => '?').join(',');
-      const [userRows] = await pool.execute(
-        `SELECT id, hrms_id, emp_no, name, designation FROM users WHERE id IN (${ph})`,
-        userIds
-      );
-      const formattedUsers = userRows.map((u) => ({
-        id: u.id,
-        _id: u.id,
-        hrms_id: u.hrms_id,
-        emp_no: u.emp_no,
-        name: u.name,
-        designation: u.designation || '',
-      }));
-      await hydrateUserRowsFromHrms(formattedUsers, 'admissionStatsByReference');
-      userById = Object.fromEntries(formattedUsers.map((u) => [String(u.id), u]));
-    }
 
     const courseKey = (courseId) => {
       if (courseId === undefined || courseId === null) return '__none__';
@@ -1819,49 +1842,43 @@ export const getAdmissionStatsByReference = async (req, res) => {
       return s;
     };
 
-    const byUser = new Map();
+    const byReference = new Map();
     for (const row of agg) {
-      const uidKey = row.userId ? String(row.userId) : '__unassigned__';
-      if (!byUser.has(uidKey)) byUser.set(uidKey, {});
+      const refKey = String(row.referenceKey || '__none__');
+      if (!byReference.has(refKey)) {
+        byReference.set(refKey, {
+          displayName:
+            refKey === '__none__'
+              ? '(Not specified)'
+              : String(row.referenceName || refKey).trim() || '(Not specified)',
+        });
+      }
+      const bucket = byReference.get(refKey);
+      if (!bucket.counts) bucket.counts = {};
       const ck = courseKey(row.courseId);
-      const cur = byUser.get(uidKey);
-      cur[ck] = (cur[ck] || 0) + (Number(row.cnt) || 0);
+      bucket.counts[ck] = (bucket.counts[ck] || 0) + (Number(row.cnt) || 0);
     }
 
-    const rows = [];
-    const sortedKeys = [...byUser.keys()].sort((a, b) => {
-      if (a === '__unassigned__') return 1;
-      if (b === '__unassigned__') return -1;
-      const na = userById[a]?.name || '';
-      const nb = userById[b]?.name || '';
-      return String(na).localeCompare(String(nb));
-    });
-
-    for (const uidKey of sortedKeys) {
-      const countsRaw = byUser.get(uidKey) || {};
-      const counts = {};
-      for (const c of courses) {
-        counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
-      }
-      if (uidKey === '__unassigned__') {
-        rows.push({
-          userId: null,
-          name: '—',
-          department: '—',
-          designation: '—',
+    const rows = [...byReference.entries()]
+      .sort((a, b) => {
+        if (a[0] === '__none__') return 1;
+        if (b[0] === '__none__') return -1;
+        return String(a[1].displayName).localeCompare(String(b[1].displayName));
+      })
+      .map(([refKey, bucket]) => {
+        const countsRaw = bucket.counts || {};
+        const counts = {};
+        for (const c of courses) {
+          counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
+        }
+        const total = Object.values(countsRaw).reduce((sum, n) => sum + (Number(n) || 0), 0);
+        return {
+          referenceKey: refKey === '__none__' ? null : refKey,
+          name: bucket.displayName,
           counts,
-        });
-      } else {
-        const u = userById[uidKey];
-        rows.push({
-          userId: uidKey,
-          name: u?.name || 'Unknown user',
-          department: u?.department ?? '—',
-          designation: u?.designation || '—',
-          counts,
-        });
-      }
-    }
+          total,
+        };
+      });
 
     return successResponse(
       res,
@@ -1888,10 +1905,12 @@ export const getAdmissionStatsByDate = async (req, res) => {
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
 
     const [agg] = await pool.execute(
-      `SELECT DATE_FORMAT(a.created_at, '%Y-%m-%d') AS d, ${SQL_A_EFF_COURSE_ID} AS courseId, COUNT(*) AS cnt
+      `SELECT DATE_FORMAT(${SQL_A_EFFECTIVE_ADMISSION_DATE}, '%Y-%m-%d') AS d,
+              ${SQL_A_EFF_COURSE_ID} AS courseId,
+              COUNT(*) AS cnt
        FROM admissions a
        ${whereClause}
-       GROUP BY DATE_FORMAT(a.created_at, '%Y-%m-%d'), ${SQL_A_EFF_COURSE_ID}`,
+       GROUP BY DATE_FORMAT(${SQL_A_EFFECTIVE_ADMISSION_DATE}, '%Y-%m-%d'), ${SQL_A_EFF_COURSE_ID}`,
       params
     );
 
@@ -1921,7 +1940,8 @@ export const getAdmissionStatsByDate = async (req, res) => {
         for (const c of courses) {
           counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
         }
-        return { date, counts };
+        const total = Object.values(countsRaw).reduce((sum, n) => sum + (Number(n) || 0), 0);
+        return { date, counts, total };
       });
 
     return successResponse(
@@ -1987,13 +2007,13 @@ export const exportAdmissions = async (req, res) => {
     }
 
     if (startDate) {
-      conditions.push('a.created_at >= ?');
-      params.push(`${startDate} 00:00:00`);
+      conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) >= ?`);
+      params.push(String(startDate).slice(0, 10));
     }
 
     if (endDate) {
-      conditions.push('a.created_at <= ?');
-      params.push(`${endDate} 23:59:59`);
+      conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) <= ?`);
+      params.push(String(endDate).slice(0, 10));
     }
 
     if (search) {
@@ -2008,7 +2028,7 @@ export const exportAdmissions = async (req, res) => {
       SELECT a.* 
       FROM admissions a
       ${whereClause}
-      ORDER BY a.created_at DESC
+      ORDER BY a.admission_number DESC, a.updated_at DESC
     `;
 
     // Increase sort buffer for this session to handle large rows (e.g., 1MB+)
@@ -2042,6 +2062,7 @@ export const exportAdmissions = async (req, res) => {
       { header: 'Total Paid', key: 'totalPaid', width: 15 },
       { header: 'Balance', key: 'balance', width: 15 },
       { header: 'Source', key: 'source', width: 15 },
+      { header: 'Reference', key: 'reference', width: 22 },
       { header: 'SSC Result', key: 'sscResult', width: 10 },
       { header: 'SSC Passed Year', key: 'sscPassedYear', width: 15 },
       { header: 'Intermediate Passed Year', key: 'interPassedYear', width: 15 },
@@ -2069,6 +2090,11 @@ export const exportAdmissions = async (req, res) => {
         totalPaid: record.paymentSummary?.totalPaid || 0,
         balance: (record.paymentSummary?.totalFee || 0) - (record.paymentSummary?.totalPaid || 0),
         source: record.leadData?.source || 'Direct',
+        reference:
+          record.leadData?.reference1 ||
+          record.leadData?.referenceName ||
+          record.registrationFormData?.reference1 ||
+          '',
         sscResult: record.educationHistory?.[0]?.gradeOrPercentage || '',
         sscPassedYear: record.educationHistory?.[0]?.yearOfPassing || '',
         interPassedYear: record.educationHistory?.[1]?.yearOfPassing || '',
