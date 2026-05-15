@@ -79,6 +79,200 @@ const leadSqlDateToYmd = (v) => {
   return s.length >= 10 ? s.slice(0, 10) : undefined;
 };
 
+/**
+ * Common logic to build WHERE conditions for leads across different controllers.
+ * Optimized for large datasets (500k+) by using FULLTEXT index for general search
+ * and index-friendly prefix matching for phones/enquiries.
+ * 
+ * @param {object} req Express request object
+ * @param {string} alias Table alias for leads table (e.g., 'l')
+ * @returns {{ conditions: string[], params: any[] }}
+ */
+const buildLeadFilterConditions = (req, alias = 'l') => {
+  const conditions = [];
+  const params = [];
+  const p = alias ? `${alias}.` : '';
+
+  const {
+    mandal, state, district, village, villageInAddress, quota,
+    leadStatus, callStatus, visitStatus, applicationStatus,
+    assignedTo, courseInterested, source, startDate, endDate,
+    scheduledOn, academicYear, studentGroup, cycleNumber,
+    needsUpdate, touchedToday, excludeTouchedToday,
+    enquiryNumber, search
+  } = req.query;
+
+  // Standard Equality Filters
+  if (mandal) { conditions.push(`${p}mandal = ?`); params.push(mandal); }
+  if (state) { conditions.push(`${p}state = ?`); params.push(state); }
+  if (district) { conditions.push(`${p}district = ?`); params.push(district); }
+  
+  if (village) {
+    const villages = Array.isArray(village) 
+      ? village 
+      : String(village).split(',').map(v => v.trim()).filter(Boolean);
+      
+    if (villages.length > 0) {
+      if (req.user.roleName === 'PRO' && (villageInAddress === 'true' || villageInAddress === '1')) {
+        const villageConditions = [];
+        villages.forEach(v => {
+          const esc = v.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+          // Note: CONCAT_WS is expensive on large tables; this is kept for PRO-specific village-in-address matching
+          villageConditions.push(`LOWER(CONCAT_WS(' ', IFNULL(${p}address,''), IFNULL(${p}village,''), IFNULL(${p}mandal,''), IFNULL(${p}district,''), IFNULL(${p}state,''))) LIKE ?`);
+          params.push(`%${esc.toLowerCase()}%`);
+        });
+        conditions.push(`(${villageConditions.join(' OR ')})`);
+      } else {
+        if (villages.length === 1) {
+          conditions.push(`${p}village = ?`);
+          params.push(villages[0]);
+        } else {
+          const placeholders = villages.map(() => '?').join(',');
+          conditions.push(`${p}village IN (${placeholders})`);
+          params.push(...villages);
+        }
+      }
+    }
+  }
+
+  if (quota) { conditions.push(`${p}quota = ?`); params.push(quota); }
+  if (leadStatus) { conditions.push(`${p}lead_status = ?`); params.push(leadStatus); }
+  if (callStatus) { conditions.push(`${p}call_status = ?`); params.push(callStatus); }
+  if (visitStatus) { conditions.push(`${p}visit_status = ?`); params.push(visitStatus); }
+  if (applicationStatus) { conditions.push(`${p}application_status = ?`); params.push(applicationStatus); }
+  
+  if (assignedTo) {
+    conditions.push(`(${p}assigned_to = ? OR ${p}assigned_to_pro = ?)`);
+    params.push(assignedTo, assignedTo);
+  }
+  
+  if (courseInterested) { conditions.push(`${p}course_interested = ?`); params.push(courseInterested); }
+  if (source) { conditions.push(`${p}source = ?`); params.push(source); }
+
+  // Permissions-based filtering
+  const allowedSources = req.user.permissions?.allowedSources;
+  if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
+    const placeholders = allowedSources.map(() => '?').join(',');
+    conditions.push(`${p}source IN (${placeholders})`);
+    params.push(...allowedSources);
+  }
+
+  // Date Filtering
+  if (startDate) {
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    conditions.push(`${p}created_at >= ?`);
+    params.push(start.toISOString().slice(0, 19).replace('T', ' '));
+  }
+  if (endDate) {
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+    conditions.push(`${p}created_at <= ?`);
+    params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+  }
+  if (scheduledOn) {
+    conditions.push(`DATE(${p}next_scheduled_call) = ?`);
+    params.push(scheduledOn);
+  }
+
+  // Grouping and Cycles
+  if (academicYear != null && academicYear !== '') { 
+    conditions.push(`${p}academic_year = ?`); 
+    params.push(Number(academicYear)); 
+  }
+  if (studentGroup) { 
+    conditions.push(`${p}student_group = ?`); 
+    params.push(studentGroup); 
+  }
+  if (cycleNumber != null && cycleNumber !== '') {
+    const cycle = Number(cycleNumber);
+    if (!Number.isNaN(cycle)) {
+      conditions.push(`${p}cycle_number = ?`);
+      params.push(cycle);
+    }
+  }
+
+  if (needsUpdate === 'true' || needsUpdate === '1') {
+    conditions.push(`${p}needs_manual_update IN (1, 2)`);
+  }
+
+  // User-specific Touch Logic
+  const userId = req.user.id || req.user._id;
+  if (touchedToday === 'true' || touchedToday === '1') {
+    conditions.push(`EXISTS (
+      SELECT 1 FROM activity_logs a
+      WHERE a.lead_id = ${p}id AND a.performed_by = ?
+      AND DATE(a.created_at) = CURDATE()
+      AND a.type IN ('status_change', 'comment')
+    )`);
+    params.push(userId);
+  }
+
+  if (excludeTouchedToday === 'true' || excludeTouchedToday === '1') {
+    // Exclude leads that were already processed today (call/sms or log)
+    conditions.push(`NOT EXISTS (
+      SELECT 1 FROM communications c
+      WHERE c.lead_id = ${p}id AND c.sent_by = ? AND DATE(c.sent_at) = CURDATE()
+    )`);
+    conditions.push(`NOT EXISTS (
+      SELECT 1 FROM activity_logs a
+      WHERE a.lead_id = ${p}id AND a.performed_by = ? AND DATE(a.created_at) = CURDATE()
+    )`);
+    params.push(userId, userId);
+  }
+
+  // Enquiry Number specific search
+  if (enquiryNumber) {
+    const t = enquiryNumber.trim();
+    if (t.toUpperCase().startsWith('ENQ')) {
+      conditions.push(`${p}enquiry_number LIKE ?`);
+      params.push(`${t}%`);
+    } else {
+      conditions.push(`${p}enquiry_number LIKE ?`);
+      params.push(`%${t}%`);
+    }
+  }
+
+  // --- HIGHLY OPTIMIZED SEARCH LOGIC ---
+  if (search) {
+    const t = search.trim();
+    if (t.length >= 2) {
+      const isEnq = t.toUpperCase().startsWith('ENQ');
+      const isPhone = /^\d{5,}$/.test(t);
+      
+      if (isEnq) {
+        // Direct hit on enquiry number (starts with)
+        conditions.push(`${p}enquiry_number LIKE ?`);
+        params.push(`${t}%`);
+      } else if (isPhone) {
+        // Direct index hit on phone columns (starts with) - much faster than fulltext for digits
+        conditions.push(`(${p}phone LIKE ? OR ${p}father_phone LIKE ?)`);
+        params.push(`${t}%`, `${t}%`);
+      } else {
+        // USE FULLTEXT INDEX for names and other text fields.
+        // Boolean mode with prefix matching (+) ensures high speed on 500k+ rows.
+        // Columns must match exactly those defined in the FULLTEXT index:
+        // enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college
+        conditions.push(`MATCH(${p}enquiry_number, ${p}name, ${p}phone, ${p}email, ${p}father_name, ${p}mother_name, ${p}course_interested, ${p}district, ${p}mandal, ${p}state, ${p}application_status, ${p}hall_ticket_number, ${p}inter_college) AGAINST(? IN BOOLEAN MODE)`);
+        params.push(`+${t}*`);
+      }
+    }
+  }
+
+  // Access control
+  if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
+    if (req.user.roleName === 'PRO') {
+      conditions.push(`(${p}assigned_to_pro = ? OR ${p}assigned_to = ?)`);
+      params.push(userId, userId);
+    } else {
+      conditions.push(`${p}assigned_to = ?`);
+      params.push(userId);
+    }
+  }
+
+  return { conditions, params };
+};
+
 // Helper function to format lead data from SQL to camelCase
 const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assignedToProUser = null, viewerOptions = {}) => {
   if (!leadData) return null;
@@ -249,185 +443,8 @@ export const getLeads = async (req, res) => {
       }
     }
 
-    // Build WHERE conditions
-    const conditions = [];
-    const params = [];
-
-    // Use table alias l. for all columns so WHERE is unambiguous when query joins leads l with users
-    if (req.query.mandal) {
-      conditions.push('l.mandal = ?');
-      params.push(req.query.mandal);
-    }
-    if (req.query.state) {
-      conditions.push('l.state = ?');
-      params.push(req.query.state);
-    }
-    if (req.query.district) {
-      conditions.push('l.district = ?');
-      params.push(req.query.district);
-    }
-    if (req.query.village) {
-      const villages = Array.isArray(req.query.village) 
-        ? req.query.village 
-        : String(req.query.village).split(',').map(v => v.trim()).filter(Boolean);
-        
-      if (villages.length > 0) {
-        const proAddressMatch =
-          req.user.roleName === 'PRO' &&
-          (req.query.villageInAddress === 'true' || req.query.villageInAddress === '1');
-
-        if (proAddressMatch) {
-          const villageConditions = [];
-          villages.forEach(v => {
-            const esc = v.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
-            villageConditions.push(`LOWER(CONCAT_WS(' ', IFNULL(l.address,''), IFNULL(l.village,''), IFNULL(l.mandal,''), IFNULL(l.district,''), IFNULL(l.state,''))) LIKE ?`);
-            params.push(`%${esc.toLowerCase()}%`);
-          });
-          conditions.push(`(${villageConditions.join(' OR ')})`);
-        } else {
-          if (villages.length === 1) {
-            conditions.push('l.village = ?');
-            params.push(villages[0]);
-          } else {
-            const placeholders = villages.map(() => '?').join(',');
-            conditions.push(`l.village IN (${placeholders})`);
-            params.push(...villages);
-          }
-        }
-      }
-    }
-    if (req.query.quota) {
-      conditions.push('l.quota = ?');
-      params.push(req.query.quota);
-    }
-    if (req.query.leadStatus) {
-      conditions.push('l.lead_status = ?');
-      params.push(req.query.leadStatus);
-    }
-    if (req.query.callStatus) {
-      conditions.push('l.call_status = ?');
-      params.push(req.query.callStatus);
-    }
-    if (req.query.visitStatus) {
-      conditions.push('l.visit_status = ?');
-      params.push(req.query.visitStatus);
-    }
-    if (req.query.applicationStatus) {
-      conditions.push('l.application_status = ?');
-      params.push(req.query.applicationStatus);
-    }
-    if (req.query.assignedTo) {
-      conditions.push('(l.assigned_to = ? OR l.assigned_to_pro = ?)');
-      params.push(req.query.assignedTo, req.query.assignedTo);
-    }
-    if (req.query.courseInterested) {
-      conditions.push('l.course_interested = ?');
-      params.push(req.query.courseInterested);
-    }
-    if (req.query.source) {
-      conditions.push('l.source = ?');
-      params.push(req.query.source);
-    }
-
-    // Lead source restriction from user permissions
-    const allowedSources = req.user.permissions?.allowedSources;
-    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
-      const placeholders = allowedSources.map(() => '?').join(',');
-      conditions.push(`l.source IN (${placeholders})`);
-      params.push(...allowedSources);
-    }
-
-    // Date filtering
-    if (req.query.startDate) {
-      conditions.push('l.created_at >= ?');
-      const start = new Date(req.query.startDate);
-      start.setHours(0, 0, 0, 0);
-      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.endDate) {
-      conditions.push('l.created_at <= ?');
-      const end = new Date(req.query.endDate);
-      end.setHours(23, 59, 59, 999);
-      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.scheduledOn) {
-      conditions.push('l.next_scheduled_call >= ? AND l.next_scheduled_call <= ?');
-      params.push(`${req.query.scheduledOn} 00:00:00`, `${req.query.scheduledOn} 23:59:59`);
-    }
-    if (req.query.academicYear != null && req.query.academicYear !== '') {
-      conditions.push('l.academic_year = ?');
-      params.push(Number(req.query.academicYear));
-    }
-    if (req.query.studentGroup) {
-      conditions.push('l.student_group = ?');
-      params.push(req.query.studentGroup);
-    }
-    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
-      const cycle = Number(req.query.cycleNumber);
-      if (!Number.isNaN(cycle)) {
-        conditions.push('l.cycle_number = ?');
-        params.push(cycle);
-      }
-    }
-
-    if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
-      conditions.push('l.needs_manual_update IN (1, 2)');
-    }
-
-    // Touched today: leads with at least one comment or status_change activity for today by current user
-    const touchedToday = req.query.touchedToday === 'true' || req.query.touchedToday === '1';
-    if (touchedToday) {
-      const touchedUserId = req.user.id || req.user._id;
-      conditions.push(`EXISTS (
-        SELECT 1 FROM activity_logs a
-        WHERE a.lead_id = l.id AND a.performed_by = ?
-        AND DATE(a.created_at) = CURDATE()
-        AND a.type IN ('status_change', 'comment')
-      )`);
-      params.push(touchedUserId);
-    }
-
-    // Enquiry number search
-    if (req.query.enquiryNumber) {
-      const searchTerm = req.query.enquiryNumber.trim();
-      if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`${searchTerm}%`);
-      } else {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`%${searchTerm}%`);
-      }
-    }
-
-    // Search: fuzzy name (short queries only) + enquiry + phone/father_phone; min 2 chars to avoid per-keystroke full scans
-    if (req.query.search) {
-      const searchTerm = req.query.search.trim();
-      if (searchTerm.length >= 2) {
-        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
-        if (nameSql) {
-          const phonePart = buildLeadSearchPhoneOrSql('l.phone', 'l.father_phone', searchTerm);
-          if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`${searchTerm}%`, ...phonePart.values);
-          } else {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`%${searchTerm}%`, ...phonePart.values);
-          }
-        }
-      }
-    }
-
-    // Access control - if user is not Super Admin, only show assigned leads
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      const userId = req.user.id || req.user._id;
-      if (req.user.roleName === 'PRO') {
-        conditions.push('(l.assigned_to_pro = ? OR l.assigned_to = ?)');
-        params.push(userId, userId);
-      } else {
-        conditions.push('l.assigned_to = ?');
-        params.push(userId);
-      }
-    }
+    // Build WHERE conditions using optimized helper
+    const { conditions, params } = buildLeadFilterConditions(req, 'l');
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -452,12 +469,15 @@ export const getLeads = async (req, res) => {
     );
 
     // Get leads with pagination and user info.
-    // Optimize by paginating lead IDs first, then joining users only for the page slice.
-    // This avoids expensive joins across the full filtered lead set.
-    // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these.
+    // Optimization: Selective column selection and paginating IDs first to avoid heavy memory usage.
     const query = `
       SELECT 
-        l.*,
+        l.id, l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.father_phone, 
+        l.village, l.district, l.mandal, l.state, l.is_nri, l.gender, l.rank, l.inter_college, 
+        l.alternate_mobile, l.quota, l.application_status, l.lead_status, l.call_status, 
+        l.visit_status, l.academic_year, l.student_group, l.admission_number, l.assigned_at, 
+        l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
+        l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
         u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
         u2.id as uploaded_by_id, u2.name as uploaded_by_name,
         u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
@@ -504,7 +524,12 @@ export const getLeads = async (req, res) => {
         const rolledParams = [...params, requestedYmd];
         const rolledQuery = `
           SELECT
-            l.*,
+            l.id, l.enquiry_number, l.name, l.phone, l.email, l.father_name, l.father_phone, 
+            l.village, l.district, l.mandal, l.state, l.is_nri, l.gender, l.rank, l.inter_college, 
+            l.alternate_mobile, l.quota, l.application_status, l.lead_status, l.call_status, 
+            l.visit_status, l.academic_year, l.student_group, l.admission_number, l.assigned_at, 
+            l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
+            l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
             DATE_FORMAT(DATE_SUB(DATE(l.next_scheduled_call), INTERVAL 1 DAY), '%Y-%m-%d') AS missed_schedule_prev_day,
             u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
             u2.id as uploaded_by_id, u2.name as uploaded_by_name,
@@ -1872,145 +1897,15 @@ export const getAllLeadIds = async (req, res) => {
   try {
     const pool = getPool();
 
-    // Build WHERE conditions (same as getLeads)
-    const conditions = [];
-    const params = [];
-
-    if (req.query.mandal) {
-      conditions.push('mandal = ?');
-      params.push(req.query.mandal);
-    }
-    if (req.query.state) {
-      conditions.push('state = ?');
-      params.push(req.query.state);
-    }
-    if (req.query.district) {
-      conditions.push('district = ?');
-      params.push(req.query.district);
-    }
-    if (req.query.quota) {
-      conditions.push('quota = ?');
-      params.push(req.query.quota);
-    }
-    if (req.query.leadStatus) {
-      conditions.push('lead_status = ?');
-      params.push(req.query.leadStatus);
-    }
-    if (req.query.applicationStatus) {
-      conditions.push('application_status = ?');
-      params.push(req.query.applicationStatus);
-    }
-    if (req.query.assignedTo) {
-      conditions.push('assigned_to = ?');
-      params.push(req.query.assignedTo);
-    }
-    if (req.query.courseInterested) {
-      conditions.push('course_interested = ?');
-      params.push(req.query.courseInterested);
-    }
-    if (req.query.source) {
-      conditions.push('source = ?');
-      params.push(req.query.source);
-    }
-
-    // Date filtering
-    if (req.query.startDate) {
-      conditions.push('created_at >= ?');
-      const start = new Date(req.query.startDate);
-      start.setHours(0, 0, 0, 0);
-      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.endDate) {
-      conditions.push('created_at <= ?');
-      const end = new Date(req.query.endDate);
-      end.setHours(23, 59, 59, 999);
-      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.scheduledOn) {
-      conditions.push('DATE(next_scheduled_call) = ?');
-      params.push(req.query.scheduledOn);
-    }
-    if (req.query.academicYear != null && req.query.academicYear !== '') {
-      conditions.push('academic_year = ?');
-      params.push(Number(req.query.academicYear));
-    }
-    if (req.query.studentGroup) {
-      conditions.push('student_group = ?');
-      params.push(req.query.studentGroup);
-    }
-    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
-      const cycle = Number(req.query.cycleNumber);
-      if (!Number.isNaN(cycle)) {
-        conditions.push('cycle_number = ?');
-        params.push(cycle);
-      }
-    }
-    if (req.query.enquiryNumber) {
-      const searchTerm = req.query.enquiryNumber.trim();
-      if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        conditions.push('enquiry_number LIKE ?');
-        params.push(`${searchTerm}%`);
-      } else {
-        conditions.push('enquiry_number LIKE ?');
-        params.push(`%${searchTerm}%`);
-      }
-    }
-    if (req.query.search) {
-      const searchTerm = req.query.search.trim();
-      if (searchTerm.length >= 2) {
-        const nameSql = buildLeadNameFuzzySql('name', searchTerm, params);
-        if (nameSql) {
-          const phonePart = buildLeadSearchPhoneOrSql('phone', 'father_phone', searchTerm);
-          if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`${searchTerm}%`, ...phonePart.values);
-          } else {
-            conditions.push(`(${nameSql} OR enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`%${searchTerm}%`, ...phonePart.values);
-          }
-        }
-      }
-    }
-
-    // Access control
+    // Build WHERE conditions using optimized helper
+    const { conditions, params } = buildLeadFilterConditions(req, 'l');
     const userId = req.user.id || req.user._id;
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      if (req.user.roleName === 'PRO') {
-        conditions.push('(assigned_to_pro = ? OR assigned_to = ?)');
-        params.push(userId, userId);
-      } else {
-        conditions.push('assigned_to = ?');
-        params.push(userId);
-      }
-    }
-
-    // Lead source restriction from user permissions
-    const allowedSources = req.user.permissions?.allowedSources;
-    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
-      const placeholders = allowedSources.map(() => '?').join(',');
-      conditions.push(`source IN (${placeholders})`);
-      params.push(...allowedSources);
-    }
-
-    // Optionally exclude leads that were "touched today" by the current user (call, SMS, or activity log)
-    const excludeTouchedToday = req.query.excludeTouchedToday === 'true' || req.query.excludeTouchedToday === '1';
-    if (excludeTouchedToday) {
-      conditions.push(`NOT EXISTS (
-        SELECT 1 FROM communications c
-        WHERE c.lead_id = leads.id AND c.sent_by = ? AND DATE(c.sent_at) = CURDATE()
-      )`);
-      conditions.push(`NOT EXISTS (
-        SELECT 1 FROM activity_logs a
-        WHERE a.lead_id = leads.id AND a.performed_by = ? AND DATE(a.created_at) = CURDATE()
-      )`);
-      params.push(userId, userId);
-    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Get IDs ordered by assignment time: latest assigned first (assigned_at DESC), then by id for stability
     const [leadIds] = await pool.execute(
-      `SELECT id FROM leads ${whereClause} ORDER BY assigned_at DESC, id ASC`,
+      `SELECT l.id FROM leads l ${whereClause} ORDER BY l.assigned_at DESC, l.id ASC`,
       params
     );
 
@@ -2339,142 +2234,8 @@ export const exportLeads = async (req, res) => {
   try {
     const pool = getPool();
 
-    // Reuse filter logic from getLeads
-    const conditions = [];
-    const params = [];
-
-    if (req.query.mandal) {
-      conditions.push('l.mandal = ?');
-      params.push(req.query.mandal);
-    }
-    if (req.query.state) {
-      conditions.push('l.state = ?');
-      params.push(req.query.state);
-    }
-    if (req.query.district) {
-      conditions.push('l.district = ?');
-      params.push(req.query.district);
-    }
-    if (req.query.quota) {
-      conditions.push('l.quota = ?');
-      params.push(req.query.quota);
-    }
-    if (req.query.leadStatus) {
-      conditions.push('l.lead_status = ?');
-      params.push(req.query.leadStatus);
-    }
-    if (req.query.applicationStatus) {
-      conditions.push('l.application_status = ?');
-      params.push(req.query.applicationStatus);
-    }
-    if (req.query.assignedTo) {
-      conditions.push('l.assigned_to = ?');
-      params.push(req.query.assignedTo);
-    }
-    if (req.query.courseInterested) {
-      conditions.push('l.course_interested = ?');
-      params.push(req.query.courseInterested);
-    }
-    if (req.query.source) {
-      conditions.push('l.source = ?');
-      params.push(req.query.source);
-    }
-
-    if (req.query.startDate) {
-      conditions.push('l.created_at >= ?');
-      const start = new Date(req.query.startDate);
-      start.setHours(0, 0, 0, 0);
-      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.endDate) {
-      conditions.push('l.created_at <= ?');
-      const end = new Date(req.query.endDate);
-      end.setHours(23, 59, 59, 999);
-      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.scheduledOn) {
-      conditions.push('l.next_scheduled_call >= ? AND l.next_scheduled_call <= ?');
-      params.push(`${req.query.scheduledOn} 00:00:00`, `${req.query.scheduledOn} 23:59:59`);
-    }
-    if (req.query.academicYear != null && req.query.academicYear !== '') {
-      conditions.push('l.academic_year = ?');
-      params.push(Number(req.query.academicYear));
-    }
-    if (req.query.studentGroup) {
-      conditions.push('l.student_group = ?');
-      params.push(req.query.studentGroup);
-    }
-    if (req.query.cycleNumber != null && req.query.cycleNumber !== '') {
-      const cycle = Number(req.query.cycleNumber);
-      if (!Number.isNaN(cycle)) {
-        conditions.push('l.cycle_number = ?');
-        params.push(cycle);
-      }
-    }
-
-    if (req.query.needsUpdate === 'true' || req.query.needsUpdate === '1') {
-      conditions.push('l.needs_manual_update IN (1, 2)');
-    }
-
-    const touchedToday = req.query.touchedToday === 'true' || req.query.touchedToday === '1';
-    if (touchedToday) {
-      const touchedUserId = req.user.id || req.user._id;
-      conditions.push(`EXISTS (
-        SELECT 1 FROM activity_logs a
-        WHERE a.lead_id = l.id AND a.performed_by = ?
-        AND DATE(a.created_at) = CURDATE()
-        AND a.type IN ('status_change', 'comment')
-      )`);
-      params.push(touchedUserId);
-    }
-
-    if (req.query.enquiryNumber) {
-      const searchTerm = req.query.enquiryNumber.trim();
-      if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`${searchTerm}%`);
-      } else {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`%${searchTerm}%`);
-      }
-    }
-
-    if (req.query.search) {
-      const searchTerm = req.query.search.trim();
-      if (searchTerm.length >= 2) {
-        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
-        if (nameSql) {
-          const phonePart = buildLeadSearchPhoneOrSql('l.phone', 'l.father_phone', searchTerm);
-          if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`${searchTerm}%`, ...phonePart.values);
-          } else {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?${phonePart.sql})`);
-            params.push(`%${searchTerm}%`, ...phonePart.values);
-          }
-        }
-      }
-    }
-
-    // Access control
-    if (!hasElevatedAdminPrivileges(req.user.roleName) && req.user.roleName !== 'Admin') {
-      const userId = req.user.id || req.user._id;
-      if (req.user.roleName === 'PRO') {
-        conditions.push('(l.assigned_to_pro = ? OR l.assigned_to = ?)');
-        params.push(userId, userId);
-      } else {
-        conditions.push('l.assigned_to = ?');
-        params.push(userId);
-      }
-    }
-
-    // Lead source restriction from user permissions
-    const allowedSources = req.user.permissions?.allowedSources;
-    if (allowedSources && Array.isArray(allowedSources) && allowedSources.length > 0) {
-      const placeholders = allowedSources.map(() => '?').join(',');
-      conditions.push(`l.source IN (${placeholders})`);
-      params.push(...allowedSources);
-    }
+    // Build WHERE conditions using optimized helper
+    const { conditions, params } = buildLeadFilterConditions(req, 'l');
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
