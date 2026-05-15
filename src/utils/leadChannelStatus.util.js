@@ -80,18 +80,23 @@ export function isPipelineNewLeadStatus(leadStatus) {
 export function resolveLeadStatus(desiredLeadStatus, callStatus, visitStatus) {
   const mappedCall = mapChannelStatusToLeadStatus(callStatus);
   const mappedVisit = mapChannelStatusToLeadStatus(visitStatus);
+  const current = String(desiredLeadStatus ?? '').trim();
 
+  // 1. Get the best status from active channel updates
+  let bestChannel = null;
   if (mappedCall && mappedVisit) {
-    if (mappedCall === mappedVisit) return mappedCall;
-
-    const desired = String(desiredLeadStatus ?? '').trim();
-    if (desired && (desired === mappedCall || desired === mappedVisit)) {
-      return desired;
-    }
-    return selectHigherPriorityStatus(mappedCall, mappedVisit);
+    bestChannel = selectHigherPriorityStatus(mappedCall, mappedVisit);
+  } else {
+    bestChannel = mappedCall || mappedVisit;
   }
 
-  if (mappedCall) return mappedCall;
-  if (mappedVisit) return mappedVisit;
-  return desiredLeadStatus || 'New';
+  // 2. Resolve against current canonical status
+  if (bestChannel) {
+    // We have a channel update. We should never "downgrade" from a high-priority state
+    // (like Visited or Confirmed) unless it's an explicit admin override (not handled here).
+    return selectHigherPriorityStatus(bestChannel, current);
+  }
+
+  // 3. Fallback to current or default
+  return current || 'New';
 }

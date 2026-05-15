@@ -680,6 +680,7 @@ export async function formatJobRow(row) {
     reportContext,
     templateId: row.template_id,
     templateName: row.template_name,
+    category: row.category || 'sms',
     headerHandle: row.header_handle,
     status: row.status,
     displayStatus,

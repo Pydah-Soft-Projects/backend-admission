@@ -52,7 +52,8 @@ export const logCallCommunication = async (req, res) => {
     // Track performance
     logCallPerformance(userId, lead, durationSeconds ? Number(durationSeconds) : 0);
 
-    if (req.user.roleName === 'Student Counselor' && outcome?.trim()) {
+    const triggerStatusUpdate = ['Student Counselor', 'Super Admin', 'Manager'].includes(req.user.roleName);
+    if (triggerStatusUpdate && outcome?.trim()) {
       const oc = String(outcome).trim();
       const [stRows] = await pool.execute(
         'SELECT lead_status, call_status, visit_status, assigned_to_pro FROM leads WHERE id = ?',
