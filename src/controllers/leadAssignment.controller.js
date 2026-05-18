@@ -4462,9 +4462,9 @@ export const getProLeaves = async (req, res) => {
     const pool = getPool();
 
     let sql = `
-      SELECT l.*, u.name as user_name, u.user_name as user_handle
+      SELECT l.*, u.name as user_name, u.email as user_handle
       FROM pro_leave_logs l
-      JOIN users u ON l.user_id = u.id
+      JOIN users u ON l.user_id COLLATE utf8mb4_unicode_ci = u.id COLLATE utf8mb4_unicode_ci
       WHERE 1=1
     `;
     const params = [];
