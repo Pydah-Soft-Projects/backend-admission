@@ -251,10 +251,15 @@ const buildLeadFilterConditions = (req, alias = 'l') => {
       } else {
         // USE FULLTEXT INDEX for names and other text fields.
         // Boolean mode with prefix matching (+) ensures high speed on 500k+ rows.
-        // Columns must match exactly those defined in the FULLTEXT index:
-        // enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college
-        conditions.push(`MATCH(${p}enquiry_number, ${p}name, ${p}phone, ${p}email, ${p}father_name, ${p}mother_name, ${p}course_interested, ${p}district, ${p}mandal, ${p}state, ${p}application_status, ${p}hall_ticket_number, ${p}inter_college) AGAINST(? IN BOOLEAN MODE)`);
-        params.push(`+${t}*`);
+        // Clean the search term by removing boolean operators that could cause SQL syntax errors
+        const cleanT = t.replace(/[+\-<>\~*\"()@]/g, ' ').trim();
+        if (cleanT.length > 0) {
+          const booleanSearchStr = cleanT.split(/\s+/).map(word => `+${word}*`).join(' ');
+          // Columns must match exactly those defined in the FULLTEXT index:
+          // enquiry_number, name, phone, email, father_name, mother_name, course_interested, district, mandal, state, application_status, hall_ticket_number, inter_college
+          conditions.push(`MATCH(${p}enquiry_number, ${p}name, ${p}phone, ${p}email, ${p}father_name, ${p}mother_name, ${p}course_interested, ${p}district, ${p}mandal, ${p}state, ${p}application_status, ${p}hall_ticket_number, ${p}inter_college) AGAINST(? IN BOOLEAN MODE)`);
+          params.push(booleanSearchStr);
+        }
       }
     }
   }

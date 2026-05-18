@@ -9,7 +9,7 @@ const collectLeadContactNumbers = (lead) => {
   if (!lead) {
     return numbers;
   }
-  [lead.phone, lead.father_phone].forEach((num) => {
+  [lead.phone, lead.father_phone, lead.mother_phone, lead.alternate_mobile].forEach((num) => {
     const sanitized = sanitizeNumber(num);
     if (sanitized) {
       numbers.add(sanitized);
