@@ -15,6 +15,11 @@
  */
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+import {
+  isLateralRegistrationExtras,
+  resolveExpectedBatchYear,
+  resolveSecondaryYearOfStudy,
+} from '../utils/lateralBatch.util.js';
 
 dotenv.config();
 
@@ -197,6 +202,199 @@ function parseJson(val) {
   }
 }
 
+function batchNeedsFix(current, expected) {
+  const cur = String(current ?? '').trim();
+  if (!expected) return false;
+  if (!cur) return true;
+  if (cur === expected) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(cur)) return true;
+  if (/^(19|20)\d{2}$/.test(cur) && cur !== expected) return true;
+  return false;
+}
+
+function registrationExtrasFromJoiningLeadData(joiningLeadData) {
+  const jld = parseJson(joiningLeadData);
+  return jld._joiningRegistrationExtras && typeof jld._joiningRegistrationExtras === 'object'
+    ? jld._joiningRegistrationExtras
+    : {};
+}
+
+async function backfillBatchFor2026Admissions(primary, secondary) {
+  const [rows] = await primary.execute(`
+    SELECT a.id, a.admission_number, a.joining_id, a.lead_data, j.lead_data AS joining_lead_data
+    FROM admissions a
+    LEFT JOIN joinings j ON j.id = a.joining_id
+    WHERE a.admission_number LIKE '202600%'
+  `);
+  let primaryUpdated = 0;
+  let joiningUpdated = 0;
+  let secondaryUpdated = 0;
+  const lateralFixed = [];
+
+  for (const r of rows) {
+    const num = String(r.admission_number).trim();
+    const jex = registrationExtrasFromJoiningLeadData(r.joining_lead_data);
+    const expected = resolveExpectedBatchYear(jex, num);
+    if (!expected) continue;
+
+    const ld = parseJson(r.lead_data);
+    const admEx =
+      ld._joiningRegistrationExtras && typeof ld._joiningRegistrationExtras === 'object'
+        ? { ...ld._joiningRegistrationExtras }
+        : { ...jex };
+    if (batchNeedsFix(admEx.batch, expected)) {
+      admEx.batch = expected;
+      ld._joiningRegistrationExtras = admEx;
+      if (!DRY) {
+        await primary.execute('UPDATE admissions SET lead_data = ? WHERE id = ?', [
+          JSON.stringify(ld),
+          r.id,
+        ]);
+      }
+      primaryUpdated += 1;
+      if (isLateralRegistrationExtras(jex, num)) lateralFixed.push(num);
+    }
+
+    if (r.joining_id) {
+      const jld = parseJson(r.joining_lead_data);
+      const jexLocal =
+        jld._joiningRegistrationExtras && typeof jld._joiningRegistrationExtras === 'object'
+          ? { ...jld._joiningRegistrationExtras }
+          : {};
+      if (batchNeedsFix(jexLocal.batch, expected)) {
+        jexLocal.batch = expected;
+        jld._joiningRegistrationExtras = jexLocal;
+        if (!DRY) {
+          await primary.execute('UPDATE joinings SET lead_data = ? WHERE id = ?', [
+            JSON.stringify(jld),
+            r.joining_id,
+          ]);
+        }
+        joiningUpdated += 1;
+      }
+    }
+
+    const [sec] = await secondary.execute(
+      'SELECT batch, current_year, student_status, student_data FROM students WHERE admission_number = ? LIMIT 1',
+      [num]
+    );
+    if (!sec.length) continue;
+
+    const lateral = isLateralRegistrationExtras(jex, num);
+    const secBatchBad = batchNeedsFix(sec[0].batch, expected);
+    const yearOfStudy = resolveSecondaryYearOfStudy(jex);
+    const secYearBad =
+      yearOfStudy != null && Number(sec[0].current_year) !== yearOfStudy;
+    const secStatusBad =
+      lateral && !/lateral/i.test(String(sec[0].student_status ?? ''));
+
+    if (!secBatchBad && !secYearBad && !secStatusBad) continue;
+
+    const sd = parseJson(sec[0].student_data);
+    if (secBatchBad) {
+      sd.batch = expected;
+      if (sd.registrationFormData && typeof sd.registrationFormData === 'object') {
+        sd.registrationFormData.batch = expected;
+      }
+    }
+    if (!DRY) {
+      await secondary.execute(
+        `UPDATE students SET
+           batch = COALESCE(?, batch),
+           current_year = CASE WHEN ? THEN ? ELSE current_year END,
+           student_status = CASE WHEN ? THEN 'Lateral' ELSE student_status END,
+           student_data = ?,
+           updated_at = NOW()
+         WHERE admission_number = ?`,
+        [
+          secBatchBad ? expected : null,
+          secYearBad ? 1 : 0,
+          yearOfStudy,
+          secStatusBad ? 1 : 0,
+          JSON.stringify(sd),
+          num,
+        ]
+      );
+    }
+    secondaryUpdated += 1;
+    if (lateral) lateralFixed.push(num);
+  }
+
+  return {
+    scanned: rows.length,
+    primaryUpdated,
+    joiningUpdated,
+    secondaryUpdated,
+    lateralAdmissionNumbers: [...new Set(lateralFixed)],
+  };
+}
+
+async function backfillSecondaryStudentCollege(primary, secondary) {
+  /** Fill `students.college` from managed course id when registration extras omitted college. */
+  const [rows] = await primary.execute(`
+    SELECT a.admission_number, a.managed_course_id
+    FROM admissions a
+    WHERE a.admission_number IS NOT NULL
+      AND TRIM(a.admission_number) != ''
+      AND a.managed_course_id IS NOT NULL
+      AND TRIM(a.managed_course_id) != ''
+  `);
+  let updated = 0;
+  let skipped = 0;
+  for (const r of rows) {
+    const num = String(r.admission_number).trim();
+    const mc = String(r.managed_course_id).trim();
+    const [sec] = await secondary.execute(
+      `SELECT admission_number, college, student_data
+       FROM students WHERE admission_number = ? LIMIT 1`,
+      [num]
+    );
+    if (!sec.length) {
+      skipped += 1;
+      continue;
+    }
+    if (sec[0].college != null && String(sec[0].college).trim() !== '') {
+      skipped += 1;
+      continue;
+    }
+    const [courseRows] = await secondary.execute(
+      'SELECT college_id FROM courses WHERE id = ? LIMIT 1',
+      [mc]
+    );
+    if (!courseRows.length || courseRows[0].college_id == null) {
+      skipped += 1;
+      continue;
+    }
+    const collegeId = Number.parseInt(String(courseRows[0].college_id), 10);
+    if (!Number.isFinite(collegeId)) {
+      skipped += 1;
+      continue;
+    }
+    const [collegeRows] = await secondary.execute(
+      'SELECT name FROM colleges WHERE id = ? LIMIT 1',
+      [collegeId]
+    );
+    const collegeName =
+      collegeRows.length > 0 && collegeRows[0].name != null
+        ? String(collegeRows[0].name).trim()
+        : '';
+    if (!collegeName) {
+      skipped += 1;
+      continue;
+    }
+    const sd = parseJson(sec[0].student_data);
+    sd._crm_managed_college_id = String(collegeId);
+    if (!DRY) {
+      await secondary.execute(
+        'UPDATE students SET college = ?, student_data = ?, updated_at = NOW() WHERE admission_number = ?',
+        [collegeName, JSON.stringify(sd), num]
+      );
+    }
+    updated += 1;
+  }
+  return { admissionsScanned: rows.length, updated, skipped };
+}
+
 async function mergeCrmManagedIntoSecondaryStudentData(primary, secondary) {
   const [rows] = await primary.execute(`
     SELECT admission_number, managed_course_id, managed_branch_id
@@ -371,12 +569,16 @@ async function main() {
     report.steps.nameResolve = 'skipped (--dry-run)';
     report.steps.joiningsCopyFromAdmissions = 'skipped (--dry-run)';
     report.steps.secondaryStudentDataMerge = 'skipped (--dry-run)';
+    report.steps.secondaryCollegeBackfill = 'skipped (--dry-run)';
+    report.steps.batch2026Backfill = 'skipped (--dry-run)';
     report.steps.secondaryOnlyInfer = 'skipped (--dry-run)';
   } else {
     report.steps.leadDataBackfill = await backfillFromLeadData(primary);
     report.steps.nameResolve = await resolveFromSecondaryNames(primary, secondary, secCourses, secBranches);
     report.steps.joiningsCopyFromAdmissions = await copyAdmissionManagedToJoinings(primary);
     report.steps.secondaryStudentDataMerge = await mergeCrmManagedIntoSecondaryStudentData(primary, secondary);
+    report.steps.secondaryCollegeBackfill = await backfillSecondaryStudentCollege(primary, secondary);
+    report.steps.batch2026Backfill = await backfillBatchFor2026Admissions(primary, secondary);
     report.steps.secondaryOnlyInfer = await inferManagedIdsForSecondaryOnlyStudents(
       secondary,
       secCourses,

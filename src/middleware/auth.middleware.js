@@ -2,6 +2,10 @@ import jwt from 'jsonwebtoken';
 import { getPool } from '../config-sql/database.js';
 import { errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges, isTrueSuperAdmin } from '../utils/role.util.js';
+import {
+  canJoiningEditAdmission,
+  canJoiningEditReference,
+} from '../utils/joiningPermissions.util.js';
 
 export const protect = async (req, res, next) => {
   try {
@@ -119,6 +123,34 @@ export const requireTimeTrackingEnabled = (req, res, next) => {
     return errorResponse(res, 'Login and logout time tracking must be enabled to access this resource. Please enable it in Settings.', 403);
   }
   next();
+};
+
+/** Sub Super Admin joining desk: edit Reference 1 on admissions (Super Admin always allowed). */
+export const requireJoiningEditReference = (req, res, next) => {
+  if (!req.user) {
+    return errorResponse(res, 'Not authenticated', 401);
+  }
+  if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+    return errorResponse(res, 'Access denied. Super Admin only', 403);
+  }
+  if (canJoiningEditReference(req.user)) {
+    return next();
+  }
+  return errorResponse(res, 'Access denied. Joining reference edit permission required', 403);
+};
+
+/** Sub Super Admin joining desk: edit admission / joining forms (Super Admin always allowed). */
+export const requireJoiningEditAdmission = (req, res, next) => {
+  if (!req.user) {
+    return errorResponse(res, 'Not authenticated', 401);
+  }
+  if (!hasElevatedAdminPrivileges(req.user.roleName)) {
+    return errorResponse(res, 'Access denied. Super Admin only', 403);
+  }
+  if (canJoiningEditAdmission(req.user)) {
+    return next();
+  }
+  return errorResponse(res, 'Access denied. Joining admission edit permission required', 403);
 };
 
 // Check if user has specific permission (for future use)

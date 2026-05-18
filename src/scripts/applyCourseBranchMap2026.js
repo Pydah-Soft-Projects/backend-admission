@@ -92,10 +92,32 @@ async function main() {
             [`${after.course} - ${after.branch}`, a.lead_id]
           );
         }
-        await secondary.execute(
-          `UPDATE students SET course = ?, branch = ?, updated_at = NOW() WHERE admission_number = ?`,
-          [after.course, after.branch, row.admissionNumber]
-        );
+        let collegeName = null;
+        if (after.managed_course_id) {
+          const [courseRows] = await secondary.execute(
+            'SELECT college_id FROM courses WHERE id = ? LIMIT 1',
+            [after.managed_course_id]
+          );
+          const collegeId = courseRows[0]?.college_id;
+          if (collegeId != null) {
+            const [collegeRows] = await secondary.execute(
+              'SELECT name FROM colleges WHERE id = ? LIMIT 1',
+              [collegeId]
+            );
+            collegeName = collegeRows[0]?.name ? String(collegeRows[0].name).trim() : null;
+          }
+        }
+        if (collegeName) {
+          await secondary.execute(
+            `UPDATE students SET course = ?, branch = ?, college = ?, updated_at = NOW() WHERE admission_number = ?`,
+            [after.course, after.branch, collegeName, row.admissionNumber]
+          );
+        } else {
+          await secondary.execute(
+            `UPDATE students SET course = ?, branch = ?, updated_at = NOW() WHERE admission_number = ?`,
+            [after.course, after.branch, row.admissionNumber]
+          );
+        }
       }
     }
 

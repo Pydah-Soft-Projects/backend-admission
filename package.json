@@ -32,6 +32,7 @@
     "db:delete-draft-joinings-without-enquiry": "node src/scripts/deleteDraftJoiningsWithoutEnquiry.js",
     "db:import-admissions-master-2026": "node src/scripts/importAdmissionsMasterFromExcel.js --write",
     "db:compare-admissions-master-2026": "node src/scripts/compareAdmissionsMaster2026.js",
+    "db:apply-btech-lateral": "node src/scripts/applyBtechLateralEntry.js",
     "db:apply-course-branch-map-2026:dry": "node src/scripts/applyCourseBranchMap2026.js --dry-run",
     "db:apply-course-branch-map-2026:apply": "node src/scripts/applyCourseBranchMap2026.js --apply",
     "db:apply-reference-names-2026": "node src/scripts/applyReferenceNamesFromExcel2026.js --apply",

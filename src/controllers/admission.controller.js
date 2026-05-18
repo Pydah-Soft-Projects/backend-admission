@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { hydrateUserRowsFromHrms } from './user.controller.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
-import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
+import { syncToSecondaryDatabase, warnIfSecondaryStudentSyncMissed } from '../utils/studentSync.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import ExcelJS from 'exceljs';
@@ -199,6 +199,63 @@ const parseAdmissionLeadData = (value) => {
     }
   }
   return value && typeof value === 'object' ? value : {};
+};
+
+/**
+ * Persist Excel "Reference 1" on admission + linked joining + CRM lead (same as import script).
+ * Stored at lead_data.reference1 (admissions/joinings) and dynamic_fields.reference1 (leads).
+ */
+export const persistAdmissionReference1 = async (pool, admissionId, reference1, userId) => {
+  const ref = String(reference1 ?? '').trim();
+  const [admRows] = await pool.execute(
+    'SELECT id, lead_id, joining_id FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  if (!admRows.length) {
+    const err = new Error('Admission record not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  const row = admRows[0];
+
+  await pool.execute(
+    `UPDATE admissions SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_by = ?,
+       updated_at = NOW()
+     WHERE id = ?`,
+    [ref, userId, admissionId]
+  );
+
+  if (row.joining_id) {
+    await pool.execute(
+      `UPDATE joinings SET
+         lead_data = JSON_SET(
+           COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+           '$.reference1', ?
+         ),
+         updated_by = ?,
+         updated_at = NOW()
+       WHERE id = ?`,
+      [ref, userId, row.joining_id]
+    );
+  }
+
+  if (row.lead_id) {
+    await pool.execute(
+      `UPDATE leads SET
+         dynamic_fields = JSON_SET(
+           COALESCE(CASE WHEN JSON_VALID(dynamic_fields) THEN dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT()),
+           '$.reference1', ?
+         ),
+         updated_at = NOW()
+       WHERE id = ?`,
+      [ref, row.lead_id]
+    );
+  }
 };
 
 const qualificationMeritFromSql = (value) => {
@@ -587,6 +644,7 @@ const formatAdmissionListItem = (row) => ({
   },
   reservation: {
     general: row.reservation_general || 'oc',
+    isEws: row.reservation_is_ews === 1 || row.reservation_is_ews === true,
     other: row.reservation_other ? (typeof row.reservation_other === 'string' ? JSON.parse(row.reservation_other) : row.reservation_other) : [],
   },
   paymentSummary: {
@@ -788,7 +846,7 @@ export const listAdmissions = async (req, res) => {
         `SELECT a.id, a.lead_id, a.joining_id, a.admission_number, a.status,
                 a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
                 a.student_name, a.student_phone, a.created_at, a.updated_at,
-                a.reservation_general, a.reservation_other, a.payment_total_paid,
+                a.reservation_general, a.reservation_is_ews, a.reservation_other, a.payment_total_paid,
                 a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
                 a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
                 a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
@@ -1047,11 +1105,15 @@ export const cancelAdmissionById = async (req, res) => {
     );
     const formattedAdmission = await formatAdmission(updated[0], pool);
 
-    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
-      leadId: formattedAdmission.leadId,
-      joiningId: formattedAdmission.joiningId,
-      email: formattedAdmission.leadData?.email || ''
-    });
+    warnIfSecondaryStudentSyncMissed(
+      'cancelAdmissionById',
+      { admissionId, admissionNumber: formattedAdmission.admissionNumber },
+      await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+        leadId: formattedAdmission.leadId,
+        joiningId: formattedAdmission.joiningId,
+        email: formattedAdmission.leadData?.email || ''
+      })
+    );
 
     return successResponse(
       res,
@@ -1398,6 +1460,10 @@ export const updateAdmissionById = async (req, res) => {
       await saveAdmissionRelatedTables(pool, admissionId, payload);
     }
 
+    if (payload.reference1 !== undefined) {
+      await persistAdmissionReference1(pool, admissionId, payload.reference1, req.user.id);
+    }
+
     // Fetch and return updated admission
     const [updated] = await pool.execute(
       'SELECT * FROM admissions WHERE id = ?',
@@ -1405,12 +1471,15 @@ export const updateAdmissionById = async (req, res) => {
     );
     const formattedAdmission = await formatAdmission(updated[0], pool);
 
-    // Sync to secondary DB
-    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
-      leadId: formattedAdmission.leadId,
-      joiningId: formattedAdmission.joiningId,
-      email: formattedAdmission.leadData?.email || ''
-    });
+    warnIfSecondaryStudentSyncMissed(
+      'updateAdmissionById',
+      { admissionId, admissionNumber: formattedAdmission.admissionNumber },
+      await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+        leadId: formattedAdmission.leadId,
+        joiningId: formattedAdmission.joiningId,
+        email: formattedAdmission.leadData?.email || ''
+      })
+    );
 
     return successResponse(
       res,
@@ -1650,6 +1719,10 @@ export const updateAdmissionByLead = async (req, res) => {
       await saveAdmissionRelatedTables(pool, admissionId, payload);
     }
 
+    if (payload.reference1 !== undefined) {
+      await persistAdmissionReference1(pool, admissionId, payload.reference1, req.user.id);
+    }
+
     // Fetch and return updated admission
     const [updated] = await pool.execute(
       'SELECT * FROM admissions WHERE id = ?',
@@ -1657,12 +1730,15 @@ export const updateAdmissionByLead = async (req, res) => {
     );
     const formattedAdmission = await formatAdmission(updated[0], pool);
 
-    // Sync to secondary DB
-    await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
-      leadId: formattedAdmission.leadId,
-      joiningId: formattedAdmission.joiningId,
-      email: formattedAdmission.leadData?.email || ''
-    });
+    warnIfSecondaryStudentSyncMissed(
+      'updateAdmissionByLead',
+      { leadId, admissionId, admissionNumber: formattedAdmission.admissionNumber },
+      await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+        leadId: formattedAdmission.leadId,
+        joiningId: formattedAdmission.joiningId,
+        email: formattedAdmission.leadData?.email || ''
+      })
+    );
 
     return successResponse(
       res,
@@ -1675,6 +1751,36 @@ export const updateAdmissionByLead = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to update admission record',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * @desc    Update Reference 1 only (admissions.lead_data.reference1 + joining + lead mirrors)
+ * @route   PATCH /api/admissions/id/:admissionId/reference
+ */
+export const patchAdmissionReferenceById = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    if (req.body?.reference1 === undefined) {
+      return errorResponse(res, 'reference1 is required', 400);
+    }
+
+    const pool = getPool();
+    await persistAdmissionReference1(pool, admissionId, req.body.reference1, req.user.id);
+
+    const [updated] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [admissionId]);
+    const formattedAdmission = await formatAdmission(updated[0], pool);
+
+    return successResponse(res, formattedAdmission, 'Reference updated successfully', 200);
+  } catch (error) {
+    console.error('Error updating admission reference:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to update reference',
       error.statusCode || 500
     );
   }

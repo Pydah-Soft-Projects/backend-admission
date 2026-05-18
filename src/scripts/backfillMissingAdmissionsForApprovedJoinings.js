@@ -1,32 +1,11 @@
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import { v4 as uuidv4 } from 'uuid';
+import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
 
 dotenv.config();
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
-
-async function generateAdmissionNumber(conn) {
-  const currentYear = new Date().getFullYear();
-  const [sequences] = await conn.execute(
-    'SELECT * FROM admission_sequences WHERE year = ?',
-    [currentYear]
-  );
-  let sequenceNumber = 1;
-  if (sequences.length > 0) {
-    sequenceNumber = Number(sequences[0].last_sequence || 0) + 1;
-    await conn.execute(
-      'UPDATE admission_sequences SET last_sequence = ?, updated_at = NOW() WHERE year = ?',
-      [sequenceNumber, currentYear]
-    );
-  } else {
-    await conn.execute(
-      'INSERT INTO admission_sequences (id, year, last_sequence, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
-      [uuidv4(), currentYear, sequenceNumber]
-    );
-  }
-  return `${currentYear}${String(sequenceNumber).padStart(4, '0')}`;
-}
 
 async function main() {
   const conn = await mysql.createConnection({

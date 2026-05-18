@@ -1,4 +1,9 @@
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import {
+  isLateralRegistrationExtras,
+  resolveExpectedBatchYear,
+  resolveSecondaryYearOfStudy,
+} from './lateralBatch.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -86,10 +91,12 @@ export const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras
       return 'Regular';
     }
     if (lower === 'withdrawn') return 'Discontinued';
+    if (lower === 'lateral') return 'Lateral';
 
     // Keep known secondary lifecycle values, fallback to Regular for unknown workflow-like tokens.
     const allowed = new Set([
       'regular',
+      'lateral',
       'discontinued',
       'admission cancelled',
       'detained',
@@ -180,6 +187,62 @@ const deriveCertificationDialogCompat = (certificatesStatus, registrationExtras)
     '10th_original': tenthStudyReceived == null ? yesNo : tenthStudyReceived ? 'Yes' : 'No',
   };
 };
+/**
+ * Resolve secondary `colleges` row from a managed (secondary) `courses.id`.
+ * @returns {Promise<{ collegeId: number|null, collegeName: string|null }>}
+ */
+export const resolveSecondaryCollegeFromManagedCourseId = async (secondaryPool, courseIdRaw) => {
+  const courseId = Number.parseInt(String(courseIdRaw ?? '').trim(), 10);
+  if (!Number.isFinite(courseId)) return { collegeId: null, collegeName: null };
+
+  const [courseRows] = await secondaryPool.execute(
+    'SELECT college_id FROM courses WHERE id = ? LIMIT 1',
+    [courseId]
+  );
+  if (!courseRows.length || courseRows[0].college_id == null) {
+    return { collegeId: null, collegeName: null };
+  }
+
+  const collegeId = Number.parseInt(String(courseRows[0].college_id), 10);
+  if (!Number.isFinite(collegeId)) return { collegeId: null, collegeName: null };
+
+  const [collegeRows] = await secondaryPool.execute(
+    'SELECT name FROM colleges WHERE id = ? LIMIT 1',
+    [collegeId]
+  );
+  const collegeName =
+    collegeRows.length > 0 && collegeRows[0].name != null
+      ? String(collegeRows[0].name).trim() || null
+      : null;
+  return { collegeId, collegeName };
+};
+
+const isUuidLike = (value) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value ?? '').trim());
+
+/** @see resolveExpectedBatchYear — respects B.Tech lateral (2026 admission no, 2025 batch). */
+export const resolveSecondaryStudentBatch = (registrationExtras, admissionNumber) => {
+  const fromBatch =
+    registrationExtras?.batch != null && String(registrationExtras.batch).trim() !== ''
+      ? String(registrationExtras.batch).trim()
+      : null;
+
+  if (fromBatch && !isUuidLike(fromBatch) && /^(19|20)\d{2}$/.test(fromBatch)) {
+    const expected = resolveExpectedBatchYear(registrationExtras, admissionNumber);
+    if (!expected || fromBatch === expected) return fromBatch;
+    if (isLateralRegistrationExtras(registrationExtras, admissionNumber)) {
+      return expected;
+    }
+    return expected;
+  }
+
+  const expected = resolveExpectedBatchYear(registrationExtras, admissionNumber);
+  if (expected && !isUuidLike(expected)) return expected;
+  return null;
+};
+
+export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './lateralBatch.util.js';
+
 const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
   const q = String(quotaValue ?? '').trim().toUpperCase();
   if (q === 'MANG' || q === 'MANAGEMENT') return 'MANG';
@@ -202,7 +265,8 @@ const buildStudentDataForSecondaryStorage = (
   extraInfo,
   secondaryStudentStatus,
   normalizedDob,
-  certificationCompat
+  certificationCompat,
+  managedCollegeId = null
 ) => {
   const payload = {
     ...admissionData,
@@ -221,6 +285,10 @@ const buildStudentDataForSecondaryStorage = (
     if (ci.branchId != null && String(ci.branchId).trim() !== '') {
       payload._crm_managed_branch_id = String(ci.branchId).trim();
     }
+  }
+
+  if (managedCollegeId != null && String(managedCollegeId).trim() !== '') {
+    payload._crm_managed_college_id = String(managedCollegeId).trim();
   }
 
   // Never leave primary joining/admission workflow on top-level `status` — other apps treat it like student_status.
@@ -279,11 +347,30 @@ const buildStudentDataForSecondaryStorage = (
 /**
  * Sync admission/student data to secondary database
  * @param {Object} admissionData - Formatted admission/joining data
- * @param {string} admissionNumber - The student's admission number
- * @param {Object} extraInfo - Optional extra info like lead email, joining id
+ * @param {string} [admissionNumber] - The student's admission number (falls back to admissionData / leadData)
+ * @param {Object} [extraInfo] - Optional extra info like lead email, joining id
+ * @returns {Promise<boolean>} true if a row was written to secondary; false if skipped or failed
  */
 export const syncToSecondaryDatabase = async (admissionData, admissionNumber, extraInfo = {}) => {
-  if (!admissionNumber) return;
+  const toTrim = (v) => {
+    if (v === undefined || v === null) return '';
+    return String(v).trim();
+  };
+
+  let resolvedAdmissionNumber = toTrim(admissionNumber);
+  if (!resolvedAdmissionNumber) {
+    resolvedAdmissionNumber = toTrim(admissionData?.admissionNumber);
+  }
+  if (!resolvedAdmissionNumber && admissionData?.leadData && typeof admissionData.leadData === 'object') {
+    resolvedAdmissionNumber = toTrim(
+      admissionData.leadData.admission_number ?? admissionData.leadData.admissionNumber
+    );
+  }
+
+  if (!resolvedAdmissionNumber) {
+    console.warn('[secondary-sync] skipped: missing admission number on admission payload');
+    return false;
+  }
 
   try {
     const secondaryPool = getSecondaryPool();
@@ -316,6 +403,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
 
     const reservationGeneral = toText(admissionData?.reservation?.general).toUpperCase();
     const currentYearFromExtras =
+      resolveSecondaryYearOfStudy(registrationExtras) ??
       parseCurrentYear(registrationExtras?.current_year) ??
       parseCurrentYear(registrationExtras?.currentYear);
     const certificatesStatus = deriveCertificatesStatus(registrationExtras);
@@ -324,6 +412,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       registrationExtras
     );
     const studType = deriveStudTypeFromQuota(admissionData?.courseInfo?.quota, registrationExtras);
+    const resolvedBatch = resolveSecondaryStudentBatch(registrationExtras, resolvedAdmissionNumber);
     const normalizedDob = normalizeDobForSecondary(admissionData?.studentInfo?.dateOfBirth);
     const certificationCompat = deriveCertificationDialogCompat(certificatesStatus, registrationExtras);
 
@@ -332,10 +421,12 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       registrationExtras?.collegeId ??
       registrationExtras?.school_or_college_id ??
       registrationExtras?.schoolOrCollegeId;
+    let resolvedCollegeId = null;
     let resolvedCollegeName = null;
     if (collegeIdRaw !== undefined && collegeIdRaw !== null && String(collegeIdRaw).trim() !== '') {
       const collegeId = Number.parseInt(String(collegeIdRaw), 10);
       if (Number.isFinite(collegeId)) {
+        resolvedCollegeId = collegeId;
         const [collegeRows] = await secondaryPool.execute(
           'SELECT name FROM colleges WHERE id = ? LIMIT 1',
           [collegeId]
@@ -346,24 +437,40 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       }
     }
 
+    const managedCourseIdForCollege =
+      admissionData?.courseInfo?.courseId ??
+      registrationExtras?.managed_course_id ??
+      registrationExtras?.managedCourseId;
+    if (!resolvedCollegeName && managedCourseIdForCollege) {
+      const fromCourse = await resolveSecondaryCollegeFromManagedCourseId(
+        secondaryPool,
+        managedCourseIdForCollege
+      );
+      if (fromCourse.collegeName) {
+        resolvedCollegeName = fromCourse.collegeName;
+        resolvedCollegeId = fromCourse.collegeId;
+      }
+    }
+
     // Check if student exists
     const [existingStudents] = await secondaryPool.execute(
       'SELECT id FROM students WHERE admission_number = ?',
-      [admissionNumber]
+      [resolvedAdmissionNumber]
     );
 
     const { payload: studentDataSecondary, studentAddressLine } = buildStudentDataForSecondaryStorage(
       admissionData,
-      admissionNumber,
+      resolvedAdmissionNumber,
       extraInfo,
       secondaryStudentStatus,
       normalizedDob,
-      certificationCompat
+      certificationCompat,
+      resolvedCollegeId
     );
 
     const studentParams = [
-      admissionNumber,
-      admissionNumber,
+      resolvedAdmissionNumber,
+      resolvedAdmissionNumber,
       admissionData.studentInfo?.name || '',
       admissionData.studentInfo?.phone || '',
       normalizedDob,
@@ -382,7 +489,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         `${admissionData.address?.communication?.doorOrStreet || ''}, ${admissionData.address?.communication?.landmark || ''}`.trim(),
       JSON.stringify(studentDataSecondary),
       admissionData.parents?.mother?.phone || '',
-      toNullableText(registrationExtras?.batch) || toNullableText(registrationExtras?.academic_year),
+      toNullableText(resolvedBatch),
       resolvedCollegeName ||
         toNullableText(registrationExtras?.school_or_college_name) ||
         toNullableText(registrationExtras?.college),
@@ -432,9 +539,9 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           admission_date = ?,
           student_status = ?
         WHERE admission_number = ?`,
-        [...studentParams.slice(2), admissionNumber]
+        [...studentParams.slice(2), resolvedAdmissionNumber]
       );
-      console.log(`Synced update for student ${admissionNumber} to secondary DB`);
+      console.log(`Synced update for student ${resolvedAdmissionNumber} to secondary DB`);
     } else {
       await secondaryPool.execute(
         `INSERT INTO students (
@@ -474,12 +581,19 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
         studentParams
       );
-      console.log(`Synced new student ${admissionNumber} to secondary DB`);
+      console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);
     }
     return true;
   } catch (error) {
     console.error('Secondary DB sync failed:', error);
     return false;
+  }
+};
+
+/** Call after `syncToSecondaryDatabase`; logs when sync was skipped or secondary DB failed (primary already committed). */
+export const warnIfSecondaryStudentSyncMissed = (context, meta, ok) => {
+  if (ok === false) {
+    console.warn(`[secondary-sync] Student table sync did not complete (${context})`, meta);
   }
 };
 

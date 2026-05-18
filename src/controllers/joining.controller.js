@@ -1,16 +1,17 @@
 import { getPool } from '../config-sql/database.js';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
-import { syncToSecondaryDatabase } from '../utils/studentSync.util.js';
+import { syncToSecondaryDatabase, warnIfSecondaryStudentSyncMissed } from '../utils/studentSync.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
-import { formatAdmission } from './admission.controller.js';
+import { formatAdmission, persistAdmissionReference1 } from './admission.controller.js';
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
 } from '../utils/joiningParentPhotos.util.js';
+import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -262,37 +263,6 @@ const recordActivity = async ({ leadId, userId, description, statusFrom, statusT
   } catch (error) {
     console.error('Failed to append joining activity log:', error);
   }
-};
-
-const generateAdmissionNumber = async () => {
-  const pool = getPool();
-  const currentYear = new Date().getFullYear();
-
-  // Try to get existing sequence
-  const [sequences] = await pool.execute(
-    'SELECT * FROM admission_sequences WHERE year = ?',
-    [currentYear]
-  );
-
-  let sequenceNumber = 1;
-
-  if (sequences.length > 0) {
-    // Update existing sequence
-    sequenceNumber = sequences[0].last_sequence + 1;
-    await pool.execute(
-      'UPDATE admission_sequences SET last_sequence = ?, updated_at = NOW() WHERE year = ?',
-      [sequenceNumber, currentYear]
-    );
-  } else {
-    // Create new sequence
-    const sequenceId = uuidv4();
-    await pool.execute(
-      'INSERT INTO admission_sequences (id, year, last_sequence, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
-      [sequenceId, currentYear, sequenceNumber]
-    );
-  }
-
-  return `${currentYear}${String(sequenceNumber).padStart(4, '0')}`;
 };
 
 const ensureLeadForApprovedJoining = async ({
@@ -1867,6 +1837,26 @@ export const saveJoiningDraft = async (req, res) => {
       };
     }
 
+    if (payload.reference1 !== undefined) {
+      const ref = String(payload.reference1 ?? '').trim();
+      finalPayload.leadData = {
+        ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
+        reference1: ref,
+      };
+      if (lead?.id) {
+        await pool.execute(
+          `UPDATE leads SET
+             dynamic_fields = JSON_SET(
+               COALESCE(CASE WHEN JSON_VALID(dynamic_fields) THEN dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT()),
+               '$.reference1', ?
+             ),
+             updated_at = NOW()
+           WHERE id = ?`,
+          [ref, lead.id]
+        );
+      }
+    }
+
     const regExtrasForParentPhotos =
       finalPayload.leadData &&
       typeof finalPayload.leadData === 'object' &&
@@ -2030,6 +2020,16 @@ export const saveJoiningDraft = async (req, res) => {
       studentFeeDetails: sanitizeStudentFeeDetailsForDb(rawStudentFeeFromLeadData),
     });
 
+    if (payload.reference1 !== undefined) {
+      const [admRows] = await pool.execute(
+        'SELECT id FROM admissions WHERE joining_id = ? LIMIT 1',
+        [joiningIdToUse]
+      );
+      if (admRows.length > 0) {
+        await persistAdmissionReference1(pool, admRows[0].id, payload.reference1, req.user.id);
+      }
+    }
+
     // Record activity if lead exists
     if (lead) {
       await recordActivity({
@@ -2179,11 +2179,15 @@ export const patchJoiningStepTwo = async (req, res) => {
 
       const [admFresh] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [adm.id]);
       const formattedAdmission = await formatAdmission(admFresh[0], pool);
-      await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
-        leadId: formattedAdmission.leadId,
-        joiningId: formattedAdmission.joiningId,
-        email: formattedAdmission.leadData?.email || '',
-      });
+      warnIfSecondaryStudentSyncMissed(
+        'patchJoiningStepTwo',
+        { joiningId: joining.id, admissionId: adm.id },
+        await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+          leadId: formattedAdmission.leadId,
+          joiningId: formattedAdmission.joiningId,
+          email: formattedAdmission.leadData?.email || '',
+        })
+      );
     }
 
     const [updatedJoining] = await pool.execute('SELECT * FROM joinings WHERE id = ?', [joining.id]);
@@ -2490,7 +2494,7 @@ export const approveJoining = async (req, res) => {
     // Generate admission number
     let admissionNumber = lead?.admissionNumber || joining.admission_number;
     if (!admissionNumber) {
-      admissionNumber = await generateAdmissionNumber();
+      admissionNumber = await generateAdmissionNumber(connection);
     }
 
     const joiningLeadData =
@@ -2783,11 +2787,15 @@ export const approveJoining = async (req, res) => {
         : formattedJoining;
 
     // 7. Sync to Secondary DB
-    await syncToSecondaryDatabase(joiningForSecondarySync, admissionNumber, {
-      leadId: joining.lead_id,
-      joiningId: joining.id,
-      email: lead?.email || ''
-    });
+    warnIfSecondaryStudentSyncMissed(
+      'approveJoining',
+      { joiningId: joining.id, admissionNumber },
+      await syncToSecondaryDatabase(joiningForSecondarySync, admissionNumber, {
+        leadId: joining.lead_id,
+        joiningId: joining.id,
+        email: lead?.email || ''
+      })
+    );
 
     await connection.commit();
 

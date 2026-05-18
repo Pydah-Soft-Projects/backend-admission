@@ -153,11 +153,16 @@ const sanitizePermissions = (permissions = {}) => {
     }
     if (!value || typeof value !== 'object') return;
     const access = Boolean(value.access);
-    const permission = value.permission === 'write' ? 'write' : value.permission === 'read' ? 'read' : 'read';
-    sanitized[key] = {
+    const permission = value.permission === 'write' ? 'write' : 'read';
+    const entry = {
       access,
       permission,
     };
+    if (key === 'joining' && access && permission === 'write') {
+      entry.editReference = Boolean(value.editReference);
+      entry.editAdmission = Boolean(value.editAdmission);
+    }
+    sanitized[key] = entry;
   });
   return sanitized;
 };
