@@ -71,7 +71,7 @@ async function runWithConcurrencyItems(items, concurrency, worker) {
   await Promise.all(Array.from({ length: n }, () => pump()));
 }
 
-export const MAX_SMS_BULK_JOB_ITEMS = 2000;
+export const MAX_SMS_BULK_JOB_ITEMS = 5000;
 
 /**
  * Safe JSON for `sms_bulk_jobs.report_context` (user-specific audience for reports).
