@@ -125,7 +125,7 @@ export const reclaimExpiredLeads = async (asOfDateYmd) => {
         counsellor_target_date, pro_target_date, target_date,
         academic_year, student_group
       FROM leads
-      WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned', 'Call Back')
+      WHERE lead_status IN ('Not Interested', 'Wrong Data', 'Assigned')
         AND (
           (assigned_to IS NOT NULL AND counsellor_target_date IS NOT NULL AND counsellor_target_date <= ?)
           OR
