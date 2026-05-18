@@ -12,7 +12,7 @@ import {
   ensureJoiningDraftForLead,
 } from './joining.controller.js';
 import { listRegistrationForms, getRegistrationForm } from './registrationForm.controller.js';
-import { listCourseProgramLevels, getCertificateGuidanceForLevel } from './secondaryJoiningContext.controller.js';
+import { listCourseProgramLevels } from './secondaryJoiningContext.controller.js';
 
 const PUBLIC_EDIT_TTL_MS = 5 * 60 * 1000;
 const sanitizeString = (value) => (typeof value === 'string' ? value.trim() : '');
@@ -395,14 +395,9 @@ export const getJoiningPublicBootstrap = async (req, res) => {
       registrationForm = formBody?.data ?? null;
     }
 
-    const level = (joining.courseInfo?.programLevel || '').trim();
-    let certificateGuidance = null;
-    if (level) {
-      const cgBody = await captureControllerJson(getCertificateGuidanceForLevel, () => ({
-        query: { level },
-      }));
-      certificateGuidance = cgBody?.data ?? null;
-    }
+    // Public magic links are Step 1 (application form) only. Certificate checklist and fees
+    // are completed by admissions staff after approval (Step 2 / Step 3 on the desk).
+    const certificateGuidance = null;
 
     const expiresAt =
       tokenRow.expires_at instanceof Date
