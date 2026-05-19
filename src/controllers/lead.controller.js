@@ -1163,25 +1163,25 @@ export const updateLead = async (req, res) => {
         updateFields.push('hall_ticket_number = ?');
         updateValues.push(hallTicketNumber ? String(hallTicketNumber).trim() : '');
       }
-      if (name) {
+      if (name && String(name).trim()) {
         updateFields.push('name = ?');
-        updateValues.push(name.trim());
+        updateValues.push(String(name).trim());
       }
-      if (phone) {
+      if (phone && String(phone).trim()) {
         updateFields.push('phone = ?');
-        updateValues.push(phone.trim());
+        updateValues.push(String(phone).trim());
       }
       if (email !== undefined) {
         updateFields.push('email = ?');
         updateValues.push(email || null);
       }
-      if (fatherName) {
+      if (fatherName && String(fatherName).trim()) {
         updateFields.push('father_name = ?');
-        updateValues.push(fatherName.trim());
+        updateValues.push(String(fatherName).trim());
       }
-      if (fatherPhone) {
+      if (fatherPhone && String(fatherPhone).trim()) {
         updateFields.push('father_phone = ?');
-        updateValues.push(fatherPhone.trim());
+        updateValues.push(String(fatherPhone).trim());
       }
       if (motherName !== undefined) {
         updateFields.push('mother_name = ?');
@@ -1191,30 +1191,30 @@ export const updateLead = async (req, res) => {
         updateFields.push('course_interested = ?');
         updateValues.push(courseInterested || null);
       }
-      if (village) {
+      if (village && String(village).trim()) {
         updateFields.push('village = ?');
-        updateValues.push(village.trim());
+        updateValues.push(String(village).trim());
       }
       if (address !== undefined) {
         updateFields.push('address = ?');
         updateValues.push(address ? String(address).trim() : '');
       }
-      if (district) {
+      if (district && String(district).trim()) {
         updateFields.push('district = ?');
-        updateValues.push(district.trim());
+        updateValues.push(String(district).trim());
       }
-      if (mandal) {
+      if (mandal && String(mandal).trim()) {
         updateFields.push('mandal = ?');
-        updateValues.push(mandal.trim());
+        updateValues.push(String(mandal).trim());
       }
       if (state !== undefined) {
         const trimmedState = typeof state === 'string' ? state.trim() : state;
         updateFields.push('state = ?');
         updateValues.push(trimmedState ? trimmedState : 'Andhra Pradesh');
       }
-      if (quota) {
+      if (quota && String(quota).trim()) {
         updateFields.push('quota = ?');
-        updateValues.push(quota);
+        updateValues.push(String(quota).trim());
       }
       if (gender !== undefined) {
         updateFields.push('gender = ?');
