@@ -12,7 +12,7 @@ import {
   ensureJoiningDraftForLead,
 } from './joining.controller.js';
 import { listRegistrationForms, getRegistrationForm } from './registrationForm.controller.js';
-import { listCourseProgramLevels } from './secondaryJoiningContext.controller.js';
+import { listCourseProgramLevels, listStudentQuotas } from './secondaryJoiningContext.controller.js';
 
 const PUBLIC_EDIT_TTL_MS = 5 * 60 * 1000;
 const sanitizeString = (value) => (typeof value === 'string' ? value.trim() : '');
@@ -377,6 +377,9 @@ export const getJoiningPublicBootstrap = async (req, res) => {
     const programLevelsBody = await captureControllerJson(listCourseProgramLevels, () => ({}));
     const programLevels = Array.isArray(programLevelsBody?.data) ? programLevelsBody.data : [];
 
+    const studentQuotasBody = await captureControllerJson(listStudentQuotas, () => ({}));
+    const studentQuotas = Array.isArray(studentQuotasBody?.data) ? studentQuotasBody.data : [];
+
     const listBody = await captureControllerJson(listRegistrationForms, () => ({
       query: { showInactive: 'false', includeFieldCount: 'true' },
     }));
@@ -414,6 +417,7 @@ export const getJoiningPublicBootstrap = async (req, res) => {
         ttlSeconds: Math.floor(PUBLIC_EDIT_TTL_MS / 1000),
         courseSettings,
         programLevels,
+        studentQuotas,
         registrationForms,
         registrationForm,
         certificateGuidance,

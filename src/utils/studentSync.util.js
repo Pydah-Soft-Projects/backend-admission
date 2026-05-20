@@ -245,8 +245,24 @@ export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './l
 
 const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
   const q = String(quotaValue ?? '').trim().toUpperCase();
-  if (q === 'MANG' || q === 'MANAGEMENT') return 'MANG';
-  if (q === 'CONV' || q === 'CONVENOR' || q === 'CONVENER') return 'CONV';
+  if (
+    q === 'MANG' ||
+    q === 'MANAGEMENT' ||
+    q.includes('MANAGEMENT') ||
+    (q.includes('MANG') && !q.includes('CONV'))
+  ) {
+    return 'MANG';
+  }
+  if (
+    q === 'CONV' ||
+    q === 'CONVENOR' ||
+    q === 'CONVENER' ||
+    q.includes('CONVENOR') ||
+    q.includes('CONVENER') ||
+    (q.includes('CONV') && !q.includes('MANG'))
+  ) {
+    return 'CONV';
+  }
 
   const fallback = String(registrationExtras?.data_collection_type ?? '').trim().toUpperCase();
   if (fallback === 'MANG' || fallback === 'MANAGEMENT') return 'MANG';
@@ -468,6 +484,14 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       resolvedCollegeId
     );
 
+    const fatherPhotoExtracted =
+      admissionData?.parents?.father?.photo ||
+      registrationExtras?.father_photo;
+
+    const motherPhotoExtracted =
+      admissionData?.parents?.mother?.photo ||
+      registrationExtras?.mother_photo;
+
     const studentParams = [
       resolvedAdmissionNumber,
       resolvedAdmissionNumber,
@@ -500,6 +524,8 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       toNullableText(registrationExtras?.previous_college),
       certificatesStatus,
       normalizeStudentPhotoForSecondary(registrationExtras?.student_photo),
+      normalizeStudentPhotoForSecondary(fatherPhotoExtracted),
+      normalizeStudentPhotoForSecondary(motherPhotoExtracted),
       currentYearFromExtras,
       new Date().toISOString().split('T')[0],
       secondaryStudentStatus,
@@ -534,6 +560,8 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           previous_college = ?,
           certificates_status = ?,
           student_photo = ?,
+          father_photo = ?,
+          mother_photo = ?,
           current_year = COALESCE(?, current_year),
           updated_at = NOW(),
           admission_date = ?,
@@ -573,12 +601,14 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           previous_college,
           certificates_status,
           student_photo,
+          father_photo,
+          mother_photo,
           current_year,
           created_at,
           updated_at,
           admission_date,
           student_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
         studentParams
       );
       console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);

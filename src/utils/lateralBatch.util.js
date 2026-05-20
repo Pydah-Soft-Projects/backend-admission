@@ -7,6 +7,37 @@ export const deriveAdmissionSeriesYear = (admissionNumber) => {
   return m ? m[1] : null;
 };
 
+/** Undergraduate B.Tech (not M.Tech). */
+export const isBtechCourseName = (name) => {
+  const s = String(name ?? '').trim();
+  if (!s) return false;
+  const low = s.toLowerCase();
+  if (/\bm\.?\s*tech\b/i.test(low)) return false;
+  if (/\bb\.?\s*tech\b/i.test(low)) return true;
+  return /\bbtech\b/i.test(low.replace(/\s+/g, ''));
+};
+
+/** Display label for B.Tech lateral batch rows (idempotent if suffix already present). */
+export const formatBtechCourseDisplayName = (courseName, isLateral) => {
+  const base = String(courseName ?? '').trim();
+  if (!base || !isLateral) return base;
+  // Collapse any pre-existing duplicates and ensure single suffix.
+  if (/\(lateral\)/i.test(base)) {
+    return base.replace(/(\s*\(\s*lateral\s*\))+$/gi, ' (LATERAL)').trim();
+  }
+  return `${base} (LATERAL)`;
+};
+
+export const resolveBtechCourseDisplayName = (courseName, registrationExtras, admissionNumber) => {
+  const base = String(courseName ?? '').trim();
+  if (!base) return '';
+  if (!isBtechCourseName(base)) return base;
+  return formatBtechCourseDisplayName(
+    base,
+    isLateralRegistrationExtras(registrationExtras, admissionNumber)
+  );
+};
+
 const pickFourDigitYear = (...vals) => {
   for (const v of vals) {
     const s = String(v ?? '').trim();
@@ -107,3 +138,70 @@ export const resolveSecondaryYearOfStudy = (registrationExtras) => {
   if (Number.isFinite(raw) && raw >= 1 && raw <= 12) return raw;
   return null;
 };
+
+/** `lead_data._joiningRegistrationExtras` JSON for stats / list SQL. */
+export const SQL_JOINING_REGISTRATION_EXTRAS = `COALESCE(
+  CASE
+    WHEN JSON_VALID(lead_data)
+      AND JSON_TYPE(JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras')) = 'OBJECT'
+    THEN JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras')
+    ELSE JSON_OBJECT()
+  END,
+  JSON_OBJECT()
+)`;
+
+const SQL_REG_STUDENT_STATUS = `NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.student_status')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.studentStatus')),
+  ''
+)), '')`;
+
+const SQL_REG_SEMESTER = `NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.semester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.current_semester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.currentSemester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.semister')),
+  ''
+)), '')`;
+
+const SQL_REG_INTAKE_YEAR = `CAST(NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.current_year')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.currentYear')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.academic_year')),
+  JSON_UNQUOTE(JSON_EXTRACT(${SQL_JOINING_REGISTRATION_EXTRAS}, '$.academicYear')),
+  ''
+)), '') AS UNSIGNED)`;
+
+const SQL_ADMISSION_SERIES_YEAR = `CAST(NULLIF(LEFT(TRIM(admission_number), 4), '') AS UNSIGNED)`;
+
+export const SQL_IS_BTECH_COURSE_NAME = `(
+  (
+    LOWER(TRIM(COALESCE(course, ''))) REGEXP 'b[.]?[[:space:]]*tech'
+    OR REPLACE(LOWER(TRIM(COALESCE(course, ''))), ' ', '') LIKE '%btech%'
+  )
+  AND LOWER(TRIM(COALESCE(course, ''))) NOT REGEXP 'm[.]?[[:space:]]*tech'
+)`;
+
+/** Lateral B.Tech track from registration extras + admission number (matches JS helper). */
+export const SQL_IS_BTECH_LATERAL_ADMISSION = `(
+  ${SQL_IS_BTECH_COURSE_NAME}
+  AND (
+    LOWER(${SQL_REG_STUDENT_STATUS}) LIKE '%lateral%'
+    OR ${SQL_REG_SEMESTER} = '2-1'
+    OR (
+      ${SQL_ADMISSION_SERIES_YEAR} IS NOT NULL
+      AND ${SQL_REG_INTAKE_YEAR} IS NOT NULL
+      AND ${SQL_REG_INTAKE_YEAR} = ${SQL_ADMISSION_SERIES_YEAR} - 1
+    )
+  )
+)`;
+
+export const SQL_BTECH_LATERAL_TRACK = `(CASE WHEN ${SQL_IS_BTECH_LATERAL_ADMISSION} THEN 1 ELSE 0 END)`;
+
+export const SQL_COURSE_DISPLAY_NAME = `MAX(
+  CASE
+    WHEN ${SQL_IS_BTECH_LATERAL_ADMISSION} AND LOWER(TRIM(COALESCE(course, ''))) NOT LIKE '%(lateral)%'
+      THEN CONCAT(TRIM(COALESCE(course, '')), ' (LATERAL)')
+    ELSE TRIM(COALESCE(course, ''))
+  END
+)`;

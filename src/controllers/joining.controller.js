@@ -7,6 +7,7 @@ import { updatePerformanceMetric } from '../services/userPerformance.service.js'
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
 import { formatAdmission, persistAdmissionReference1 } from './admission.controller.js';
+import { resolveBtechCourseDisplayName } from '../utils/lateralBatch.util.js';
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
@@ -519,7 +520,11 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     courseInfo: {
       courseId: normalizedJoiningCourseId,
       branchId: normalizedJoiningBranchId,
-      course: joiningData.course || '',
+      course: resolveBtechCourseDisplayName(
+        joiningData.course || '',
+        registrationFormData,
+        joiningData.admission_number
+      ),
       branch: joiningData.branch || '',
       quota: joiningData.quota || '',
       programLevel: storedProgramLevel || undefined,

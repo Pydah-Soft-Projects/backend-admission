@@ -8,6 +8,11 @@ import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
 import { buildLeadNameFuzzySql, buildLeadSearchPhoneOrSql } from '../utils/leadNameSearch.util.js';
 import { resolveLeadStatus, isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
+import {
+  fetchActiveStudentQuotas,
+  mergeQuotaOptionLabels,
+  quotaNamesFromCatalog,
+} from '../utils/studentQuotas.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
@@ -1954,11 +1959,13 @@ export const getPublicFilterOptions = async (req, res) => {
       ),
     ]);
 
+    const catalogQuotas = quotaNamesFromCatalog(await fetchActiveStudentQuotas());
+    const legacyQuotas = quotas.map((r) => r.quota);
     const payload = {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
       states: states.map(r => r.state),
-      quotas: quotas.map(r => r.quota),
+      quotas: mergeQuotaOptionLabels(catalogQuotas, legacyQuotas),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
     };
     setCached(cacheKey, payload, CACHE_TTL.filterOptionsMs);
@@ -2128,12 +2135,15 @@ export const getFilterOptions = async (req, res) => {
     const studentGroupsFromDb = studentGroupsRows.map(r => r.student_group).filter(Boolean);
     const studentGroups = [...new Set([...studentGroupOptions, ...studentGroupsFromDb])].sort();
 
+    const catalogQuotas = quotaNamesFromCatalog(await fetchActiveStudentQuotas());
+    const legacyQuotas = quotas.map((r) => r.quota);
+
     const payload = {
       mandals: mandals.map(r => r.mandal),
       districts: districts.map(r => r.district),
       villages: villages.map((r) => r.village),
       states: states.map(r => r.state),
-      quotas: quotas.map(r => r.quota),
+      quotas: mergeQuotaOptionLabels(catalogQuotas, legacyQuotas),
       leadStatuses: leadStatuses.map(r => r.lead_status),
       sources: sources.map(r => r.source),
       callStatuses: callStatuses.map(r => r.call_status),

@@ -2,11 +2,25 @@ import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { getTableColumnSet } from '../utils/secondarySchema.util.js';
 import { normalizeJsonObject, resolveCourseLevelFromRow } from '../utils/secondaryCourseLevel.util.js';
+import { fetchActiveStudentQuotas } from '../utils/studentQuotas.util.js';
 
 const isMissingTableError = (err) =>
   err?.code === 'ER_NO_SUCH_TABLE' ||
   err?.errno === 1146 ||
   String(err?.sqlMessage || '').includes("doesn't exist");
+
+/**
+ * Active student quota catalog from secondary `student_quotas` (Course & Quota dropdown).
+ */
+export const listStudentQuotas = async (req, res) => {
+  try {
+    const quotas = await fetchActiveStudentQuotas();
+    return successResponse(res, quotas);
+  } catch (error) {
+    console.error('listStudentQuotas error:', error);
+    return errorResponse(res, error.message || 'Failed to load student quotas', 500);
+  }
+};
 
 /**
  * Distinct program levels for the joining workspace dropdown.

@@ -12,6 +12,11 @@ import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
 } from '../utils/joiningParentPhotos.util.js';
+import {
+  resolveBtechCourseDisplayName,
+  SQL_BTECH_LATERAL_TRACK,
+  SQL_COURSE_DISPLAY_NAME,
+} from '../utils/lateralBatch.util.js';
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -35,11 +40,19 @@ const ADMISSION_CANCELLED_STATUS = 'Admission Cancelled';
 const SQL_IS_CONV_QUOTA = `(
   UPPER(TRIM(COALESCE(quota, ''))) IN ('CONV', 'CONVENOR', 'CONVENER')
   OR UPPER(TRIM(COALESCE(quota, ''))) LIKE '%CONV%'
+  OR (
+    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%LATERAL%ENTRY%'
+    OR UPPER(TRIM(COALESCE(quota, ''))) = 'LATERAL ENTRY'
+  )
 )`;
 /** Management quota (MQ / MANG). */
 const SQL_IS_MANG_QUOTA = `(
   UPPER(TRIM(COALESCE(quota, ''))) IN ('MANG', 'MANAGEMENT')
   OR (UPPER(TRIM(COALESCE(quota, ''))) LIKE '%MANG%' AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%CONV%')
+  OR (
+    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%LATERAL%SPOT%'
+    OR UPPER(TRIM(COALESCE(quota, ''))) = 'LATERAL SPOT'
+  )
 )`;
 const SQL_IS_ACTIVE_ADMISSION = `status != '${ADMISSION_CANCELLED_STATUS}'`;
 const SQL_IS_CANCELLED_ADMISSION = `status = '${ADMISSION_CANCELLED_STATUS}'`;
@@ -401,7 +414,11 @@ export const formatAdmission = async (admissionData, pool) => {
               String(admissionData.managed_branch_id).trim() !== ''
             ? String(admissionData.managed_branch_id).trim()
             : null,
-      course: admissionData.course || '',
+      course: resolveBtechCourseDisplayName(
+        admissionData.course || '',
+        registrationFormData,
+        admissionData.admission_number
+      ),
       branch: admissionData.branch || '',
       quota: admissionData.quota || '',
     },
@@ -606,15 +623,102 @@ const parseReferenceNameFromRow = (row) => {
   const direct = String(row.reference_name ?? '').trim();
   if (direct) return direct;
   try {
+    const raw = row.lead_data;
+    const text =
+      Buffer.isBuffer(raw) ? raw.toString('utf8') : typeof raw === 'string' ? raw : null;
     const ld =
-      typeof row.lead_data === 'string' ? JSON.parse(row.lead_data || '{}') : row.lead_data || {};
+      text != null
+        ? JSON.parse(text || '{}')
+        : raw && typeof raw === 'object'
+          ? raw
+          : {};
     return String(ld.reference1 ?? ld.referenceName ?? '').trim();
   } catch {
     return '';
   }
 };
 
-const formatAdmissionListItem = (row) => ({
+const registrationExtrasFromLeadDataRaw = (leadDataRaw) => {
+  if (!leadDataRaw || typeof leadDataRaw !== 'object') return {};
+  const ex = leadDataRaw._joiningRegistrationExtras;
+  return ex && typeof ex === 'object' ? ex : {};
+};
+
+const formatAdmissionListItem = (row) => {
+  let leadDataRaw = {};
+  try {
+    const raw = row.lead_data;
+    const text =
+      Buffer.isBuffer(raw) ? raw.toString('utf8') : typeof raw === 'string' ? raw : null;
+    leadDataRaw =
+      text != null
+        ? JSON.parse(text || '{}')
+        : raw && typeof raw === 'object'
+          ? raw
+          : {};
+  } catch {
+    leadDataRaw = {};
+  }
+  const parseLeadDynamicFields = (raw) => {
+    if (!raw) return {};
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+    return raw && typeof raw === 'object' ? raw : {};
+  };
+
+  const normalizeLeadSource = (candidate, leadData) => {
+    const raw = String(candidate ?? '').trim();
+    const isQuotaLike = (value) => {
+      const s = String(value ?? '').trim().toLowerCase();
+      if (!s) return false;
+      return (
+        s === 'conv' ||
+        s === 'convenor' ||
+        s === 'convener' ||
+        s === 'cq' ||
+        s === 'mq' ||
+        s === 'management' ||
+        s === 'mang' ||
+        s.includes('management quota') ||
+        s.includes('convenor quota') ||
+        s.includes('spot') ||
+        s === 'lateral entry' ||
+        s.includes('lateral')
+      );
+    };
+
+    if (raw && !isQuotaLike(raw)) return raw;
+
+    const fromLeadData = String(
+      leadData?.source ?? leadData?.utmSource ?? leadData?.leadSource ?? ''
+    ).trim();
+    if (fromLeadData && !isQuotaLike(fromLeadData)) return fromLeadData;
+
+    // Derive fallback labels like joining flow does.
+    const uploadBatchId = String(row.upload_batch_id ?? '').trim();
+    if (uploadBatchId) return 'Bulk Upload';
+
+    const dynamicFields = parseLeadDynamicFields(row.lead_dynamic_fields);
+    const createdFrom = String(dynamicFields?.createdFrom ?? '').trim();
+    if (createdFrom === 'send_joining_form' || createdFrom === 'joining_form_link') {
+      return 'Joining Form Link';
+    }
+
+    // Manual entry (leads/add UI sets source to "Manual Form"; if cleared, infer it).
+    return 'Manual Form';
+  };
+  const courseLabel = resolveBtechCourseDisplayName(
+    row.course || '',
+    registrationExtrasFromLeadDataRaw(leadDataRaw),
+    row.admission_number
+  );
+  return {
   _id: row.id,
   id: row.id,
   leadId: row.lead_id,
@@ -634,7 +738,7 @@ const formatAdmissionListItem = (row) => ({
         : row.managed_branch_id != null && String(row.managed_branch_id).trim() !== ''
           ? String(row.managed_branch_id).trim()
           : null,
-    course: row.course || '',
+    course: courseLabel,
     branch: row.branch || '',
     quota: row.quota || '',
   },
@@ -667,11 +771,12 @@ const formatAdmissionListItem = (row) => ({
     bankPassbook: row.document_bank_passbook,
     rationCard: row.document_ration_card,
   },
-  leadSource: row.lead_source || '',
+  leadSource: normalizeLeadSource(row.lead_source, leadDataRaw),
   referenceName: parseReferenceNameFromRow(row),
   updatedAt: row.updated_at,
   createdAt: row.created_at,
-});
+  };
+};
 
 // Helper function to save admission related tables
 const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
@@ -853,7 +958,9 @@ export const listAdmissions = async (req, res) => {
                 a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
                 a.document_bank_passbook, a.document_ration_card,
                 a.lead_data,
-                l.name as lead_name, l.phone as lead_phone, l.source as lead_source
+                l.name as lead_name, l.phone as lead_phone, l.source as lead_source,
+                l.upload_batch_id as upload_batch_id,
+                l.dynamic_fields as lead_dynamic_fields
          FROM admissions a
          LEFT JOIN leads l ON a.lead_id = l.id
          WHERE a.id IN (${inMarks})`,
@@ -1824,12 +1931,13 @@ export const getAdmissionStats = async (req, res) => {
     const query = `
       SELECT 
         ${SQL_EFF_COURSE_ID} as courseId, 
-        MAX(course) as courseName,
+        ${SQL_BTECH_LATERAL_TRACK} as lateralTrack,
+        ${SQL_COURSE_DISPLAY_NAME} as courseName,
         COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
         COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
       FROM admissions
       ${whereClause}
-      GROUP BY ${SQL_EFF_COURSE_ID}
+      GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_BTECH_LATERAL_TRACK}
       ORDER BY totalAdmissions DESC
     `;
     const [stats] = await pool.execute(query, params);
@@ -1838,7 +1946,8 @@ export const getAdmissionStats = async (req, res) => {
       SELECT 
         ${SQL_EFF_COURSE_ID} as courseId,
         ${SQL_EFF_BRANCH_ID} as branchId,
-        MAX(course) as courseName,
+        ${SQL_BTECH_LATERAL_TRACK} as lateralTrack,
+        ${SQL_COURSE_DISPLAY_NAME} as courseName,
         MAX(branch) as branchName,
         COUNT(CASE WHEN ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as totalAdmissions,
         COUNT(CASE WHEN ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as totalCancelled,
@@ -1850,7 +1959,7 @@ export const getAdmissionStats = async (req, res) => {
         COUNT(CASE WHEN ${SQL_IS_MERIT_QUOTA_ELIGIBLE} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as meritQuotaCancelled
       FROM admissions
       ${whereClause}
-      GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}
+      GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}, ${SQL_BTECH_LATERAL_TRACK}
       ORDER BY courseName, branchName
     `;
     const [branchStats] = await pool.execute(queryBranches, params);
@@ -1858,7 +1967,11 @@ export const getAdmissionStats = async (req, res) => {
     const courseStats = stats.map((course) => ({
       ...course,
       branches: branchStats
-        .filter((b) => b.courseId === course.courseId && b.courseName === course.courseName)
+        .filter(
+          (b) =>
+            b.courseId === course.courseId &&
+            Number(b.lateralTrack) === Number(course.lateralTrack)
+        )
         .map((b) => {
           const intake = resolveBranchIntakeFromMap(branchIntakeMap, b.courseId, b.branchId);
           return {
