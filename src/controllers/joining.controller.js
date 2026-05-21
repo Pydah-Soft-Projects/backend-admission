@@ -6,7 +6,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
-import { formatAdmission, persistAdmissionReference1 } from './admission.controller.js';
+import {
+  formatAdmission,
+  persistAdmissionReference1,
+  persistAdmissionCourseBranchUpdate,
+} from './admission.controller.js';
 import { resolveBtechCourseDisplayName } from '../utils/lateralBatch.util.js';
 import {
   FATHER_PHOTO_REG_KEYS,
@@ -218,16 +222,21 @@ const syncLeadWithJoining = (leadDoc, joiningDoc) => {
     mutated = true;
   }
 
-  const courseInterested =
-    typeof joiningDoc.courseInfo?.course === 'string' && joiningDoc.courseInfo.course.trim()
-      ? joiningDoc.courseInfo.course.trim()
-      : typeof joiningDoc.courseInfo?.branch === 'string' && joiningDoc.courseInfo.branch.trim()
-      ? joiningDoc.courseInfo.branch.trim()
-      : null;
+  // After approval, course/branch live on admissions — do not overwrite lead marketing interest.
+  if (String(joiningDoc.status || '').toLowerCase() !== 'approved') {
+    const courseName =
+      typeof joiningDoc.courseInfo?.course === 'string' ? joiningDoc.courseInfo.course.trim() : '';
+    const branchName =
+      typeof joiningDoc.courseInfo?.branch === 'string' ? joiningDoc.courseInfo.branch.trim() : '';
+    const courseInterested =
+      courseName && branchName
+        ? `${courseName} - ${branchName}`
+        : courseName || branchName || null;
 
-  if (courseInterested && leadDoc.courseInterested !== courseInterested) {
-    leadDoc.courseInterested = courseInterested;
-    mutated = true;
+    if (courseInterested && leadDoc.courseInterested !== courseInterested) {
+      leadDoc.courseInterested = courseInterested;
+      mutated = true;
+    }
   }
 
   const interEducation = Array.isArray(joiningDoc.educationHistory)
@@ -1878,6 +1887,12 @@ export const saveJoiningDraft = async (req, res) => {
     const fatherPhotoForRow = fatherPhotoForRowPick ? fatherPhotoForRowPick : null;
     const motherPhotoForRow = motherPhotoForRowPick ? motherPhotoForRowPick : null;
 
+    const statusToPersist =
+      previousStatus === 'approved' || previousStatus === 'pending_approval'
+        ? previousStatus
+        : 'draft';
+    const preserveApprovalTimestamps = statusToPersist === 'approved';
+
     // Update main joining record
     await pool.execute(
       `UPDATE joinings SET
@@ -1936,17 +1951,17 @@ export const saveJoiningDraft = async (req, res) => {
         document_ration_card = ?,
         reservation_is_ews = ?,
         draft_updated_at = NOW(),
-        submitted_at = NULL,
-        submitted_by = NULL,
-        approved_at = NULL,
-        approved_by = NULL,
+        submitted_at = ${preserveApprovalTimestamps ? 'submitted_at' : 'NULL'},
+        submitted_by = ${preserveApprovalTimestamps ? 'submitted_by' : 'NULL'},
+        approved_at = ${preserveApprovalTimestamps ? 'approved_at' : 'NULL'},
+        approved_by = ${preserveApprovalTimestamps ? 'approved_by' : 'NULL'},
         updated_by = ?,
         updated_at = NOW()
       WHERE id = ?`,
       [
         finalPayload.leadId || lead?.id || null,
         JSON.stringify(finalPayload.leadData || {}),
-        'draft',
+        statusToPersist,
         joiningFkCourseId,
         joiningFkBranchId,
         normalizeManagedIdForDb(courseInfo.courseId),
@@ -2033,6 +2048,26 @@ export const saveJoiningDraft = async (req, res) => {
       }
     }
 
+    if (
+      previousStatus === 'approved' &&
+      courseInfo?.courseId &&
+      courseInfo?.branchId
+    ) {
+      const [admRows] = await pool.execute(
+        'SELECT id FROM admissions WHERE joining_id = ? LIMIT 1',
+        [joiningIdToUse]
+      );
+      if (admRows.length > 0) {
+        await persistAdmissionCourseBranchUpdate(
+          pool,
+          admRows[0].id,
+          courseInfo,
+          req.user?.id,
+          joiningIdToUse
+        );
+      }
+    }
+
     // Record activity if lead exists
     if (lead) {
       await recordActivity({
@@ -2040,7 +2075,7 @@ export const saveJoiningDraft = async (req, res) => {
         userId: req.user.id,
         description: 'Joining form saved as draft',
         statusFrom: previousStatus,
-        statusTo: 'draft',
+        statusTo: statusToPersist,
       });
     }
 

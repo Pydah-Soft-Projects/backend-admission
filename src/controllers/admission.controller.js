@@ -17,6 +17,15 @@ import {
   SQL_BTECH_LATERAL_TRACK,
   SQL_COURSE_DISPLAY_NAME,
 } from '../utils/lateralBatch.util.js';
+import { resolveSecondaryManagedIds } from '../data/admissionsCourseBranchMap2026.js';
+
+const normCourseBranchLabel = (value) =>
+  String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s._\-/&,]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 const ensureLeadId = (leadId) => {
   if (!leadId || typeof leadId !== 'string' || leadId.length !== 36) {
@@ -173,11 +182,295 @@ const resolveBranchIntakeFromMap = (map, courseId, branchId) => {
   return branchOnly || {};
 };
 
-/** Primary `course_id` when set; else student-DB id in `managed_course_id` (no FK). Same for branch. */
-const SQL_A_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(a.course_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_course_id AS CHAR)), ''))`;
-const SQL_A_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(a.branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.managed_branch_id AS CHAR)), ''))`;
-const SQL_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(course_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_course_id AS CHAR)), ''))`;
-const SQL_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(managed_branch_id AS CHAR)), ''))`;
+/** Managed (secondary student-DB) ids win over legacy primary FK columns — matches joining form + catalog. */
+const SQL_A_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(a.managed_course_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.course_id AS CHAR)), ''))`;
+const SQL_A_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(a.managed_branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(a.branch_id AS CHAR)), ''))`;
+const SQL_EFF_COURSE_ID = `COALESCE(NULLIF(TRIM(CAST(managed_course_id AS CHAR)), ''), NULLIF(TRIM(CAST(course_id AS CHAR)), ''))`;
+const SQL_EFF_BRANCH_ID = `COALESCE(NULLIF(TRIM(CAST(managed_branch_id AS CHAR)), ''), NULLIF(TRIM(CAST(branch_id AS CHAR)), ''))`;
+
+const effectiveAdmissionCourseBranchIds = (row) => {
+  const managedCourse = normalizeManagedIdForDb(row?.managed_course_id);
+  const managedBranch = normalizeManagedIdForDb(row?.managed_branch_id);
+  const primaryCourse =
+    row?.course_id != null && String(row.course_id).trim() !== ''
+      ? String(row.course_id).trim()
+      : null;
+  const primaryBranch =
+    row?.branch_id != null && String(row.branch_id).trim() !== ''
+      ? String(row.branch_id).trim()
+      : null;
+  return {
+    courseId: managedCourse ?? primaryCourse,
+    branchId: managedBranch ?? primaryBranch,
+  };
+};
+
+/** FK columns only when managed id exists in primary `courses` / `branches` (same as joining save). */
+const resolvePrimaryCourseBranchFkIds = async (pool, courseId, branchId) => {
+  let fkCourseId = null;
+  let fkBranchId = null;
+  if (courseId != null && String(courseId).trim() !== '') {
+    const [pc] = await pool.execute('SELECT id FROM courses WHERE id = ?', [courseId]);
+    if (pc.length > 0) fkCourseId = pc[0].id;
+  }
+  if (branchId != null && String(branchId).trim() !== '') {
+    const [pb] = await pool.execute('SELECT id FROM branches WHERE id = ?', [branchId]);
+    if (pb.length > 0) fkBranchId = pb[0].id;
+  }
+  return { fkCourseId, fkBranchId };
+};
+
+/** Validate managed ids against secondary DB; fill `admissions.course` / `admissions.branch` labels from catalog. */
+const enrichAdmissionCourseInfoFromSecondary = async (courseInfo) => {
+  if (!courseInfo || typeof courseInfo !== 'object') return courseInfo;
+  const info = { ...courseInfo };
+  const lockManagedIds =
+    String(info.courseId ?? '').trim() !== '' || String(info.branchId ?? '').trim() !== '';
+  let secondaryPool;
+  try {
+    secondaryPool = getSecondaryPool();
+  } catch (err) {
+    console.error('enrichAdmissionCourseInfoFromSecondary: secondary pool unavailable:', err?.message || err);
+    return info;
+  }
+  let courseDoc = null;
+  let branchDoc = null;
+
+  try {
+    if (info.branchId && !info.courseId) {
+      const [branches] = await secondaryPool.execute(
+        'SELECT id, course_id, name FROM course_branches WHERE id = ? LIMIT 1',
+        [info.branchId]
+      );
+      if (branches.length > 0) {
+        branchDoc = branches[0];
+        info.courseId = branchDoc.course_id;
+      }
+    }
+
+    if (info.courseId) {
+      const [courses] = await secondaryPool.execute(
+        'SELECT id, name FROM courses WHERE id = ? LIMIT 1',
+        [info.courseId]
+      );
+      if (courses.length > 0) {
+        courseDoc = courses[0];
+        info.courseId = String(courseDoc.id);
+        if (!String(info.course || '').trim()) {
+          info.course = courseDoc.name || '';
+        }
+      }
+    }
+
+    if (info.branchId) {
+      if (!branchDoc) {
+        const params = [info.branchId];
+        let sql = 'SELECT id, course_id, name, code FROM course_branches WHERE id = ?';
+        if (info.courseId) {
+          sql += ' AND course_id = ?';
+          params.push(info.courseId);
+        }
+        sql += ' LIMIT 1';
+        const [branches] = await secondaryPool.execute(sql, params);
+        if (branches.length > 0) branchDoc = branches[0];
+      }
+      if (branchDoc) {
+        info.branchId = String(branchDoc.id);
+        const catalogBranch = String(branchDoc.code || branchDoc.name || '').trim();
+        if (catalogBranch) {
+          info.branch = catalogBranch;
+        }
+        if (!info.courseId && branchDoc.course_id != null) {
+          info.courseId = String(branchDoc.course_id);
+        }
+      }
+    }
+
+    if (courseDoc) {
+      const catalogCourse = String(courseDoc.name || '').trim();
+      if (catalogCourse) {
+        info.course = catalogCourse;
+      }
+    }
+
+    // Backfill managed ids from labels only when ids are missing (imports / legacy rows).
+    // Never remap from lead `course_interested` or stale branch text when managed ids are set.
+    const storedCourse = String(info.course || '').trim();
+    const storedBranch = String(info.branch || '').trim();
+    if (!lockManagedIds && !info.branchId && storedCourse && storedBranch) {
+      const mapped = resolveSecondaryManagedIds(storedCourse, storedBranch);
+      if (mapped.managedCourseId && mapped.managedBranchId) {
+        info.courseId = mapped.managedCourseId;
+        info.branchId = mapped.managedBranchId;
+        info.course = mapped.course;
+        info.branch = mapped.branch;
+      } else if (info.courseId) {
+        const label = normCourseBranchLabel(storedBranch);
+        const [byLabel] = await secondaryPool.execute(
+          `SELECT id, course_id, name, code FROM course_branches
+           WHERE course_id = ?
+             AND (
+               UPPER(TRIM(code)) = ?
+               OR UPPER(TRIM(name)) = ?
+               OR UPPER(TRIM(code)) LIKE CONCAT('%', ?, '%')
+             )
+           ORDER BY is_active DESC, id ASC
+           LIMIT 1`,
+          [info.courseId, label, label, label]
+        );
+        if (byLabel.length > 0) {
+          info.branchId = String(byLabel[0].id);
+          info.branch = String(byLabel[0].code || byLabel[0].name || '').trim() || storedBranch;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('enrichAdmissionCourseInfoFromSecondary: lookup failed:', err?.message || err);
+  }
+
+  return info;
+};
+
+/** Sync display labels from managed ids; stale `branch` / `course` text must not override branchId. */
+const reconcileAdmissionCourseInfoFromRow = async (row) => {
+  const { courseId, branchId } = effectiveAdmissionCourseBranchIds(row);
+  const course = String(row.course || '').trim();
+  const branch = String(row.branch || '').trim();
+  const base = {
+    courseId,
+    branchId,
+    course,
+    branch,
+    quota: row.quota || '',
+  };
+  if (!course && !branch) return base;
+  return enrichAdmissionCourseInfoFromSecondary(base);
+};
+
+const loadSecondaryCourseBranchLabelMaps = async () => {
+  const courses = new Map();
+  const branches = new Map();
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [courseRows] = await secondaryPool.execute('SELECT id, name FROM courses');
+    for (const row of courseRows || []) {
+      const id = String(row.id ?? '').trim();
+      const name = String(row.name ?? '').trim();
+      if (id && name) courses.set(id, name);
+    }
+    const [branchRows] = await secondaryPool.execute(
+      'SELECT id, name, code FROM course_branches'
+    );
+    for (const row of branchRows || []) {
+      const id = String(row.id ?? '').trim();
+      const label = String(row.code || row.name || '').trim();
+      if (id && label) branches.set(id, label);
+    }
+  } catch (err) {
+    console.error(
+      'loadSecondaryCourseBranchLabelMaps failed:',
+      err?.message || err
+    );
+  }
+  return { courses, branches };
+};
+
+const loadAdmissionBranchIntakeLabelMap = async (pool) => {
+  const map = new Map();
+  try {
+    await ensureAdmissionBranchIntakeTable(pool);
+    const [rows] = await pool.execute(
+      'SELECT branch_id, branch_name FROM admission_branch_intake WHERE TRIM(branch_name) != ""'
+    );
+    for (const row of rows || []) {
+      const id = String(row.branch_id ?? '').trim();
+      const name = String(row.branch_name ?? '').trim();
+      if (id && name) map.set(id, name);
+    }
+  } catch (err) {
+    console.error('loadAdmissionBranchIntakeLabelMap failed:', err?.message || err);
+  }
+  return map;
+};
+
+const resolveStatsBranchDisplayName = (row, secondaryLabels, intakeBranchLabels) => {
+  const branchId = String(row.branchId || '').trim();
+  if (branchId) {
+    const fromCatalog =
+      secondaryLabels.branches.get(branchId) || intakeBranchLabels.get(branchId);
+    if (fromCatalog) return fromCatalog;
+  }
+  return String(row.branchName || '').trim();
+};
+
+const syncLinkedJoiningCourseInfo = async (pool, joiningId, courseInfo, userId) => {
+  if (!joiningId || !courseInfo || typeof courseInfo !== 'object') return;
+  const { fkCourseId, fkBranchId } = await resolvePrimaryCourseBranchFkIds(
+    pool,
+    courseInfo.courseId,
+    courseInfo.branchId
+  );
+  await pool.execute(
+    `UPDATE joinings SET
+      course_id = ?,
+      branch_id = ?,
+      managed_course_id = ?,
+      managed_branch_id = ?,
+      course = ?,
+      branch = ?,
+      quota = COALESCE(?, quota),
+      updated_by = ?,
+      updated_at = NOW()
+    WHERE id = ?`,
+    [
+      fkCourseId,
+      fkBranchId,
+      normalizeManagedIdForDb(courseInfo.courseId),
+      normalizeManagedIdForDb(courseInfo.branchId),
+      courseInfo.course || '',
+      courseInfo.branch || '',
+      courseInfo.quota !== undefined ? courseInfo.quota || '' : null,
+      userId || null,
+      joiningId,
+    ]
+  );
+};
+
+/** Dedicated UPDATE for managed course/branch — never skipped by the generic dynamic UPDATE guard. */
+export const persistAdmissionCourseBranchUpdate = async (
+  pool,
+  admissionId,
+  courseInfo,
+  userId,
+  joiningId = null
+) => {
+  const courseFields = [];
+  const courseParams = [];
+  await applyAdmissionCourseInfoUpdates(pool, courseInfo, courseFields, courseParams);
+  if (courseFields.length === 0) return;
+  courseFields.push('updated_by = ?', 'updated_at = NOW()');
+  courseParams.push(userId || null, admissionId);
+  await pool.execute(
+    `UPDATE admissions SET ${courseFields.join(', ')} WHERE id = ?`,
+    courseParams
+  );
+  await persistAdmissionManagedIdsInLeadData(pool, admissionId, courseInfo);
+  if (joiningId) {
+    await syncLinkedJoiningCourseInfo(pool, joiningId, courseInfo, userId);
+  }
+};
+
+const resolveAdmissionRowByRouteParam = async (pool, paramId) => {
+  const [byLead] = await pool.execute('SELECT * FROM admissions WHERE lead_id = ? LIMIT 1', [paramId]);
+  if (byLead.length > 0) return byLead[0];
+  const [byJoining] = await pool.execute(
+    'SELECT * FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+    [paramId]
+  );
+  if (byJoining.length > 0) return byJoining[0];
+  const [byId] = await pool.execute('SELECT * FROM admissions WHERE id = ? LIMIT 1', [paramId]);
+  return byId[0] || null;
+};
 
 /** Valid JSON object for lead_data on admissions (alias `a`). */
 const SQL_A_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(a.lead_data) THEN a.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
@@ -385,32 +678,20 @@ export const formatAdmission = async (admissionData, pool) => {
     admissionNumber: admissionData.admission_number,
     status: admissionData.status,
     admissionDate: admissionData.admission_date,
-    courseInfo: {
-      // Coerce to strings so frontend equality checks against `courseSettings`
-      // (where `course._id` is always stringified) keep working for legacy
-      // admissions saved with raw INT FK ids.
-      courseId:
-        admissionData.course_id != null && String(admissionData.course_id).trim() !== ''
-          ? String(admissionData.course_id).trim()
-          : admissionData.managed_course_id != null &&
-              String(admissionData.managed_course_id).trim() !== ''
-            ? String(admissionData.managed_course_id).trim()
-            : null,
-      branchId:
-        admissionData.branch_id != null && String(admissionData.branch_id).trim() !== ''
-          ? String(admissionData.branch_id).trim()
-          : admissionData.managed_branch_id != null &&
-              String(admissionData.managed_branch_id).trim() !== ''
-            ? String(admissionData.managed_branch_id).trim()
-            : null,
-      course: resolveBtechCourseDisplayName(
-        admissionData.course || '',
-        registrationFormData,
-        admissionData.admission_number
-      ),
-      branch: admissionData.branch || '',
-      quota: admissionData.quota || '',
-    },
+    courseInfo: await (async () => {
+      const reconciled = await reconcileAdmissionCourseInfoFromRow(admissionData);
+      return {
+        courseId: reconciled.courseId,
+        branchId: reconciled.branchId,
+        course: resolveBtechCourseDisplayName(
+          reconciled.course || admissionData.course || '',
+          registrationFormData,
+          admissionData.admission_number
+        ),
+        branch: reconciled.branch || admissionData.branch || '',
+        quota: reconciled.quota || admissionData.quota || '',
+      };
+    })(),
     paymentSummary: {
       totalFee: Number(admissionData.payment_total_fee) || 0,
       totalPaid: Number(admissionData.payment_total_paid) || 0,
@@ -536,77 +817,64 @@ const validateAdmissionPayload = (payload = {}) => {
   return errors;
 };
 
-const resolvePrimaryCourseBranchIds = async (pool, courseId, branchId) => {
-  let resolvedCourseId =
-    courseId !== undefined && courseId !== null && String(courseId).trim() !== ''
-      ? courseId
-      : null;
-  let resolvedBranchId =
-    branchId !== undefined && branchId !== null && String(branchId).trim() !== ''
-      ? branchId
-      : null;
-
-  if (resolvedCourseId != null) {
-    const [courses] = await pool.execute('SELECT id FROM courses WHERE id = ? LIMIT 1', [
-      resolvedCourseId,
-    ]);
-    if (courses.length === 0) resolvedCourseId = null;
-  }
-
-  if (resolvedBranchId != null) {
-    const [branches] = await pool.execute(
-      'SELECT id, course_id FROM branches WHERE id = ? LIMIT 1',
-      [resolvedBranchId]
-    );
-    if (branches.length === 0) {
-      resolvedBranchId = null;
-    } else if (
-      resolvedCourseId != null &&
-      branches[0].course_id != null &&
-      String(branches[0].course_id) !== String(resolvedCourseId)
-    ) {
-      resolvedBranchId = null;
-    } else if (resolvedCourseId == null) {
-      resolvedCourseId = branches[0].course_id ?? null;
-    }
-  }
-
-  if (resolvedCourseId == null) resolvedBranchId = null;
-  return { resolvedCourseId, resolvedBranchId };
-};
-
 async function applyAdmissionCourseInfoUpdates(pool, courseInfo, updateFields, updateParams) {
   if (!courseInfo || typeof courseInfo !== 'object') return;
-  const { resolvedCourseId, resolvedBranchId } = await resolvePrimaryCourseBranchIds(
+
+  const managedCourseId = String(courseInfo.courseId ?? '').trim();
+  const managedBranchId = String(courseInfo.branchId ?? '').trim();
+  if (!managedCourseId || !managedBranchId) {
+    const err = new Error('Managed course and branch selection are required for admission update');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const enriched = await enrichAdmissionCourseInfoFromSecondary({
+    courseId: managedCourseId,
+    branchId: managedBranchId,
+    course: courseInfo.course,
+    branch: courseInfo.branch,
+    quota: courseInfo.quota,
+  });
+
+  const { fkCourseId, fkBranchId } = await resolvePrimaryCourseBranchFkIds(
     pool,
-    courseInfo.courseId,
-    courseInfo.branchId
+    enriched.courseId,
+    enriched.branchId
   );
-  if (courseInfo.courseId !== undefined) {
-    updateFields.push('course_id = ?');
-    updateParams.push(resolvedCourseId);
-    updateFields.push('managed_course_id = ?');
-    updateParams.push(normalizeManagedIdForDb(courseInfo.courseId));
-  }
-  if (courseInfo.branchId !== undefined) {
-    updateFields.push('branch_id = ?');
-    updateParams.push(resolvedBranchId);
-    updateFields.push('managed_branch_id = ?');
-    updateParams.push(normalizeManagedIdForDb(courseInfo.branchId));
-  }
-  if (courseInfo.course !== undefined) {
-    updateFields.push('course = ?');
-    updateParams.push(courseInfo.course || '');
-  }
-  if (courseInfo.branch !== undefined) {
-    updateFields.push('branch = ?');
-    updateParams.push(courseInfo.branch || '');
-  }
-  if (courseInfo.quota !== undefined) {
+
+  updateFields.push('course_id = ?');
+  updateParams.push(fkCourseId);
+  updateFields.push('managed_course_id = ?');
+  updateParams.push(normalizeManagedIdForDb(enriched.courseId));
+  updateFields.push('course = ?');
+  updateParams.push(enriched.course || '');
+
+  updateFields.push('branch_id = ?');
+  updateParams.push(fkBranchId);
+  updateFields.push('managed_branch_id = ?');
+  updateParams.push(normalizeManagedIdForDb(enriched.branchId));
+  updateFields.push('branch = ?');
+  updateParams.push(enriched.branch || '');
+
+  if (enriched.quota !== undefined) {
     updateFields.push('quota = ?');
-    updateParams.push(courseInfo.quota || '');
+    updateParams.push(enriched.quota || '');
   }
+  Object.assign(courseInfo, enriched);
 }
+
+const persistAdmissionManagedIdsInLeadData = async (pool, admissionId, courseInfo) => {
+  const mc = normalizeManagedIdForDb(courseInfo?.courseId);
+  const mb = normalizeManagedIdForDb(courseInfo?.branchId);
+  await pool.execute(
+    `UPDATE admissions SET lead_data = JSON_SET(
+      COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+      '$._joiningManagedCourseId', ?,
+      '$._joiningManagedBranchId', ?
+    ), updated_at = NOW() WHERE id = ?`,
+    [mc, mb, admissionId]
+  );
+};
 
 const parseReferenceNameFromRow = (row) => {
   const direct = String(row.reference_name ?? '').trim();
@@ -702,6 +970,7 @@ const formatAdmissionListItem = (row) => {
     // Manual entry (leads/add UI sets source to "Manual Form"; if cleared, infer it).
     return 'Manual Form';
   };
+  const effectiveIds = effectiveAdmissionCourseBranchIds(row);
   const courseLabel = resolveBtechCourseDisplayName(
     row.course || '',
     registrationExtrasFromLeadDataRaw(leadDataRaw),
@@ -715,18 +984,7 @@ const formatAdmissionListItem = (row) => {
   admissionNumber: row.admission_number,
   status: row.status,
   courseInfo: {
-    courseId:
-      row.course_id != null && String(row.course_id).trim() !== ''
-        ? String(row.course_id).trim()
-        : row.managed_course_id != null && String(row.managed_course_id).trim() !== ''
-          ? String(row.managed_course_id).trim()
-          : null,
-    branchId:
-      row.branch_id != null && String(row.branch_id).trim() !== ''
-        ? String(row.branch_id).trim()
-        : row.managed_branch_id != null && String(row.managed_branch_id).trim() !== ''
-          ? String(row.managed_branch_id).trim()
-          : null,
+    ...effectiveIds,
     course: courseLabel,
     branch: row.branch || '',
     quota: row.quota || '',
@@ -1359,15 +1617,22 @@ export const updateAdmissionById = async (req, res) => {
     }
 
     const payload = { ...req.body };
+    const linkedJoiningId = admissions[0].joining_id || null;
+
+    if (payload.courseInfo !== undefined) {
+      await persistAdmissionCourseBranchUpdate(
+        pool,
+        admissionId,
+        payload.courseInfo,
+        req.user?.id,
+        linkedJoiningId
+      );
+      delete payload.courseInfo;
+    }
 
     // Build dynamic UPDATE query
     const updateFields = [];
     const updateParams = [];
-
-    // Main admission fields
-    if (payload.courseInfo !== undefined) {
-      await applyAdmissionCourseInfoUpdates(pool, payload.courseInfo, updateFields, updateParams);
-    }
 
     if (payload.studentInfo !== undefined) {
       if (payload.studentInfo.name !== undefined) {
@@ -1600,17 +1865,13 @@ export const updateAdmissionByLead = async (req, res) => {
 
     const pool = getPool();
 
-    // Fetch admission by lead_id
-    const [admissions] = await pool.execute(
-      'SELECT * FROM admissions WHERE lead_id = ?',
-      [leadId]
-    );
-
-    if (admissions.length === 0) {
-      return errorResponse(res, 'Admission record not found for this lead', 404);
+    const admissionRow = await resolveAdmissionRowByRouteParam(pool, leadId);
+    if (!admissionRow) {
+      return errorResponse(res, 'Admission record not found for this lead or joining', 404);
     }
 
-    const admissionId = admissions[0].id;
+    const admissionId = admissionRow.id;
+    const linkedJoiningId = admissionRow.joining_id || null;
 
     const validationErrors = validateAdmissionPayload(req.body);
     if (validationErrors.length > 0) {
@@ -1619,14 +1880,20 @@ export const updateAdmissionByLead = async (req, res) => {
 
     const payload = { ...req.body };
 
+    if (payload.courseInfo !== undefined) {
+      await persistAdmissionCourseBranchUpdate(
+        pool,
+        admissionId,
+        payload.courseInfo,
+        req.user?.id,
+        linkedJoiningId
+      );
+      delete payload.courseInfo;
+    }
+
     // Build dynamic UPDATE query (same as updateAdmissionById)
     const updateFields = [];
     const updateParams = [];
-
-    // Main admission fields (same logic as updateAdmissionById)
-    if (payload.courseInfo !== undefined) {
-      await applyAdmissionCourseInfoUpdates(pool, payload.courseInfo, updateFields, updateParams);
-    }
 
     if (payload.studentInfo !== undefined) {
       if (payload.studentInfo.name !== undefined) {
@@ -1955,6 +2222,8 @@ export const getAdmissionStats = async (req, res) => {
     `;
     const [branchStats] = await pool.execute(queryBranches, params);
     const branchIntakeMap = await loadBranchIntakeMap();
+    const secondaryLabels = await loadSecondaryCourseBranchLabelMaps();
+    const intakeBranchLabels = await loadAdmissionBranchIntakeLabelMap(pool);
     const courseStats = stats.map((course) => ({
       ...course,
       branches: branchStats
@@ -1965,8 +2234,14 @@ export const getAdmissionStats = async (req, res) => {
         )
         .map((b) => {
           const intake = resolveBranchIntakeFromMap(branchIntakeMap, b.courseId, b.branchId);
+          const branchName = resolveStatsBranchDisplayName(
+            b,
+            secondaryLabels,
+            intakeBranchLabels
+          );
           return {
             ...b,
+            branchName: branchName || b.branchName,
             cqIntake: intake.cqIntake ?? null,
             mqIntake: intake.mqIntake ?? null,
             cqAdmitted: Number(b.cqAdmitted) || 0,
