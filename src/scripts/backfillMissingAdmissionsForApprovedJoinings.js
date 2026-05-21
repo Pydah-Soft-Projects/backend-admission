@@ -85,7 +85,7 @@ async function main() {
           j.qualification_ssc || 0,
           j.qualification_inter_diploma || 0,
           j.qualification_ug || 0,
-          j.qualification_merit != null ? j.qualification_merit : null,
+          j.qualification_merit != null ? j.qualification_merit : 0,
           j.qualification_mediums || JSON.stringify([]),
           j.qualification_other_medium_label || '',
           j.document_ssc || 'pending',

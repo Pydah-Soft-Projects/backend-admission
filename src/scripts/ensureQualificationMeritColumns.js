@@ -1,5 +1,5 @@
 /**
- * Ensures joinings + admissions have qualification_merit (merit Yes/No / NULL).
+ * Ensures joinings + admissions have qualification_merit (merit Yes/No; empty → No via backfill script).
  * Fixes: ER_BAD_FIELD_ERROR Unknown column 'qualification_merit' when saving joining draft.
  *
  * Usage (from backend-admission):

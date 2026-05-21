@@ -56,29 +56,20 @@ const SQL_IS_MANG_QUOTA = `(
 )`;
 const SQL_IS_ACTIVE_ADMISSION = `status != '${ADMISSION_CANCELLED_STATUS}'`;
 const SQL_IS_CANCELLED_ADMISSION = `status = '${ADMISSION_CANCELLED_STATUS}'`;
-
-/** Valid JSON object for lead_data (stats queries on `admissions` without alias). */
-const SQL_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
-/** Registration Merit / scholarship field (Eligible vs Not eligible) from joining form extras. */
-const SQL_SCHOLAR_STATUS_RAW = `NULLIF(TRIM(COALESCE(
-  JSON_UNQUOTE(JSON_EXTRACT(${SQL_LEAD_DATA_JSON}, '$._joiningRegistrationExtras.scholar_status')),
-  JSON_UNQUOTE(JSON_EXTRACT(${SQL_LEAD_DATA_JSON}, '$._joiningRegistrationExtras.scholarStatus')),
-  ''
-)), '')`;
-const SQL_SCHOLAR_STATUS_NORM = `LOWER(${SQL_SCHOLAR_STATUS_RAW})`;
-/**
- * Merit Quota (abstract) = spreadsheet Merit column: **Eligible** only.
- * Uses `lead_data._joiningRegistrationExtras.scholar_status` (not qualification Merit Yes/No).
- */
-const SQL_IS_MERIT_QUOTA_ELIGIBLE = `(
-  ${SQL_SCHOLAR_STATUS_NORM} = 'eligible'
-  OR ${SQL_SCHOLAR_STATUS_NORM} = 'e'
+/** Spot quota (excludes lateral-spot, which is counted under management). */
+const SQL_IS_SPOT_QUOTA = `(
+  UPPER(TRIM(COALESCE(quota, ''))) IN ('SPOT')
+  OR UPPER(TRIM(COALESCE(quota, ''))) = 'SPOT ADMISSION'
   OR (
-    ${SQL_SCHOLAR_STATUS_NORM} LIKE '%eligible%'
-    AND ${SQL_SCHOLAR_STATUS_NORM} NOT LIKE '%not%'
-    AND ${SQL_SCHOLAR_STATUS_NORM} NOT LIKE '%nil%'
+    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%SPOT%'
+    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%LATERAL%'
+    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%MANG%'
+    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%CONV%'
   )
 )`;
+/** Qualification Merit Yes/No from joining form (`qualification_merit`: 1 = Yes, 0 = No). */
+const SQL_IS_MERIT_YES = 'qualification_merit = 1';
+const SQL_IS_MERIT_NO = 'qualification_merit = 0';
 
 const parseBranchMetadataObject = (metadata) => {
   if (!metadata) return null;
@@ -272,15 +263,13 @@ export const persistAdmissionReference1 = async (pool, admissionId, reference1, 
 };
 
 const qualificationMeritFromSql = (value) => {
-  if (value === null || value === undefined) return null;
   if (value === 1 || value === true) return true;
   return false;
 };
 
 const qualificationMeritToSql = (merit) => {
   if (merit === true) return 1;
-  if (merit === false) return 0;
-  return null;
+  return 0;
 };
 
 function pickFromRegistrationFormData(registrationFormData, keys) {
@@ -1955,8 +1944,10 @@ export const getAdmissionStats = async (req, res) => {
         COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as cqCancelled,
         COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as mqAdmitted,
         COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as mqCancelled,
-        COUNT(CASE WHEN ${SQL_IS_MERIT_QUOTA_ELIGIBLE} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as meritQuotaAdmitted,
-        COUNT(CASE WHEN ${SQL_IS_MERIT_QUOTA_ELIGIBLE} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as meritQuotaCancelled
+        COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as spotAdmitted,
+        COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as spotCancelled,
+        COUNT(CASE WHEN ${SQL_IS_MERIT_YES} THEN 1 END) as meritYes,
+        COUNT(CASE WHEN ${SQL_IS_MERIT_NO} THEN 1 END) as meritNo
       FROM admissions
       ${whereClause}
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}, ${SQL_BTECH_LATERAL_TRACK}
@@ -1982,8 +1973,10 @@ export const getAdmissionStats = async (req, res) => {
             cqCancelled: Number(b.cqCancelled) || 0,
             mqAdmitted: Number(b.mqAdmitted) || 0,
             mqCancelled: Number(b.mqCancelled) || 0,
-            meritQuotaAdmitted: Number(b.meritQuotaAdmitted) || 0,
-            meritQuotaCancelled: Number(b.meritQuotaCancelled) || 0,
+            spotAdmitted: Number(b.spotAdmitted) || 0,
+            spotCancelled: Number(b.spotCancelled) || 0,
+            meritYes: Number(b.meritYes) || 0,
+            meritNo: Number(b.meritNo) || 0,
           };
         }),
     }));

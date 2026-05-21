@@ -362,12 +362,10 @@ const ensureLeadForApprovedJoining = async ({
 // Helper function to format joining data from SQL to camelCase
 const qualificationMeritToSql = (merit) => {
   if (merit === true) return 1;
-  if (merit === false) return 0;
-  return null;
+  return 0;
 };
 
 const qualificationMeritFromSql = (value) => {
-  if (value === null || value === undefined) return null;
   if (value === 1 || value === true) return true;
   return false;
 };
