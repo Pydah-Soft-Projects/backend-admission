@@ -373,6 +373,7 @@ export const recordCashPayment = async (req, res) => {
       amount,
       currency = 'INR',
       notes,
+      referenceId,
       isAdditionalFee = false,
       // Optional fee-head tagging from Fee Management DB
       feeHead = null,
@@ -469,12 +470,17 @@ export const recordCashPayment = async (req, res) => {
 
     // Create transaction
     const transactionId = uuidv4();
+    const normalizedReferenceId =
+      referenceId != null && String(referenceId).trim() !== ''
+        ? String(referenceId).trim()
+        : null;
+
     await pool.execute(
       `INSERT INTO payment_transactions (
         id, lead_id, joining_id, admission_id, course_id, branch_id,
-        amount, currency, mode, status, collected_by, notes,
+        amount, currency, mode, status, collected_by, reference_id, notes,
         is_additional_fee, meta, processed_at, verified_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW(), NOW())`,
       [
         transactionId,
         finalLeadId || null,
@@ -487,6 +493,7 @@ export const recordCashPayment = async (req, res) => {
         'cash',
         'success',
         req.user?.id || null,
+        normalizedReferenceId,
         notes || null,
         isAdditionalFee === true ? 1 : 0,
         JSON.stringify({
