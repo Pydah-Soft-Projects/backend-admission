@@ -1560,7 +1560,7 @@ export const saveJoiningDraft = async (req, res) => {
       } else {
         return errorResponse(
           res,
-          'Standalone joining drafts without an enquiry number are no longer allowed. Use "Send Joining Form" on the joining pipeline to create a lead with an enquiry and a linked draft.',
+          'Standalone joining drafts without an enquiry number are no longer allowed. Use "Add Joining Form" on the joining pipeline to create a lead with an enquiry and a linked draft.',
           400
         );
       }
@@ -1658,7 +1658,7 @@ export const saveJoiningDraft = async (req, res) => {
         if (!hasEnquiry) {
           return errorResponse(
             res,
-            'This joining draft has no enquiry number (on the lead or on the form snapshot) and cannot be saved. Remove it from the joining desk and use "Send Joining Form" instead.',
+            'This joining draft has no enquiry number (on the lead or on the form snapshot) and cannot be saved. Remove it from the joining desk and use "Add Joining Form" instead.',
             400
           );
         }

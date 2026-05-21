@@ -15,8 +15,30 @@ import { listRegistrationForms, getRegistrationForm } from './registrationForm.c
 import { listCourseProgramLevels, listStudentQuotas } from './secondaryJoiningContext.controller.js';
 
 const PUBLIC_EDIT_TTL_MS = 5 * 60 * 1000;
+/** CRM source for staff "Add Joining Form" pipeline (not quota — do not confuse with leads.quota). */
+const ADD_JOINING_FORM_SOURCE = 'Direct Admission';
 const sanitizeString = (value) => (typeof value === 'string' ? value.trim() : '');
 const sanitizePhone = (value) => sanitizeString(value).replace(/\D/g, '').slice(-10);
+
+const normalizeManagedIdForDb = (value) => {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  return s === '' ? null : s;
+};
+
+const resolvePrimaryCourseBranchFkIds = async (pool, courseId, branchId) => {
+  let fkCourseId = null;
+  let fkBranchId = null;
+  if (courseId != null && String(courseId) !== '') {
+    const [pc] = await pool.execute('SELECT id FROM courses WHERE id = ?', [courseId]);
+    if (pc.length > 0) fkCourseId = pc[0].id;
+  }
+  if (branchId != null && String(branchId) !== '') {
+    const [pb] = await pool.execute('SELECT id FROM branches WHERE id = ?', [branchId]);
+    if (pb.length > 0) fkBranchId = pb[0].id;
+  }
+  return { fkCourseId, fkBranchId };
+};
 
 async function captureControllerJson(handler, buildReq) {
   let captured = null;
@@ -199,12 +221,15 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
     const studentPhone = sanitizePhone(req.body?.studentPhone || req.body?.phone);
     const fatherPhone = sanitizePhone(req.body?.fatherPhone);
     const fatherName = sanitizeString(req.body?.fatherName) || 'Not Provided';
-    const courseInterested = sanitizeString(req.body?.courseInterested || req.body?.course);
+    const courseInterested = sanitizeString(req.body?.courseInterested);
     const courseId = sanitizeString(req.body?.courseId);
     const branchId = sanitizeString(req.body?.branchId);
     const branch = sanitizeString(req.body?.branch);
     const quota = sanitizeString(req.body?.quota);
+    const source =
+      sanitizeString(req.body?.source) || ADD_JOINING_FORM_SOURCE;
     const programLevel = sanitizeString(req.body?.programLevel);
+    const reference1 = sanitizeString(req.body?.reference1);
 
     if (!studentName) return errorResponse(res, 'Student name is required', 400);
     if (studentPhone.length !== 10) {
@@ -234,10 +259,16 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
       courseInterested,
       applicationStatus: 'Draft',
       leadStatus: 'Confirmed',
-      source: 'Joining Form Link',
+      source,
       ...(programLevel ? { _joiningProgramLevel: programLevel } : {}),
       ...(courseId ? { _joiningManagedCourseId: courseId } : {}),
       ...(branchId ? { _joiningManagedBranchId: branchId } : {}),
+      ...(reference1 ? { reference1 } : {}),
+    };
+
+    const leadDynamicFields = {
+      createdFrom: 'add_joining_form',
+      ...(reference1 ? { reference1 } : {}),
     };
 
     connection = await pool.getConnection();
@@ -271,28 +302,39 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
         '',
         quota,
         'Draft',
-        JSON.stringify({ createdFrom: 'send_joining_form' }),
+        JSON.stringify(leadDynamicFields),
         'Confirmed',
-        'Joining Form Link',
+        source,
         userId,
       ]
     );
 
+    const managedCourseId = normalizeManagedIdForDb(courseId);
+    const managedBranchId = normalizeManagedIdForDb(branchId);
+    const { fkCourseId, fkBranchId } = await resolvePrimaryCourseBranchFkIds(
+      connection,
+      managedCourseId,
+      managedBranchId
+    );
+
     await connection.execute(
       `INSERT INTO joinings (
-        id, lead_id, lead_data, status, course_id, branch_id, course, branch, quota,
+        id, lead_id, lead_data, status, course_id, branch_id, managed_course_id, managed_branch_id,
+        course, branch, quota,
         student_name, student_phone, student_gender, student_notes,
         father_name, father_phone, mother_name,
         reservation_general, reservation_other,
         created_by, updated_by, draft_updated_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())`,
       [
         joiningId,
         leadId,
         JSON.stringify(leadDataSnapshot),
         'draft',
-        null,
-        null,
+        fkCourseId,
+        fkBranchId,
+        managedCourseId,
+        managedBranchId,
         courseInterested,
         branch,
         quota,

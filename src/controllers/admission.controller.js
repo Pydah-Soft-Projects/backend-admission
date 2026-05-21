@@ -2511,6 +2511,49 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
 };
 
 /**
+ * @desc    Distinct Reference 1 names used on admissions, joinings, and leads (for picker suggestions)
+ * @route   GET /api/admissions/reference-names
+ */
+export const listDistinctReferenceNames = async (req, res) => {
+  try {
+    const pool = getPool();
+    const sqlJoiningLeadData = `COALESCE(CASE WHEN JSON_VALID(j.lead_data) THEN j.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+    const sqlJoiningRef1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningLeadData}, '$.reference1'))), '')`;
+    const sqlJoiningRefLegacy = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningLeadData}, '$.referenceName'))), '')`;
+    const sqlLeadDynamic = `COALESCE(CASE WHEN JSON_VALID(l.dynamic_fields) THEN l.dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+    const sqlLeadRef1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${sqlLeadDynamic}, '$.reference1'))), '')`;
+
+    const [rows] = await pool.execute(
+      `SELECT DISTINCT TRIM(name) AS name FROM (
+         SELECT ${SQL_A_REFERENCE1} AS name FROM admissions a
+         WHERE ${SQL_A_REFERENCE1} IS NOT NULL
+         UNION
+         SELECT ${sqlJoiningRef1} AS name FROM joinings j
+         WHERE ${sqlJoiningRef1} IS NOT NULL
+         UNION
+         SELECT ${sqlJoiningRefLegacy} AS name FROM joinings j
+         WHERE ${sqlJoiningRefLegacy} IS NOT NULL
+         UNION
+         SELECT ${sqlLeadRef1} AS name FROM leads l
+         WHERE ${sqlLeadRef1} IS NOT NULL
+       ) refs
+       WHERE name IS NOT NULL AND name != ''
+       ORDER BY name ASC
+       LIMIT 500`
+    );
+
+    const names = rows
+      .map((row) => String(row.name ?? '').trim())
+      .filter((n) => n.length > 0);
+
+    return successResponse(res, { names }, 'Reference names retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error listing distinct reference names:', error);
+    return errorResponse(res, error.message || 'Failed to list reference names', 500);
+  }
+};
+
+/**
  * @desc    Admissions counts by student Reference 1 (lead_data.reference1) × course
  * @route   GET /api/admissions/stats/by-reference
  */

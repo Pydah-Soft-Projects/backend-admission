@@ -17,6 +17,7 @@ import {
   getAdmissionStats,
   getAdmissionStatsByReference,
   getAdmissionStatsByDate,
+  listDistinctReferenceNames,
   upsertAdmissionBranchIntake,
   exportAdmissions,
   sendAdmissionConfirmationSmsById,
@@ -26,6 +27,7 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get('/reference-names', listDistinctReferenceNames);
 router.get('/stats/by-reference', getAdmissionStatsByReference);
 router.get('/stats/by-date', getAdmissionStatsByDate);
 router.get('/stats', getAdmissionStats);
