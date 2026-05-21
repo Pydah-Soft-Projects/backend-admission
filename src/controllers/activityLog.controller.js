@@ -30,7 +30,7 @@ const formatActivityLog = (logData, performedByUser = null) => {
 export const addActivity = async (req, res) => {
   try {
     const { leadId } = req.params;
-    const { comment, newStatus, newQuota, statusChannel, type = 'comment' } = req.body;
+    const { comment, newStatus, newQuota, statusChannel, type = 'comment', visitDate } = req.body;
     const pool = getPool();
     const userId = req.user.id || req.user._id;
 
@@ -65,6 +65,12 @@ export const addActivity = async (req, res) => {
     let leadModified = false;
     const updateFields = [];
     const updateValues = [];
+
+    // If a specific visit date is provided (YYYY-MM-DD), store it so the analytics layer
+    // can group this diary entry under the PRO-selected date rather than NOW().
+    if (visitDate && typeof visitDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(visitDate.trim())) {
+      metadata.visitDate = visitDate.trim();
+    }
 
     const nextCallBase = lead.call_status ?? null;
     const nextVisitBase = lead.visit_status ?? null;

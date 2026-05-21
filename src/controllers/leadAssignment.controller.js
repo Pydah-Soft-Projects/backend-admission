@@ -3974,9 +3974,14 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
               visitDiaryUpdatesMap.set(userKey, userUpdates);
             }
 
-            const dateKey = row.log_created_at instanceof Date
-              ? row.log_created_at.toISOString().slice(0, 10)
-              : String(row.log_created_at || '').slice(0, 10);
+            // Use the PRO-selected visit date (stored in metadata) when available.
+            // This ensures past-date entries appear under the correct diary date, not
+            // the server's creation timestamp (which is always "today").
+            const rawDateKey = logMeta?.visitDate ||
+              (row.log_created_at instanceof Date
+                ? row.log_created_at.toISOString().slice(0, 10)
+                : String(row.log_created_at || '').slice(0, 10));
+            const dateKey = typeof rawDateKey === 'string' ? rawDateKey.slice(0, 10) : '';
             
             if (dateKey && dateKey !== 'null') {
               let dateBucket = userUpdates.get(dateKey);
