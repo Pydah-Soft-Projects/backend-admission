@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import {
   isLateralRegistrationExtras,
@@ -360,12 +362,59 @@ const buildStudentDataForSecondaryStorage = (
   return { payload, studentAddressLine: fullAddressLine };
 };
 
+const STUDENT_PORTAL_PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/** Six-character portal password (no ambiguous 0/O or 1/I). */
+export const generateStudentPortalPassword = () => {
+  let password = '';
+  for (let i = 0; i < 6; i += 1) {
+    password += STUDENT_PORTAL_PASSWORD_CHARS[crypto.randomInt(STUDENT_PORTAL_PASSWORD_CHARS.length)];
+  }
+  return password;
+};
+
+/**
+ * Ensure SDMS `student_credentials` row exists (username = admission number).
+ * @returns {Promise<{ credentialsCreated: boolean, plainPassword: string|null }>}
+ */
+export const ensureSecondaryStudentCredentials = async (
+  secondaryPool,
+  studentId,
+  admissionNumber
+) => {
+  const safeAdmissionNumber = String(admissionNumber || '').trim();
+  if (!safeAdmissionNumber || !studentId) {
+    return { credentialsCreated: false, plainPassword: null };
+  }
+
+  const [existing] = await secondaryPool.execute(
+    'SELECT id FROM student_credentials WHERE admission_number = ? LIMIT 1',
+    [safeAdmissionNumber]
+  );
+  if (existing.length > 0) {
+    return { credentialsCreated: false, plainPassword: null };
+  }
+
+  const plainPassword = generateStudentPortalPassword();
+  const passwordHash = await bcrypt.hash(plainPassword, 10);
+  await secondaryPool.execute(
+    `INSERT INTO student_credentials (
+      student_id, admission_number, username, password_hash, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, NOW(), NOW())`,
+    [studentId, safeAdmissionNumber, safeAdmissionNumber, passwordHash]
+  );
+  console.log(
+    `[secondary-sync] Created student portal credentials for ${safeAdmissionNumber}`
+  );
+  return { credentialsCreated: true, plainPassword };
+};
+
 /**
  * Sync admission/student data to secondary database
  * @param {Object} admissionData - Formatted admission/joining data
  * @param {string} [admissionNumber] - The student's admission number (falls back to admissionData / leadData)
  * @param {Object} [extraInfo] - Optional extra info like lead email, joining id
- * @returns {Promise<boolean>} true if a row was written to secondary; false if skipped or failed
+ * @returns {Promise<{ ok: boolean, credentialsCreated?: boolean, plainPassword?: string|null }>}
  */
 export const syncToSecondaryDatabase = async (admissionData, admissionNumber, extraInfo = {}) => {
   const toTrim = (v) => {
@@ -385,7 +434,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
 
   if (!resolvedAdmissionNumber) {
     console.warn('[secondary-sync] skipped: missing admission number on admission payload');
-    return false;
+    return { ok: false };
   }
 
   try {
@@ -613,16 +662,37 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       );
       console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);
     }
-    return true;
+
+    const [studentIdRows] = await secondaryPool.execute(
+      'SELECT id FROM students WHERE admission_number = ? LIMIT 1',
+      [resolvedAdmissionNumber]
+    );
+    const studentId = studentIdRows[0]?.id;
+    const credentialResult = studentId
+      ? await ensureSecondaryStudentCredentials(
+          secondaryPool,
+          studentId,
+          resolvedAdmissionNumber
+        )
+      : { credentialsCreated: false, plainPassword: null };
+
+    return { ok: true, ...credentialResult };
   } catch (error) {
     console.error('Secondary DB sync failed:', error);
-    return false;
+    return { ok: false };
   }
 };
 
+/** Normalize legacy boolean return from `syncToSecondaryDatabase`. */
+export const isSecondarySyncOk = (result) => {
+  if (result === true) return true;
+  if (result === false) return false;
+  return Boolean(result?.ok);
+};
+
 /** Call after `syncToSecondaryDatabase`; logs when sync was skipped or secondary DB failed (primary already committed). */
-export const warnIfSecondaryStudentSyncMissed = (context, meta, ok) => {
-  if (ok === false) {
+export const warnIfSecondaryStudentSyncMissed = (context, meta, result) => {
+  if (!isSecondarySyncOk(result)) {
     console.warn(`[secondary-sync] Student table sync did not complete (${context})`, meta);
   }
 };

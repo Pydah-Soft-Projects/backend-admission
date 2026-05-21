@@ -519,12 +519,12 @@ async function resyncSecondaryFromPrimary(pool, admissionNumber) {
     email = '';
   }
   const formatted = await formatAdmission(row, pool);
-  const ok = await syncToSecondaryDatabase(formatted, formatted.admissionNumber, {
+  const syncResult = await syncToSecondaryDatabase(formatted, formatted.admissionNumber, {
     leadId: row.lead_id || undefined,
     joiningId: row.joining_id || undefined,
     email,
   });
-  return { ok: Boolean(ok) };
+  return { ok: syncResult?.ok === true };
 }
 
 async function processEntry(pool, secondaryPool, rawEntry, options) {

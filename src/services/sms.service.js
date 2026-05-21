@@ -8,6 +8,13 @@ dotenv.config();
 const BULK_SMS_API_KEY = process.env.BULK_SMS_API_KEY;
 const BULK_SMS_SENDER_ID = process.env.BULK_SMS_SENDER_ID || 'PYDAHK';
 
+/** SDMS student portal login URL sent in account-created SMS (no scheme). */
+export const STUDENT_PORTAL_LOGIN_URL =
+  process.env.STUDENT_PORTAL_LOGIN_URL || 'sdms.pydah.edu.in';
+
+/** DLT template: Hello {#var#} your account has been created. Username: {#var#} Password: {#var#}. Login: {#var#}- Pydah College */
+const STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID = '1707176525577028276';
+
 /**
  * Look up a DLT template id by its `message_templates.name`. Results are cached
  * in-memory for `TEMPLATE_LOOKUP_TTL_MS` so a high-traffic endpoint doesn't hit
@@ -151,6 +158,80 @@ const smsService = {
       };
     } catch (error) {
       console.error('Failed to send admission confirmation SMS:', error.message || error);
+      return { success: false, error: error.message || 'sms_send_failed' };
+    }
+  },
+
+  /**
+   * Send student portal account-created SMS after secondary DB sync on joining approval.
+   *
+   * DLT template id 1707176525577028276:
+   *   Hello {#var#} your account has been created. Username: {#var#} Password: {#var#}.
+   *   Login: {#var#}- Pydah College
+   *
+   * Variables: student name, admission number (username), 6-char portal password, login URL.
+   * Auto-sent from `approveJoining` only when new credentials are created — not via Communications UI.
+   */
+  sendStudentAccountCreated: async (
+    mobileNumber,
+    name,
+    username,
+    password,
+    loginUrl = STUDENT_PORTAL_LOGIN_URL
+  ) => {
+    if (!BULK_SMS_API_KEY) {
+      console.warn('BULK_SMS_API_KEY is not set. Student account SMS skipped (Dev Mode).');
+      return { success: true, message: 'SMS simulation successful (Dev Mode)' };
+    }
+
+    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+    if (cleanNumber.length !== 10) {
+      console.warn(`Student account SMS skipped — invalid mobile "${mobileNumber}".`);
+      return { success: false, error: 'invalid_mobile_number' };
+    }
+
+    const safeName = String(name || 'Student').trim() || 'Student';
+    const safeUsername = String(username || '').trim();
+    const safePassword = String(password || '').trim();
+    const safeLoginUrl = String(loginUrl || STUDENT_PORTAL_LOGIN_URL).trim();
+    if (!safeUsername || !safePassword) {
+      console.warn('Student account SMS skipped — missing username or password.');
+      return { success: false, error: 'missing_credentials' };
+    }
+
+    const message = `Hello ${safeName} your account has been created. Username: ${safeUsername} Password: ${safePassword} Login: ${safeLoginUrl}- Pydah College`;
+
+    try {
+      const result = await sendSmsThroughBulkSmsApps({
+        numbers: [cleanNumber],
+        message,
+        tempid: STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID,
+      });
+
+      const responsePreview = String(result.responseText || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+
+      if (result.success) {
+        console.log(
+          `Student account SMS sent to ${cleanNumber} (username ${safeUsername}, dlt ${STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID}, messageIds=[${result.messageIds.join(',')}]).`
+        );
+        return {
+          success: true,
+          data: { messageIds: result.messageIds, responseText: result.responseText },
+        };
+      }
+
+      console.error(
+        `Student account SMS rejected by gateway (mobile=${cleanNumber}, username=${safeUsername}, dlt=${STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID}). Gateway response: ${responsePreview}`
+      );
+      return {
+        success: false,
+        error: 'gateway_rejected',
+        gatewayMessage: responsePreview,
+      };
+    } catch (error) {
+      console.error('Failed to send student account SMS:', error.message || error);
       return { success: false, error: error.message || 'sms_send_failed' };
     }
   },

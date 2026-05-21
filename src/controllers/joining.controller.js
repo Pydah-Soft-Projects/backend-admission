@@ -2791,21 +2791,22 @@ export const approveJoining = async (req, res) => {
         ? await formatJoining(joiningAfterManagedRows[0], connection)
         : formattedJoining;
 
-    // 7. Sync to Secondary DB
+    // 7. Sync to Secondary DB (+ student portal credentials when missing)
+    const secondarySyncResult = await syncToSecondaryDatabase(joiningForSecondarySync, admissionNumber, {
+      leadId: joining.lead_id,
+      joiningId: joining.id,
+      email: lead?.email || ''
+    });
     warnIfSecondaryStudentSyncMissed(
       'approveJoining',
       { joiningId: joining.id, admissionNumber },
-      await syncToSecondaryDatabase(joiningForSecondarySync, admissionNumber, {
-        leadId: joining.lead_id,
-        joiningId: joining.id,
-        email: lead?.email || ''
-      })
+      secondarySyncResult
     );
 
     await connection.commit();
 
-    // Fire-and-forget admission confirmation SMS to the student. Runs strictly
-    // after commit so an SMS gateway hiccup never rolls back the admission.
+    // Fire-and-forget SMS to the student. Runs strictly after commit so gateway
+    // failures never roll back the admission.
     {
       const studentPhone =
         formattedJoining?.studentInfo?.phone || lead?.phone || '';
@@ -2817,9 +2818,25 @@ export const approveJoining = async (req, res) => {
           .catch((err) =>
             console.error('Admission confirmation SMS dispatch failed:', err?.message || err)
           );
+
+        if (
+          secondarySyncResult?.credentialsCreated &&
+          secondarySyncResult?.plainPassword
+        ) {
+          smsService
+            .sendStudentAccountCreated(
+              studentPhone,
+              studentName,
+              admissionNumber,
+              secondarySyncResult.plainPassword
+            )
+            .catch((err) =>
+              console.error('Student account SMS dispatch failed:', err?.message || err)
+            );
+        }
       } else {
         console.warn(
-          `Admission confirmation SMS skipped — missing ${!studentPhone ? 'studentPhone' : 'admissionNumber'} for joining ${joining.id}.`
+          `Admission SMS skipped — missing ${!studentPhone ? 'studentPhone' : 'admissionNumber'} for joining ${joining.id}.`
         );
       }
     }
