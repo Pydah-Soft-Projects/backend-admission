@@ -150,7 +150,7 @@ function leadInstitutionLabelExprSql(studentGroup) {
 // @access  Private (Super Admin only)
 export const assignLeads = async (req, res) => {
   try {
-    const { userId, mandal, district, state, village, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate, cycleNumber } = req.body;
+    const { userId, mandal, district, state, village, academicYear, studentGroup, count, leadIds, assignNow = true, institutionName, targetDate, cycleNumber, source, minRank, maxRank } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -276,6 +276,25 @@ export const assignLeads = async (req, res) => {
         const instParam = institutionName.trim();
         conditions.push(`${leadInstitutionKeySql(studentGroup)} = LOWER(?)`);
         params.push(instParam);
+      }
+
+      if (source) {
+        conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+        params.push(source);
+        if (minRank != null && minRank !== '') {
+          const minR = parseInt(minRank, 10);
+          if (!Number.isNaN(minR)) {
+            conditions.push('`rank` >= ?');
+            params.push(minR);
+          }
+        }
+        if (maxRank != null && maxRank !== '') {
+          const maxR = parseInt(maxRank, 10);
+          if (!Number.isNaN(maxR)) {
+            conditions.push('`rank` <= ?');
+            params.push(maxR);
+          }
+        }
       }
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -531,7 +550,7 @@ export const assignLeads = async (req, res) => {
 // @access  Private (Super Admin only)
 export const getAssignmentStats = async (req, res) => {
   try {
-    const { mandal, district, state, village, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber } = req.query;
+    const { mandal, district, state, village, academicYear, studentGroup, institutionName, forBreakdown, cycleNumber, source, minRank, maxRank } = req.query;
     const pool = getPool();
     const includeBreakdowns = String(req.query.includeBreakdowns || 'true').toLowerCase() !== 'false';
     const summaryOnly = String(req.query.summaryOnly || 'false').toLowerCase() === 'true';
@@ -547,6 +566,9 @@ export const getAssignmentStats = async (req, res) => {
       institutionName,
       forBreakdown,
       cycleNumber,
+      source,
+      minRank,
+      maxRank,
       targetRole: req.query.targetRole,
       includeBreakdowns,
       summaryOnly,
@@ -610,28 +632,6 @@ export const getAssignmentStats = async (req, res) => {
       params.push(village);
     }
 
-    // Add district filter if provided
-    if (district) {
-      conditions.push('district = ?');
-      params.push(district);
-    }
-
-    // Add state filter if provided
-    if (state) {
-      conditions.push('state = ?');
-      params.push(state);
-    }
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
-    }
-
-    // Add village filter if provided
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
-    }
-
     const institutionKeySql = leadInstitutionKeySql(studentGroup);
 
     // Add school/college (institution) filter if provided
@@ -639,6 +639,25 @@ export const getAssignmentStats = async (req, res) => {
       const instParam = String(institutionName).trim();
       conditions.push(`${institutionKeySql} = LOWER(?)`);
       params.push(instParam);
+    }
+
+    if (source) {
+      conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+      params.push(source);
+      if (minRank != null && minRank !== '') {
+        const minR = parseInt(minRank, 10);
+        if (!Number.isNaN(minR)) {
+          conditions.push('`rank` >= ?');
+          params.push(minR);
+        }
+      }
+      if (maxRank != null && maxRank !== '') {
+        const maxR = parseInt(maxRank, 10);
+        if (!Number.isNaN(maxR)) {
+          conditions.push('`rank` <= ?');
+          params.push(maxR);
+        }
+      }
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -690,6 +709,26 @@ export const getAssignmentStats = async (req, res) => {
       baseConditions.push(`${institutionKeySql} = LOWER(?)`);
       baseParams.push(instBase);
     }
+
+    if (source) {
+      baseConditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+      baseParams.push(source);
+      if (minRank != null && minRank !== '') {
+        const minR = parseInt(minRank, 10);
+        if (!Number.isNaN(minR)) {
+          baseConditions.push('`rank` >= ?');
+          baseParams.push(minR);
+        }
+      }
+      if (maxRank != null && maxRank !== '') {
+        const maxR = parseInt(maxRank, 10);
+        if (!Number.isNaN(maxR)) {
+          baseConditions.push('`rank` <= ?');
+          baseParams.push(maxR);
+        }
+      }
+    }
+
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
     const nullAssignedExpr = isProTarget ? 'assigned_to_pro IS NULL' : 'assigned_to IS NULL';
@@ -811,6 +850,24 @@ export const getAssignmentStats = async (req, res) => {
       if (includeDistrict && districtValue) {
         gc.push('district = ?');
         gp.push(districtValue);
+      }
+      if (source) {
+        gc.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+        gp.push(source);
+        if (minRank != null && minRank !== '') {
+          const minR = parseInt(minRank, 10);
+          if (!Number.isNaN(minR)) {
+            gc.push('`rank` >= ?');
+            gp.push(minR);
+          }
+        }
+        if (maxRank != null && maxRank !== '') {
+          const maxR = parseInt(maxRank, 10);
+          if (!Number.isNaN(maxR)) {
+            gc.push('`rank` <= ?');
+            gp.push(maxR);
+          }
+        }
       }
       return { gc, gp };
     };
