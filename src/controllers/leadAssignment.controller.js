@@ -2469,6 +2469,233 @@ async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGrou
   return map;
 }
 
+/**
+ * Visit Diary report fast path: only visit_status activity_logs + PRO leave rows.
+ * Avoids full user-analytics batch1/batch2, cohort SQL, and assignment-by-date aggregation.
+ */
+async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, rangeEndStr, academicYearFilter = null) {
+  const visitDiaryUpdatesMap = new Map();
+  if (!proUsers?.length) return visitDiaryUpdatesMap;
+
+  const cohortScopeUserIds = proUsers.map((u) => u.id).filter(Boolean);
+  if (!cohortScopeUserIds.length) return visitDiaryUpdatesMap;
+
+  const cohortUserIdSet = new Set(cohortScopeUserIds);
+  const cohortUserIdPlaceholders = cohortScopeUserIds.map(() => '?').join(',');
+
+  const assignmentDateConditions = [];
+  const assignmentDateParams = [];
+  if (rangeStartStr) {
+    assignmentDateConditions.push('a.created_at >= ?');
+    assignmentDateParams.push(`${rangeStartStr} 00:00:00`);
+  }
+  if (rangeEndStr) {
+    assignmentDateConditions.push('a.created_at <= ?');
+    assignmentDateParams.push(`${rangeEndStr} 23:59:59`);
+  }
+  if (academicYearFilter?.useAcademicYear) {
+    assignmentDateConditions.push('l.academic_year = ?');
+    assignmentDateParams.push(academicYearFilter.yearNum);
+  }
+  if (academicYearFilter?.portfolioStudentGroupNorm) {
+    assignmentDateConditions.push('l.student_group = ?');
+    assignmentDateParams.push(academicYearFilter.portfolioStudentGroupNorm);
+  }
+  const assignmentDateWhere =
+    assignmentDateConditions.length > 0 ? `AND ${assignmentDateConditions.join(' AND ')}` : '';
+
+  const visitLogWhere = `a.type = 'status_change'
+    AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status'
+    AND a.new_status IS NOT NULL AND TRIM(a.new_status) <> '' AND a.new_status <> 'Assigned'
+    AND (
+      a.performed_by IN (${cohortUserIdPlaceholders})
+      OR a.target_user_id IN (${cohortUserIdPlaceholders})
+      OR (l.assigned_to_pro IN (${cohortUserIdPlaceholders})
+          AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status')
+    )
+    ${assignmentDateWhere}`;
+
+  const visitLogParams = [
+    ...cohortScopeUserIds,
+    ...cohortScopeUserIds,
+    ...cohortScopeUserIds,
+    ...assignmentDateParams,
+  ];
+
+  const leaveStart = rangeStartStr || '1970-01-01';
+  const leaveEnd = rangeEndStr || '2099-12-31';
+
+  const [[rawVisitRows], [leaveRows]] = await Promise.all([
+    pool.execute(
+      `SELECT 
+        a.id as log_id,
+        a.target_user_id,
+        a.performed_by,
+        a.lead_id,
+        a.metadata as log_metadata,
+        a.created_at as log_created_at,
+        a.new_status as log_new_status,
+        l.name,
+        l.phone,
+        l.village,
+        l.mandal,
+        l.assigned_to_pro
+      FROM activity_logs a
+      INNER JOIN leads l ON l.id = a.lead_id
+      WHERE ${visitLogWhere}
+      ORDER BY a.created_at ASC`,
+      visitLogParams
+    ),
+    pool.execute(
+      `SELECT id, user_id, DATE_FORMAT(leave_date, '%Y-%m-%d') as leave_date, reason
+       FROM pro_leave_logs
+       WHERE user_id IN (${cohortUserIdPlaceholders})
+         AND leave_date BETWEEN ? AND ?`,
+      [...cohortScopeUserIds, leaveStart, leaveEnd]
+    ),
+  ]);
+
+  const visitLeadsSet = new Set((rawVisitRows || []).map((row) => row.lead_id).filter(Boolean));
+  const leadVisitDateSequenceMap = new Map();
+
+  if (visitLeadsSet.size > 0) {
+    const leadIdArray = Array.from(visitLeadsSet);
+    const [allVisitDates] = await pool.execute(
+      `SELECT lead_id, DATE(created_at) as visit_date
+       FROM activity_logs
+       WHERE lead_id IN (${leadIdArray.map(() => '?').join(',')})
+         AND type = 'status_change'
+         AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.statusChannel')) = 'visit_status'
+       GROUP BY lead_id, DATE(created_at)
+       ORDER BY lead_id, visit_date ASC`,
+      leadIdArray
+    );
+
+    (allVisitDates || []).forEach((row) => {
+      const lid = String(row.lead_id);
+      const vDate =
+        row.visit_date instanceof Date
+          ? row.visit_date.toISOString().slice(0, 10)
+          : String(row.visit_date).slice(0, 10);
+
+      if (!leadVisitDateSequenceMap.has(lid)) leadVisitDateSequenceMap.set(lid, []);
+      leadVisitDateSequenceMap.get(lid).push(vDate);
+    });
+  }
+
+  (rawVisitRows || []).forEach((row) => {
+    const uidsToAttribute = new Set();
+    if (row.target_user_id && cohortUserIdSet.has(row.target_user_id)) {
+      uidsToAttribute.add(row.target_user_id);
+    }
+    if (row.performed_by && cohortUserIdSet.has(row.performed_by)) {
+      uidsToAttribute.add(row.performed_by);
+    }
+
+    let logMeta = null;
+    try {
+      logMeta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata;
+    } catch {
+      /* ignore */
+    }
+
+    if (logMeta?.statusChannel === 'visit_status' && row.assigned_to_pro && cohortUserIdSet.has(row.assigned_to_pro)) {
+      uidsToAttribute.add(row.assigned_to_pro);
+    }
+
+    uidsToAttribute.forEach((uid) => {
+      const userKey = String(uid).trim().toLowerCase();
+      let userUpdates = visitDiaryUpdatesMap.get(userKey);
+      if (!userUpdates) {
+        userUpdates = new Map();
+        visitDiaryUpdatesMap.set(userKey, userUpdates);
+      }
+
+      const rawDateKey =
+        logMeta?.visitDate ||
+        (row.log_created_at instanceof Date
+          ? row.log_created_at.toISOString().slice(0, 10)
+          : String(row.log_created_at || '').slice(0, 10));
+      const dateKey = typeof rawDateKey === 'string' ? rawDateKey.slice(0, 10) : '';
+
+      if (!dateKey || dateKey === 'null') return;
+
+      let dateBucket = userUpdates.get(dateKey);
+      if (!dateBucket) {
+        dateBucket = {
+          date: dateKey,
+          statusCounts: {},
+          details: [],
+        };
+        userUpdates.set(dateKey, dateBucket);
+      }
+
+      const statusToDisplay = logMeta?.visitStatus || row.log_new_status || 'Assigned';
+      dateBucket.statusCounts[statusToDisplay] = (dateBucket.statusCounts[statusToDisplay] || 0) + 1;
+
+      dateBucket.details.push({
+        name: row.name || 'Unknown',
+        phone: row.phone || '-',
+        mandal: row.mandal || '-',
+        village: row.village || row.mandal || '-',
+        visitStatus: statusToDisplay,
+        visitDate: row.log_created_at,
+        leadId: row.lead_id,
+        logId: row.log_id,
+        visitNumber: (() => {
+          const lid = String(row.lead_id);
+          const sequence = leadVisitDateSequenceMap.get(lid);
+          if (!sequence) return 1;
+          const idx = sequence.indexOf(dateKey);
+          return idx !== -1 ? idx + 1 : 1;
+        })(),
+      });
+    });
+  });
+
+  (leaveRows || []).forEach((row) => {
+    const userKey = String(row.user_id).trim().toLowerCase();
+    let userUpdates = visitDiaryUpdatesMap.get(userKey);
+    if (!userUpdates) {
+      userUpdates = new Map();
+      visitDiaryUpdatesMap.set(userKey, userUpdates);
+    }
+    const dateKey = row.leave_date;
+    if (!userUpdates.has(dateKey)) {
+      userUpdates.set(dateKey, {
+        date: dateKey,
+        statusCounts: {},
+        details: [],
+        isOnLeave: true,
+        leaveReason: row.reason,
+      });
+    } else {
+      const bucket = userUpdates.get(dateKey);
+      bucket.isOnLeave = true;
+      bucket.leaveReason = row.reason;
+    }
+  });
+
+  return visitDiaryUpdatesMap;
+}
+
+function formatVisitDiaryUpdatesForUser(visitDiaryUpdatesMap, userId) {
+  const userUpdates = visitDiaryUpdatesMap.get(String(userId || '').trim().toLowerCase());
+  if (!userUpdates) return [];
+  return Array.from(userUpdates.values())
+    .map((bucket) => {
+      const unique = new Map();
+      bucket.details.forEach((d) => unique.set(d.leadId, d));
+      const deduplicatedDetails = Array.from(unique.values());
+      const statusCounts = {};
+      deduplicatedDetails.forEach((d) => {
+        statusCounts[d.visitStatus] = (statusCounts[d.visitStatus] || 0) + 1;
+      });
+      return { ...bucket, details: deduplicatedDetails, statusCounts };
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
 // @desc    Get user-specific analytics (assigned leads and status breakdown)
 // @route   GET /api/leads/analytics/users
 // @access  Private (Super Admin)
@@ -2480,6 +2707,7 @@ export const getUserAnalytics = async (req, res) => {
       userId,
       academicYear,
       includeAssignmentDetails,
+      visitDiaryOnly,
       division,
       department,
       group,
@@ -2522,6 +2750,11 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly === '1' ||
       String(rosterOnly || '') === '1';
 
+    const isVisitDiaryOnly =
+      String(visitDiaryOnly || '').toLowerCase() === 'true' ||
+      visitDiaryOnly === '1' ||
+      String(visitDiaryOnly || '') === '1';
+
     const isCurrentPortfolioOnly =
       String(currentPortfolioOnly || '').toLowerCase() === 'true' ||
       currentPortfolioOnly === '1';
@@ -2554,6 +2787,7 @@ export const getUserAnalytics = async (req, res) => {
       userId,
       academicYear,
       includeAssignmentDetails,
+      visitDiaryOnly: isVisitDiaryOnly,
       division,
       department,
       group,
@@ -2575,7 +2809,7 @@ export const getUserAnalytics = async (req, res) => {
       visitStatus: visitStatusQuery || null,
     });
 
-    if (!isRosterOnly && String(bypassCache || '').toLowerCase() !== 'true') {
+    if (!isRosterOnly && !isVisitDiaryOnly && String(bypassCache || '').toLowerCase() !== 'true') {
       const cached = analyticsCache.get(cacheKey);
       if (cached) {
         if (Date.now() < cached.expiresAt) {
@@ -2588,10 +2822,22 @@ export const getUserAnalytics = async (req, res) => {
       }
     }
 
+    if (isVisitDiaryOnly && String(bypassCache || '').toLowerCase() !== 'true') {
+      const cached = analyticsCache.get(cacheKey);
+      if (cached) {
+        if (Date.now() < cached.expiresAt) {
+          analyticsCache.delete(cacheKey);
+          analyticsCache.set(cacheKey, cached);
+          return successResponse(res, cached.data, 'Visit diary analytics retrieved from cache', 200);
+        }
+        analyticsCache.delete(cacheKey);
+      }
+    }
+
     const yearNum = academicYear && academicYear !== '' ? parseInt(academicYear, 10) : null;
     const useAcademicYear = yearNum != null && !Number.isNaN(yearNum);
     const shouldIncludeAssignmentDetails =
-      String(includeAssignmentDetails || '').toLowerCase() === 'true';
+      !isVisitDiaryOnly && String(includeAssignmentDetails || '').toLowerCase() === 'true';
     const includeAssignmentDetailsForWork =
       shouldIncludeAssignmentDetails && !isCurrentPortfolioOnly;
     const hasOrgFilters = Boolean(division || department || group);
@@ -2998,16 +3244,69 @@ export const getUserAnalytics = async (req, res) => {
       userParams.push(perfRoleNorm);
     }
 
+    /** Visit Diary report: only PRO officers unless a specific userId is selected. */
+    if (isVisitDiaryOnly && !userId) {
+      userConditions.push("role_name = 'PRO'");
+    }
+
     const userWhereClause = `WHERE ${userConditions.join(' AND ')}`;
 
     // Get users based on filter
     const [users] = await pool.execute(
-      `SELECT id, name, email, role_name, designation, is_active FROM users ${userWhereClause}`,
+      `SELECT id, name, email, role_name, designation, emp_no, is_active FROM users ${userWhereClause}`,
       userParams
     );
 
     if (!users || users.length === 0) {
       return successResponse(res, { users: [] }, 'User analytics retrieved successfully', 200);
+    }
+
+    /** Visit Diary report fast path — skip full analytics pipeline. */
+    if (isVisitDiaryOnly) {
+      const visitDiaryUpdatesMap = await buildVisitDiaryUpdatesByUser(
+        pool,
+        users,
+        rangeStartStr,
+        rangeEndStr,
+        {
+          useAcademicYear,
+          yearNum,
+          portfolioStudentGroupNorm,
+        }
+      );
+
+      const sorted = [...users].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+      );
+
+      const userRows = sorted.map((u) => ({
+        id: u.id,
+        userId: u.id,
+        userName: u.name,
+        name: u.name,
+        email: u.email,
+        roleName: u.role_name,
+        designation: u.designation || null,
+        emp_no: u.emp_no || null,
+        isActive: u.is_active === 1 || u.is_active === true,
+        visitDiaryUpdates: formatVisitDiaryUpdatesForUser(visitDiaryUpdatesMap, u.id),
+      }));
+
+      const payload = { users: userRows };
+      if (String(bypassCache || '').toLowerCase() !== 'true') {
+        if (!analyticsCache.has(cacheKey)) {
+          while (analyticsCache.size >= MAX_USER_ANALYTICS_CACHE_ENTRIES) {
+            const firstKey = analyticsCache.keys().next().value;
+            if (firstKey === undefined) break;
+            analyticsCache.delete(firstKey);
+          }
+        }
+        analyticsCache.set(cacheKey, {
+          data: payload,
+          expiresAt: Date.now() + USER_ANALYTICS_CACHE_MS,
+        });
+      }
+      return successResponse(res, payload, 'Visit diary analytics retrieved successfully', 200);
     }
 
     /** Communications → user-specific leads: names/org from HRMS + portfolio lead counts (no batch1/batch2 analytics). */
