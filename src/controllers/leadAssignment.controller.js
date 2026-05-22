@@ -2314,6 +2314,54 @@ function buildRosterLeadScopeFragment(tableAlias, studentGroupRaw, districtRaw, 
 }
 
 /**
+ * Cohort-wide portfolio totals for paginated Call Reports (one scan — avoids per-user batch1 on full roster).
+ */
+async function fetchPortfolioCohortSummaryTotals(pool, userIds, leadFiltersSql, leadFiltersParams) {
+  if (!userIds?.length) {
+    return { userCount: 0, totalAssignedLeads: 0, totalInterested: 0 };
+  }
+  const ph = userIds.map(() => '?').join(',');
+  const leadParams = [...userIds, ...userIds, ...leadFiltersParams];
+
+  const [[totRow]] = await pool.execute(
+    `SELECT COUNT(DISTINCT l.id) AS total_leads
+     FROM leads l
+     WHERE (l.assigned_to IN (${ph}) OR l.assigned_to_pro IN (${ph}))${leadFiltersSql}`,
+    leadParams
+  );
+
+  const [statusRows] = await pool.execute(
+    `SELECT
+      CASE
+        WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
+        WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
+             AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
+        ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
+      END AS computed_status,
+      COUNT(*) AS cnt
+     FROM users u
+     INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+     WHERE u.id IN (${ph})${leadFiltersSql}
+     GROUP BY computed_status`,
+    [...userIds, ...leadFiltersParams]
+  );
+
+  let totalInterested = 0;
+  (statusRows || []).forEach((row) => {
+    const status = String(row.computed_status || '').trim().toLowerCase();
+    if (status === 'interested' || status === 'cet applied') {
+      totalInterested += Number(row.cnt) || 0;
+    }
+  });
+
+  return {
+    userCount: userIds.length,
+    totalAssignedLeads: Number(totRow?.total_leads ?? 0),
+    totalInterested,
+  };
+}
+
+/**
  * Users with ≥1 current portfolio lead in this `leads.student_group` (MySQL only).
  */
 async function fetchUserIdsWithPortfolioStudentGroup(pool, userIds, studentGroupRaw) {
@@ -2832,8 +2880,8 @@ export const getUserAnalytics = async (req, res) => {
         ? executeBatch1ForAnalytics 
         : executeBatch1FromSummaries;
 
-    // Skip heavy legacy batches if using the optimized summary table
-    const skipLegacyBatches = !isCurrentPortfolioOnly && !isRosterOnly;
+    /** Portfolio snapshot + communications roster skip activity_log / communications cohort scans. */
+    const skipLegacyBatches = isRosterOnly || isCurrentPortfolioOnly;
 
     /** Assignment logs in the selected period (same window as date-wise expanded rows). */
     let assignmentDateConditions = [];
@@ -3072,21 +3120,35 @@ export const getUserAnalytics = async (req, res) => {
       !needsPostHydratePerfFilter &&
       !includeAssignmentDetailsForWork;
 
+    /** Paginated portfolio table: SQL only for the current page; cohort totals via `fetchPortfolioCohortSummaryTotals`. */
+    const portfolioPagedFastPath =
+      isCurrentPortfolioOnly &&
+      explicitUserIds.length === 0 &&
+      pageQuery != null &&
+      pageQuery !== '' &&
+      limitQuery != null &&
+      limitQuery !== '';
+
     let perfFilteredUsers;
-    let batch1Results;
+    let batch1Results = null;
+    let portfolioCohortSummaryPrefetched = null;
 
     if (!needsPostHydratePerfFilter && !includeAssignmentDetailsForWork) {
       perfFilteredUsers = [...users].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
-      const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
-      if (deferHrmsHydrateToPage) {
-        batch1Results = await runBatch1(batch1Ids);
-      } else {
-        [, batch1Results] = await Promise.all([
-          hydrateUserOrgFromHrms(users, pool),
-          runBatch1(batch1Ids),
-        ]);
+      if (!portfolioPagedFastPath) {
+        const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+        if (deferHrmsHydrateToPage) {
+          batch1Results = await runBatch1(batch1Ids);
+        } else {
+          [, batch1Results] = await Promise.all([
+            hydrateUserOrgFromHrms(users, pool),
+            runBatch1(batch1Ids),
+          ]);
+        }
+      } else if (!deferHrmsHydrateToPage) {
+        await hydrateUserOrgFromHrms(users, pool);
       }
     } else {
       await hydrateUserOrgFromHrms(users, pool);
@@ -3108,8 +3170,10 @@ export const getUserAnalytics = async (req, res) => {
       perfFilteredUsers = [...perfFilteredUsers].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
-      const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
-      batch1Results = await runBatch1(batch1IdsElse);
+      if (!portfolioPagedFastPath) {
+        const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+        batch1Results = await runBatch1(batch1IdsElse);
+      }
     }
 
     /** Reports → User Performance: restrict to counsellors/PROs with a portfolio lead in this `studentGroup` (MySQL). */
@@ -3159,7 +3223,19 @@ export const getUserAnalytics = async (req, res) => {
       pagination = { page: safePage, limit: limitNum, total, pages };
     }
 
-    if (deferHrmsHydrateToPage && pageUsers.length > 0) {
+    if (portfolioPagedFastPath) {
+      const pageIds = pageUsers.map((u) => u.id).filter(Boolean);
+      const cohortIds = perfFilteredUsers.map((u) => u.id).filter(Boolean);
+      if (deferHrmsHydrateToPage && pageUsers.length > 0) {
+        await hydrateUserOrgFromHrms(pageUsers, pool);
+      } else if (!deferHrmsHydrateToPage && perfFilteredUsers.length > 0) {
+        await hydrateUserOrgFromHrms(perfFilteredUsers, pool);
+      }
+      [batch1Results, portfolioCohortSummaryPrefetched] = await Promise.all([
+        runBatch1(pageIds),
+        fetchPortfolioCohortSummaryTotals(pool, cohortIds, leadFiltersSql, leadFiltersParams),
+      ]);
+    } else if (deferHrmsHydrateToPage && pageUsers.length > 0) {
       await hydrateUserOrgFromHrms(pageUsers, pool);
     }
 
@@ -3176,7 +3252,7 @@ export const getUserAnalytics = async (req, res) => {
       return successResponse(res, { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) }, 'No users found', 200);
     }
 
-    const filteredUserIds = aggregateUserIds;
+    const filteredUserIds = portfolioPagedFastPath ? cohortScopeUserIds : aggregateUserIds;
 
     if (filteredUserIds.length === 0) {
       return successResponse(res, { users: [], ...(pagination ? { pagination, summaryTotals: null } : {}) }, 'No users found', 200);
@@ -3493,27 +3569,7 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
     let cohortTriple;
     if (isCurrentPortfolioOnly) {
       cohortTriple = [emptyMysqlResult, emptyMysqlResult, emptyMysqlResult, emptyMysqlResult];
-      let currentPortfolioCallPack = emptyMysqlResult;
-      if (cohortScopeUserIds.length) {
-        const aySql = leadFiltersSql;
-        const cpParams = [...cohortScopeUserIds, ...leadFiltersParams];
-        const [cpRows] = await pool.execute(
-          `SELECT
-            c.sent_by AS user_id,
-            COUNT(DISTINCT c.lead_id) AS unique_current_leads_called
-           FROM communications c
-           INNER JOIN leads l ON l.id = c.lead_id
-           WHERE c.type = 'call'
-             AND c.call_outcome IS NOT NULL AND TRIM(c.call_outcome) <> ''
-             AND c.sent_by IN (${selectedUserPlaceholders})
-             AND (l.assigned_to = c.sent_by OR l.assigned_to_pro = c.sent_by)
-             ${aySql}
-           GROUP BY c.sent_by`,
-          cpParams
-        );
-        currentPortfolioCallPack = [cpRows, []];
-      }
-      batch2Results = [emptyMysqlResult, currentPortfolioCallPack, emptyMysqlResult];
+      batch2Results = [emptyMysqlResult, emptyMysqlResult, emptyMysqlResult];
     } else if (skipLegacyBatches) {
       // FOR PERFORMANCE REPORTS: Use pre-calculated summary data and skip all slow background scans
       batch2Results = [
@@ -3579,42 +3635,18 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
     });
 
     if (isCurrentPortfolioOnly) {
-      if (cohortScopeUserIds.length) {
-        const aySql = leadFiltersSql;
-        const snapParams = [...cohortScopeUserIds, ...leadFiltersParams];
-        const [snapRowsPack] = await pool.execute(
-          `SELECT u.id AS user_id,
-            TRIM(u.role_name) AS cohort_user_role,
-            CASE
-              WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
-WHEN TRIM(u.role_name) = 'PRO' THEN
-                CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
-              ELSE
-                CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
-            END AS bucket,
-            COUNT(DISTINCT l.id) AS cnt
-           FROM users u
-           INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
-           WHERE u.id IN (${selectedUserPlaceholders}) ${aySql}
-           GROUP BY u.id, TRIM(u.role_name),
-             CASE
-               WHEN LOWER(TRIM(l.lead_status)) = 'new' THEN 'Assigned'
-WHEN TRIM(u.role_name) = 'PRO' THEN
-                 CASE WHEN l.visit_status IS NULL OR TRIM(l.visit_status) = '' THEN 'Not set' ELSE TRIM(l.visit_status) END
-               ELSE
-                 CASE WHEN l.call_status IS NULL OR TRIM(l.call_status) = '' THEN 'Not set' ELSE TRIM(l.call_status) END
-             END`,
-          snapParams
-        );
-        (snapRowsPack || []).forEach((row) => {
-          const uidK = cohortAnalyticUserKey(row.user_id);
-          const role = row.cohort_user_role;
-          const key = canonicalCohortBucketForRole(role, row.bucket);
-          if (!allottedByCallStatusByUser.has(uidK)) allottedByCallStatusByUser.set(uidK, {});
-          const bag = allottedByCallStatusByUser.get(uidK);
-          bag[key] = (bag[key] || 0) + numAgg(row.cnt);
-        });
-      }
+      const userRoleById = new Map(perfFilteredUsers.map((u) => [u.id, u.role_name]));
+      cohortScopeUsers.forEach((u) => userRoleById.set(u.id, u.role_name));
+      actionCounts.forEach((row) => {
+        const uidK = cohortAnalyticUserKey(row.user_id);
+        const role = userRoleById.get(row.user_id);
+        const statusKey = row.computed_status || row.lead_status || row.bucket;
+        const key = canonicalCohortBucketForRole(role, statusKey);
+        if (!key) return;
+        if (!allottedByCallStatusByUser.has(uidK)) allottedByCallStatusByUser.set(uidK, {});
+        const bag = allottedByCallStatusByUser.get(uidK);
+        bag[key] = (bag[key] || 0) + numAgg(row.status_count ?? row.cnt);
+      });
       cohortScopeUsers.forEach((u) => {
         const uidK = cohortAnalyticUserKey(u.id);
         const st = statsByUserId.get(u.id);
@@ -4131,7 +4163,7 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
     };
 
     let totalUnattendedReclaims = 0;
-    if (aggregateUserIds.length) {
+    if (!isCurrentPortfolioOnly && aggregateUserIds.length) {
       const rph2 = aggregateUserIds.map(() => '?').join(',');
       const [uRows] = await pool.execute(
         `SELECT COALESCE(SUM(s.cnt), 0) AS t FROM (
@@ -4160,7 +4192,13 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
     let totalSms = 0;
     let totalInterested = 0;
     let totalCallbacksRevisits = 0;
-    for (const u of perfFilteredUsers) {
+
+    if (portfolioCohortSummaryPrefetched) {
+      totalAssignedLeads = numAgg(portfolioCohortSummaryPrefetched.totalAssignedLeads);
+      totalInterested = numAgg(portfolioCohortSummaryPrefetched.totalInterested);
+    }
+
+    if (!portfolioCohortSummaryPrefetched) for (const u of perfFilteredUsers) {
       const uid = cohortAnalyticUserKey(u.id);
       const stats = statsByUserId.get(u.id) || {
         total_assigned: 0,
@@ -4204,15 +4242,25 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         totalCallbacksRevisits += sumCallbacksRevisitsFromAllottedBag(allottedBag, u.role_name);
       }
     }
-    const summaryTotals = {
-      userCount: perfFilteredUsers.length,
-      totalAssignedLeads,
-      totalCallsDone,
-      totalSms,
-      totalInterested,
-      totalCallbacksRevisits,
-      totalUnattended: totalUnattendedReclaims,
-    };
+    const summaryTotals = portfolioCohortSummaryPrefetched
+      ? {
+          userCount: portfolioCohortSummaryPrefetched.userCount,
+          totalAssignedLeads,
+          totalCallsDone: 0,
+          totalSms: 0,
+          totalInterested,
+          totalCallbacksRevisits: 0,
+          totalUnattended: 0,
+        }
+      : {
+          userCount: perfFilteredUsers.length,
+          totalAssignedLeads,
+          totalCallsDone,
+          totalSms,
+          totalInterested,
+          totalCallbacksRevisits,
+          totalUnattended: totalUnattendedReclaims,
+        };
 
     // Compile analytics for each user (one page when paginated)
     const userAnalytics = pageUsers.map((user) => {
