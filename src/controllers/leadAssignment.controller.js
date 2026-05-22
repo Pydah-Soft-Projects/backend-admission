@@ -941,20 +941,134 @@ export const getAssignmentStats = async (req, res) => {
   }
 };
 
+/** Resolve assignment column + status channel from a user row (PRO vs counsellor vs other). */
+const resolveAssignmentTargetForUser = (userRow) => {
+  const roleName = String(userRow?.role_name || '').trim();
+  const roleUpper = roleName.toUpperCase();
+  const isPro = roleUpper === 'PRO';
+  const isStudentCounselor =
+    roleUpper.includes('COUNSELOR') || roleUpper.includes('COUNSELLOR');
+  const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
+  const statusChannel = isPro ? 'visit_status' : isStudentCounselor ? 'call_status' : 'lead_status';
+  return { roleName, isPro, isStudentCounselor, assignmentCol, statusChannel };
+};
+
+/** Shared geo/academic filters for assignee portfolio count, breakdown, and remove. */
+const buildUserAssignmentLeadFilters = (query, assignmentCol, userId) => {
+  const { mandal, district, state, village, academicYear, studentGroup, cycleNumber } = query;
+  const conditions = [`${assignmentCol} = ?`];
+  const params = [userId];
+
+  if (cycleNumber != null && cycleNumber !== '') {
+    const cycle = parseInt(cycleNumber, 10);
+    if (!Number.isNaN(cycle)) {
+      conditions.push('cycle_number = ?');
+      params.push(cycle);
+    }
+  }
+  if (academicYear != null && academicYear !== '') {
+    const year = parseInt(academicYear, 10);
+    if (!Number.isNaN(year)) {
+      conditions.push('academic_year = ?');
+      params.push(year);
+    }
+  }
+  if (studentGroup) {
+    conditions.push('student_group = ?');
+    params.push(studentGroup);
+  }
+  if (mandal) {
+    conditions.push('mandal = ?');
+    params.push(mandal);
+  }
+  if (district) {
+    conditions.push('district = ?');
+    params.push(district);
+  }
+  if (state) {
+    conditions.push('state = ?');
+    params.push(state);
+  }
+  if (village) {
+    conditions.push('village = ?');
+    params.push(village);
+  }
+
+  return { conditions, params };
+};
+
+/** SQL fragment matching selected portfolio statuses (canonical labels from UI). */
+const buildStatusFilterForRemoval = (target, statuses) => {
+  const list = Array.isArray(statuses)
+    ? statuses.map((s) => String(s || '').trim()).filter(Boolean)
+    : String(statuses || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+  if (!list.length) return { sql: '', params: [] };
+
+  const parts = [];
+  const params = [];
+  const { isPro, isStudentCounselor } = target;
+
+  list.forEach((status) => {
+    const lower = status.toLowerCase();
+    if (isPro) {
+      if (lower === 'assigned') {
+        parts.push(
+          `(visit_status IS NULL OR TRIM(visit_status) = '' OR LOWER(TRIM(visit_status)) IN ('assigned', 'not set'))`
+        );
+      } else if (lower === 'scheduled revisit') {
+        parts.push(
+          `(LOWER(TRIM(visit_status)) IN ('scheduled revisit', 'not available'))`
+        );
+      } else {
+        parts.push('LOWER(TRIM(visit_status)) = ?');
+        params.push(lower);
+      }
+    } else if (isStudentCounselor) {
+      if (lower === 'assigned') {
+        parts.push(
+          `(call_status IS NULL OR TRIM(call_status) = '' OR LOWER(TRIM(call_status)) IN ('assigned', 'not set') OR LOWER(TRIM(lead_status)) = 'new')`
+        );
+      } else {
+        parts.push('LOWER(TRIM(call_status)) = ?');
+        params.push(lower);
+      }
+    } else {
+      parts.push('lead_status = ?');
+      params.push(status);
+    }
+  });
+
+  return { sql: `(${parts.join(' OR ')})`, params };
+};
+
+const mergePortfolioStatusBreakdown = (rows, target) => {
+  const bag = new Map();
+  (rows || []).forEach((row) => {
+    const raw = row.status != null ? String(row.status).trim() : '';
+    const canonical = canonicalCohortBucketForRole(target.roleName, raw || 'Not set');
+    const cnt = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
+    bag.set(canonical, (bag.get(canonical) || 0) + (Number.isFinite(cnt) ? cnt : 0));
+  });
+  return Array.from(bag.entries())
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => b.count - a.count);
+};
+
 // @desc    Get count of leads assigned to a specific user (optional mandal/state filter)
 // @route   GET /api/leads/assign/assigned-count
 // @access  Private (Super Admin only)
 export const getAssignedCountForUser = async (req, res) => {
   try {
-    const { userId, mandal, district, state, village, academicYear, studentGroup, cycleNumber } = req.query;
+    const { userId } = req.query;
     const pool = getPool();
 
     if (!userId) {
       return errorResponse(res, 'User ID is required', 400);
     }
 
-    // Use DB role (same as removeAssignments). PRO leads use assigned_to_pro; others use assigned_to.
-    // Query param targetRole was easy to omit from clients and produced wrong counts for PRO users.
     const [targetUsers] = await pool.execute(
       'SELECT id, role_name FROM users WHERE id = ?',
       [userId]
@@ -962,60 +1076,8 @@ export const getAssignedCountForUser = async (req, res) => {
     if (targetUsers.length === 0) {
       return errorResponse(res, 'User not found', 404);
     }
-    const isPro =
-      targetUsers[0].role_name && String(targetUsers[0].role_name).trim().toUpperCase() === 'PRO';
-    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
-
-    const conditions = [`${assignmentCol} = ?`];
-    const params = [userId];
-
-    if (cycleNumber != null && cycleNumber !== '') {
-      const cycle = parseInt(cycleNumber, 10);
-      if (!Number.isNaN(cycle)) {
-        conditions.push('cycle_number = ?');
-        params.push(cycle);
-      }
-    }
-
-    if (academicYear != null && academicYear !== '') {
-      const year = parseInt(academicYear, 10);
-      if (!Number.isNaN(year)) {
-        conditions.push('academic_year = ?');
-        params.push(year);
-      }
-    }
-    if (studentGroup) {
-      conditions.push('student_group = ?');
-      params.push(studentGroup);
-    }
-    if (mandal) {
-      conditions.push('mandal = ?');
-      params.push(mandal);
-    }
-    if (district) {
-      conditions.push('district = ?');
-      params.push(district);
-    }
-    if (state) {
-      conditions.push('state = ?');
-      params.push(state);
-    }
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
-    }
-    if (district) {
-      conditions.push('district = ?');
-      params.push(district);
-    }
-    if (state) {
-      conditions.push('state = ?');
-      params.push(state);
-    }
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
-    }
+    const target = resolveAssignmentTargetForUser(targetUsers[0]);
+    const { conditions, params } = buildUserAssignmentLeadFilters(req.query, target.assignmentCol, userId);
 
     const [result] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads WHERE ${conditions.join(' AND ')}`,
@@ -1038,12 +1100,90 @@ export const getAssignedCountForUser = async (req, res) => {
   }
 };
 
+// @desc    Portfolio breakdown for remove-assignment UI (status counts for assignee)
+// @route   GET /api/leads/assign/portfolio
+// @access  Private (Super Admin only)
+export const getAssignmentPortfolio = async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const pool = getPool();
+
+    if (!userId) {
+      return errorResponse(res, 'User ID is required', 400);
+    }
+
+    const [targetUsers] = await pool.execute(
+      'SELECT id, name, role_name FROM users WHERE id = ?',
+      [userId]
+    );
+    if (targetUsers.length === 0) {
+      return errorResponse(res, 'User not found', 404);
+    }
+
+    const user = targetUsers[0];
+    const target = resolveAssignmentTargetForUser(user);
+    const { conditions, params } = buildUserAssignmentLeadFilters(req.query, target.assignmentCol, userId);
+    const whereSql = conditions.join(' AND ');
+
+    const statusGroupExpr = target.isPro
+      ? `COALESCE(NULLIF(TRIM(visit_status), ''), 'Not set')`
+      : target.isStudentCounselor
+        ? `COALESCE(NULLIF(TRIM(call_status), ''), 'Not set')`
+        : `COALESCE(NULLIF(TRIM(lead_status), ''), 'Unknown')`;
+
+    const [[countRows], [statusRows]] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) as total FROM leads WHERE ${whereSql}`, params),
+      pool.execute(
+        `SELECT ${statusGroupExpr} AS status, COUNT(*) AS count
+         FROM leads WHERE ${whereSql}
+         GROUP BY ${statusGroupExpr}
+         ORDER BY count DESC`,
+        params
+      ),
+    ]);
+
+    const rawTotal = countRows[0]?.total ?? 0;
+    const total = typeof rawTotal === 'bigint' ? Number(rawTotal) : Number(rawTotal);
+    const statusBreakdown = mergePortfolioStatusBreakdown(statusRows, target);
+
+    return successResponse(
+      res,
+      {
+        userId: user.id,
+        userName: user.name,
+        roleName: target.roleName,
+        statusChannel: target.statusChannel,
+        total: Number.isFinite(total) ? total : 0,
+        statusBreakdown,
+      },
+      'Assignment portfolio retrieved',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting assignment portfolio:', error);
+    return errorResponse(res, error.message || 'Failed to get assignment portfolio', 500);
+  }
+};
+
 // @desc    Remove assignments from a user (bulk unassign)
 // @route   POST /api/leads/assign/remove
 // @access  Private (Super Admin only)
 export const removeAssignments = async (req, res) => {
   try {
-    const { userId, mandal, district, state, village, academicYear, studentGroup, cycleNumber, count } = req.body;
+    const {
+      userId,
+      mandal,
+      district,
+      state,
+      village,
+      academicYear,
+      studentGroup,
+      cycleNumber,
+      count,
+      callStatuses,
+      visitStatuses,
+      statuses,
+    } = req.body;
     const pool = getPool();
     const currentUserId = req.user.id || req.user._id;
 
@@ -1055,7 +1195,6 @@ export const removeAssignments = async (req, res) => {
       return errorResponse(res, 'Count must be greater than zero', 400);
     }
 
-    // Check user exists
     const [users] = await pool.execute(
       'SELECT id, name, role_name FROM users WHERE id = ?',
       [userId]
@@ -1064,57 +1203,25 @@ export const removeAssignments = async (req, res) => {
       return errorResponse(res, 'User not found', 404);
     }
     const user = users[0];
+    const target = resolveAssignmentTargetForUser(user);
+    const { isPro, assignmentCol } = target;
 
-    const isPro = user.role_name && String(user.role_name).trim().toUpperCase() === 'PRO';
-    const assignmentCol = isPro ? 'assigned_to_pro' : 'assigned_to';
+    const statusList =
+      statuses != null
+        ? statuses
+        : target.isPro
+          ? visitStatuses
+          : callStatuses;
 
-    const conditions = [`${assignmentCol} = ?`];
-    const params = [userId];
-    if (cycleNumber != null && cycleNumber !== '') {
-      const cycle = parseInt(cycleNumber, 10);
-      if (!Number.isNaN(cycle)) {
-        conditions.push('cycle_number = ?');
-        params.push(cycle);
-      }
-    }
-    if (academicYear != null && academicYear !== '') {
-      const year = parseInt(academicYear, 10);
-      if (!Number.isNaN(year)) {
-        conditions.push('academic_year = ?');
-        params.push(year);
-      }
-    }
-    if (studentGroup) {
-      conditions.push('student_group = ?');
-      params.push(studentGroup);
-    }
-    if (mandal) {
-      conditions.push('mandal = ?');
-      params.push(mandal);
-    }
-    if (district) {
-      conditions.push('district = ?');
-      params.push(district);
-    }
-    if (state) {
-      conditions.push('state = ?');
-      params.push(state);
-    }
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
-    }
-    if (district) {
-      conditions.push('district = ?');
-      params.push(district);
-    }
-    if (state) {
-      conditions.push('state = ?');
-      params.push(state);
-    }
-    if (village) {
-      conditions.push('village = ?');
-      params.push(village);
+    const { conditions, params } = buildUserAssignmentLeadFilters(
+      { mandal, district, state, village, academicYear, studentGroup, cycleNumber },
+      assignmentCol,
+      userId
+    );
+    const statusFilter = buildStatusFilterForRemoval(target, statusList);
+    if (statusFilter.sql) {
+      conditions.push(statusFilter.sql);
+      params.push(...statusFilter.params);
     }
 
     const limitNum = Math.min(Math.max(parseInt(count, 10) || 0, 1), 10000);
