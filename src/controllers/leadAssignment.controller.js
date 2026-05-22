@@ -16,7 +16,7 @@ import { normalizeEmpNoKey, resolveHrmsOrgNamesFindById } from './user.controlle
 import { updatePerformanceSummary } from '../services/userPerformance.service.js';
 
 const assignmentStatsCache = new Map();
-const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 20000);
+const ASSIGNMENT_STATS_CACHE_MS = Number(process.env.ASSIGNMENT_STATS_CACHE_MS || 60000);
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return String(value);
@@ -143,6 +143,34 @@ function leadInstitutionLabelExprSql(studentGroup) {
     return `COALESCE(${LEAD_INSTITUTION_DYN_SCHOOL_SN}, ${LEAD_INSTITUTION_DYN_SCHOOL_CAMEL}, ${LEAD_INSTITUTION_INTER_COL})`;
   }
   return LEAD_INSTITUTION_INTER_COL;
+}
+
+/** Trim source from query/body; stats and assign use the same predicate. */
+function normalizeAssignmentSource(source) {
+  if (source == null || source === '') return '';
+  return String(source).trim();
+}
+
+/** Match leads.source case-insensitively; optional rank window (min 0 = no minimum, excludes NULL only when min > 0). */
+function appendSourceAndRankFilters(conditions, params, { source, minRank, maxRank }) {
+  const src = normalizeAssignmentSource(source);
+  if (!src) return;
+  conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+  params.push(src);
+  if (minRank != null && minRank !== '') {
+    const minR = parseInt(minRank, 10);
+    if (!Number.isNaN(minR) && minR > 0) {
+      conditions.push('`rank` >= ?');
+      params.push(minR);
+    }
+  }
+  if (maxRank != null && maxRank !== '') {
+    const maxR = parseInt(maxRank, 10);
+    if (!Number.isNaN(maxR)) {
+      conditions.push('`rank` <= ?');
+      params.push(maxR);
+    }
+  }
 }
 
 // @desc    Assign leads to users based on mandal/state (bulk) or specific lead IDs (single)
@@ -278,24 +306,7 @@ export const assignLeads = async (req, res) => {
         params.push(instParam);
       }
 
-      if (source) {
-        conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
-        params.push(source);
-        if (minRank != null && minRank !== '') {
-          const minR = parseInt(minRank, 10);
-          if (!Number.isNaN(minR)) {
-            conditions.push('`rank` >= ?');
-            params.push(minR);
-          }
-        }
-        if (maxRank != null && maxRank !== '') {
-          const maxR = parseInt(maxRank, 10);
-          if (!Number.isNaN(maxR)) {
-            conditions.push('`rank` <= ?');
-            params.push(maxR);
-          }
-        }
-      }
+      appendSourceAndRankFilters(conditions, params, { source, minRank, maxRank });
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
       const limitNum = Math.min(Math.max(parseInt(count, 10) || 0, 1), 10000);
@@ -641,24 +652,7 @@ export const getAssignmentStats = async (req, res) => {
       params.push(instParam);
     }
 
-    if (source) {
-      conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
-      params.push(source);
-      if (minRank != null && minRank !== '') {
-        const minR = parseInt(minRank, 10);
-        if (!Number.isNaN(minR)) {
-          conditions.push('`rank` >= ?');
-          params.push(minR);
-        }
-      }
-      if (maxRank != null && maxRank !== '') {
-        const maxR = parseInt(maxRank, 10);
-        if (!Number.isNaN(maxR)) {
-          conditions.push('`rank` <= ?');
-          params.push(maxR);
-        }
-      }
-    }
+    appendSourceAndRankFilters(conditions, params, { source, minRank, maxRank });
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
@@ -710,24 +704,7 @@ export const getAssignmentStats = async (req, res) => {
       baseParams.push(instBase);
     }
 
-    if (source) {
-      baseConditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
-      baseParams.push(source);
-      if (minRank != null && minRank !== '') {
-        const minR = parseInt(minRank, 10);
-        if (!Number.isNaN(minR)) {
-          baseConditions.push('`rank` >= ?');
-          baseParams.push(minR);
-        }
-      }
-      if (maxRank != null && maxRank !== '') {
-        const maxR = parseInt(maxRank, 10);
-        if (!Number.isNaN(maxR)) {
-          baseConditions.push('`rank` <= ?');
-          baseParams.push(maxR);
-        }
-      }
-    }
+    appendSourceAndRankFilters(baseConditions, baseParams, { source, minRank, maxRank });
 
     const baseWhere = baseConditions.length ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
@@ -743,7 +720,7 @@ export const getAssignmentStats = async (req, res) => {
       : pool.execute(
           `SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END) AS unassigned
+        COALESCE(SUM(CASE WHEN (${nullAssignedExpr}) THEN 1 ELSE 0 END), 0) AS unassigned
        FROM leads ${baseWhere}`,
           baseParams
         );
@@ -851,24 +828,7 @@ export const getAssignmentStats = async (req, res) => {
         gc.push('district = ?');
         gp.push(districtValue);
       }
-      if (source) {
-        gc.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
-        gp.push(source);
-        if (minRank != null && minRank !== '') {
-          const minR = parseInt(minRank, 10);
-          if (!Number.isNaN(minR)) {
-            gc.push('`rank` >= ?');
-            gp.push(minR);
-          }
-        }
-        if (maxRank != null && maxRank !== '') {
-          const maxR = parseInt(maxRank, 10);
-          if (!Number.isNaN(maxR)) {
-            gc.push('`rank` <= ?');
-            gp.push(maxR);
-          }
-        }
-      }
+      appendSourceAndRankFilters(gc, gp, { source, minRank, maxRank });
       return { gc, gp };
     };
 

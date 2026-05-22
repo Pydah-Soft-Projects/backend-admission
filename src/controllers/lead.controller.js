@@ -2048,11 +2048,20 @@ export const getFilterOptions = async (req, res) => {
 
     const districtFilter = (req.query.district && String(req.query.district).trim()) || '';
     const mandalFilter = (req.query.mandal && String(req.query.mandal).trim()) || '';
+    const academicYearFilter =
+      req.query.academicYear != null && req.query.academicYear !== ''
+        ? parseInt(String(req.query.academicYear), 10)
+        : NaN;
+    if (!Number.isNaN(academicYearFilter)) {
+      conditions.push('academic_year = ?');
+      params.push(academicYearFilter);
+    }
     const privateCacheKey = `filter-options:private:v2-sources:${stableStringify({
       roleName: req.user.roleName,
       userId: adminLike ? 'admin-like' : userId,
       districtFilter,
       mandalFilter,
+      academicYear: Number.isNaN(academicYearFilter) ? null : academicYearFilter,
     })}`;
     const cached = getCached(privateCacheKey);
     if (cached) {
@@ -2123,7 +2132,7 @@ export const getFilterOptions = async (req, res) => {
         params
       ),
       pool.execute(
-        `SELECT DISTINCT source FROM leads ${whereClause(sourceCondition)} ORDER BY source ASC`,
+        `SELECT DISTINCT TRIM(source) AS source FROM leads ${whereClause(sourceCondition)} AND TRIM(COALESCE(source, '')) != '' ORDER BY source ASC`,
         params
       ),
       pool.execute(
@@ -2168,7 +2177,7 @@ export const getFilterOptions = async (req, res) => {
       states: states.map(r => r.state),
       quotas: mergeQuotaOptionLabels(catalogQuotas, legacyQuotas),
       leadStatuses: leadStatuses.map(r => r.lead_status),
-      sources: sources.map(r => r.source),
+      sources: [...new Set(sources.map((r) => String(r.source || '').trim()).filter(Boolean))].sort(),
       callStatuses: callStatuses.map(r => r.call_status),
       visitStatuses: visitStatuses.map(r => r.visit_status),
       applicationStatuses: applicationStatuses.map(r => r.application_status),
