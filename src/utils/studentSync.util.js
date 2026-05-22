@@ -557,7 +557,8 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData.address?.communication?.villageOrCity || '',
       admissionData.address?.communication?.mandal || '',
       admissionData.address?.communication?.district || '',
-      admissionData.address?.communication?.pinCode || '',
+      // `pin_no` is institutional student PIN in SDMS — not address postal pinCode.
+      null,
       studentAddressLine ||
         `${admissionData.address?.communication?.doorOrStreet || ''}, ${admissionData.address?.communication?.landmark || ''}`.trim(),
       JSON.stringify(studentDataSecondary),
