@@ -1,7 +1,216 @@
+import ExcelJS from 'exceljs';
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { buildLeadNameFuzzySql } from '../utils/leadNameSearch.util.js';
+
+/** Shared filters for manager leads list + export (prefix: "l." for JOIN, "" for count). */
+const buildManagerLeadsFilterSide = (req, assigneeIds, prefix) => {
+  const conditions = [];
+  const params = [];
+  const col = (name) => `${prefix}${name}`;
+  const placeholders = assigneeIds.map(() => '?').join(',');
+  conditions.push(`${col('assigned_to')} IN (${placeholders})`);
+  params.push(...assigneeIds);
+
+  if (req.query.state) {
+    conditions.push(`${col('state')} = ?`);
+    params.push(req.query.state);
+  }
+  if (req.query.district) {
+    conditions.push(`${col('district')} = ?`);
+    params.push(req.query.district);
+  }
+  if (req.query.mandal) {
+    conditions.push(`${col('mandal')} = ?`);
+    params.push(req.query.mandal);
+  }
+  if (req.query.village) {
+    conditions.push(`${col('village')} = ?`);
+    params.push(req.query.village);
+  }
+  if (req.query.leadStatus) {
+    conditions.push(`${col('lead_status')} = ?`);
+    params.push(req.query.leadStatus);
+  }
+  if (req.query.applicationStatus) {
+    conditions.push(`${col('application_status')} = ?`);
+    params.push(req.query.applicationStatus);
+  }
+  if (req.query.courseInterested) {
+    conditions.push(`${col('course_interested')} = ?`);
+    params.push(req.query.courseInterested);
+  }
+  if (req.query.source) {
+    conditions.push(`${col('source')} = ?`);
+    params.push(req.query.source);
+  }
+  if (req.query.startDate) {
+    const start = new Date(req.query.startDate);
+    start.setHours(0, 0, 0, 0);
+    conditions.push(`${col('created_at')} >= ?`);
+    params.push(start.toISOString().slice(0, 19).replace('T', ' '));
+  }
+  if (req.query.endDate) {
+    const end = new Date(req.query.endDate);
+    end.setHours(23, 59, 59, 999);
+    conditions.push(`${col('created_at')} <= ?`);
+    params.push(end.toISOString().slice(0, 19).replace('T', ' '));
+  }
+  if (req.query.search) {
+    const searchTerm = req.query.search.trim();
+    if (searchTerm.length >= 2) {
+      const nameSql = buildLeadNameFuzzySql(col('name'), searchTerm, params);
+      if (nameSql) {
+        if (searchTerm.toUpperCase().startsWith('ENQ')) {
+          conditions.push(`(${nameSql} OR ${col('enquiry_number')} LIKE ?)`);
+          params.push(`${searchTerm}%`);
+        } else {
+          conditions.push(`(${nameSql} OR ${col('enquiry_number')} LIKE ?)`);
+          params.push(`%${searchTerm}%`);
+        }
+      }
+    }
+  }
+  if (req.query.enquiryNumber) {
+    const searchTerm = req.query.enquiryNumber.trim();
+    if (searchTerm.toUpperCase().startsWith('ENQ')) {
+      conditions.push(`${col('enquiry_number')} LIKE ?`);
+      params.push(`${searchTerm}%`);
+    } else {
+      conditions.push(`${col('enquiry_number')} LIKE ?`);
+      params.push(`%${searchTerm}%`);
+    }
+  }
+
+  return { conditions, params };
+};
+
+const resolveManagerAssigneeIds = async (pool, managerId, assignedToQuery) => {
+  const [teamMembers] = await pool.execute(
+    'SELECT id FROM users WHERE managed_by = ?',
+    [managerId]
+  );
+  const teamMemberIds = teamMembers.map((member) => member.id);
+  const allUserIds = [managerId, ...teamMemberIds];
+
+  if (!assignedToQuery) {
+    return { assigneeIds: allUserIds, invalidAssignee: false };
+  }
+
+  const assigneeId = String(assignedToQuery).trim();
+  if (!allUserIds.includes(assigneeId)) {
+    return { assigneeIds: [], invalidAssignee: true };
+  }
+  return { assigneeIds: [assigneeId], invalidAssignee: false };
+};
+
+/** Excel export column registry (keys must match frontend managerLeadsExport.ts). */
+const MANAGER_LEADS_EXPORT_COLUMNS = {
+  enquiryNumber: {
+    header: 'Enquiry Number',
+    width: 20,
+    value: (lead) => lead.enquiry_number ?? '',
+  },
+  name: { header: 'Name', width: 25, value: (lead) => lead.name ?? '' },
+  phone: { header: 'Phone', width: 15, value: (lead) => lead.phone ?? '' },
+  email: { header: 'Email', width: 25, value: (lead) => lead.email ?? '' },
+  fatherName: { header: 'Father Name', width: 20, value: (lead) => lead.father_name ?? '' },
+  fatherPhone: { header: 'Father Phone', width: 15, value: (lead) => lead.father_phone ?? '' },
+  motherName: { header: 'Mother Name', width: 20, value: (lead) => lead.mother_name ?? '' },
+  leadStatus: { header: 'Lead Status', width: 15, value: (lead) => lead.lead_status ?? '' },
+  applicationStatus: {
+    header: 'Application Status',
+    width: 18,
+    value: (lead) => lead.application_status ?? '',
+  },
+  studentGroup: {
+    header: 'Student Group',
+    width: 15,
+    value: (lead) => lead.student_group ?? '',
+  },
+  courseInterested: {
+    header: 'Course Interested',
+    width: 20,
+    value: (lead) => lead.course_interested ?? '',
+  },
+  state: { header: 'State', width: 15, value: (lead) => lead.state ?? '' },
+  district: { header: 'District', width: 15, value: (lead) => lead.district ?? '' },
+  mandal: { header: 'Mandal', width: 15, value: (lead) => lead.mandal ?? '' },
+  village: { header: 'Village', width: 20, value: (lead) => lead.village ?? '' },
+  source: { header: 'Source', width: 15, value: (lead) => lead.source ?? '' },
+  gender: { header: 'Gender', width: 10, value: (lead) => lead.gender ?? '' },
+  rank: { header: 'Rank', width: 10, value: (lead) => lead.rank ?? '' },
+  quota: { header: 'Quota', width: 12, value: (lead) => lead.quota ?? '' },
+  interCollege: {
+    header: 'Inter College',
+    width: 22,
+    value: (lead) => lead.inter_college ?? '',
+  },
+  hallTicketNumber: {
+    header: 'Hall Ticket Number',
+    width: 18,
+    value: (lead) => lead.hall_ticket_number ?? '',
+  },
+  academicYear: {
+    header: 'Academic Year',
+    width: 12,
+    value: (lead) => (lead.academic_year != null ? String(lead.academic_year) : ''),
+  },
+  assignedToName: {
+    header: 'Assigned To',
+    width: 20,
+    value: (lead) => lead.assigned_to_name || 'Unassigned',
+  },
+  notes: { header: 'Notes', width: 30, value: (lead) => lead.notes ?? '' },
+};
+
+const MANAGER_LEADS_EXPORT_COLUMN_KEYS = Object.keys(MANAGER_LEADS_EXPORT_COLUMNS);
+
+const parseRequestedExportColumns = (query) => {
+  const raw = query.columns;
+  if (!raw || String(raw).trim() === '') {
+    return MANAGER_LEADS_EXPORT_COLUMN_KEYS;
+  }
+  const keys = String(raw)
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => MANAGER_LEADS_EXPORT_COLUMNS[k]);
+  return keys.length > 0 ? keys : MANAGER_LEADS_EXPORT_COLUMN_KEYS;
+};
+
+const writeManagerLeadsExportWorkbook = async (res, leads, columnKeys) => {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('Team Leads');
+  worksheet.columns = columnKeys.map((key) => ({
+    header: MANAGER_LEADS_EXPORT_COLUMNS[key].header,
+    key,
+    width: MANAGER_LEADS_EXPORT_COLUMNS[key].width,
+  }));
+
+  leads.forEach((lead) => {
+    const row = {};
+    columnKeys.forEach((key) => {
+      row[key] = MANAGER_LEADS_EXPORT_COLUMNS[key].value(lead);
+    });
+    worksheet.addRow(row);
+  });
+
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.getRow(1).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFE0E0E0' },
+  };
+
+  res.setHeader(
+    'Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+  res.setHeader('Content-Disposition', 'attachment; filename=team_leads_export.xlsx');
+  await workbook.xlsx.write(res);
+  res.end();
+};
 
 // Helper function to format lead data (reuse from lead.controller.js pattern)
 const formatLead = (leadData, assignedToUser = null) => {
@@ -106,97 +315,26 @@ export const getManagerLeads = async (req, res) => {
       return errorResponse(res, 'Only managers can access this endpoint', 403);
     }
 
-    // Get team member IDs
-    const [teamMembers] = await pool.execute(
-      'SELECT id FROM users WHERE managed_by = ?',
-      [managerId]
+    const { assigneeIds, invalidAssignee } = await resolveManagerAssigneeIds(
+      pool,
+      managerId,
+      req.query.assignedTo
     );
-    const teamMemberIds = teamMembers.map((member) => member.id);
 
-    // Include manager's own ID in the list
-    const allUserIds = [managerId, ...teamMemberIds];
-
-    // Build WHERE conditions
-    const conditions = [];
-    const params = [];
-
-    // Assigned to manager or team members (using table alias for JOIN query)
-    const placeholders = allUserIds.map(() => '?').join(',');
-    conditions.push(`l.assigned_to IN (${placeholders})`);
-    params.push(...allUserIds);
-
-    // Apply additional filters from query params (using table alias for JOIN query)
-    if (req.query.mandal) {
-      conditions.push('l.mandal = ?');
-      params.push(req.query.mandal);
-    }
-    if (req.query.state) {
-      conditions.push('l.state = ?');
-      params.push(req.query.state);
-    }
-    if (req.query.district) {
-      conditions.push('l.district = ?');
-      params.push(req.query.district);
-    }
-    if (req.query.leadStatus) {
-      conditions.push('l.lead_status = ?');
-      params.push(req.query.leadStatus);
-    }
-    if (req.query.applicationStatus) {
-      conditions.push('l.application_status = ?');
-      params.push(req.query.applicationStatus);
-    }
-    if (req.query.courseInterested) {
-      conditions.push('l.course_interested = ?');
-      params.push(req.query.courseInterested);
-    }
-    if (req.query.source) {
-      conditions.push('l.source = ?');
-      params.push(req.query.source);
+    if (invalidAssignee) {
+      return successResponse(
+        res,
+        {
+          leads: [],
+          pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+          needsUpdateCount: 0,
+        },
+        'Leads retrieved successfully',
+        200
+      );
     }
 
-    // Date filtering (using table alias for JOIN query)
-    if (req.query.startDate) {
-      const start = new Date(req.query.startDate);
-      start.setHours(0, 0, 0, 0);
-      conditions.push('l.created_at >= ?');
-      params.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.endDate) {
-      const end = new Date(req.query.endDate);
-      end.setHours(23, 59, 59, 999);
-      conditions.push('l.created_at <= ?');
-      params.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-
-    // Search: fuzzy name (short queries) + enquiry; min 2 chars
-    if (req.query.search) {
-      const searchTerm = req.query.search.trim();
-      if (searchTerm.length >= 2) {
-        const nameSql = buildLeadNameFuzzySql('l.name', searchTerm, params);
-        if (nameSql) {
-          if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`${searchTerm}%`);
-          } else {
-            conditions.push(`(${nameSql} OR l.enquiry_number LIKE ?)`);
-            params.push(`%${searchTerm}%`);
-          }
-        }
-      }
-    }
-
-    if (req.query.enquiryNumber) {
-      const searchTerm = req.query.enquiryNumber.trim();
-      if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`${searchTerm}%`);
-      } else {
-        conditions.push('l.enquiry_number LIKE ?');
-        params.push(`%${searchTerm}%`);
-      }
-    }
-
+    const { conditions, params } = buildManagerLeadsFilterSide(req, assigneeIds, 'l.');
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
     // Pagination
@@ -204,88 +342,17 @@ export const getManagerLeads = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 50;
     const offset = (page - 1) * limit;
 
-    // Get total count (build WHERE clause without table alias for simple count query)
-    const countConditions = [];
-    const countParams = [];
-    
-    // Assigned to manager or team members
-    const countPlaceholders = allUserIds.map(() => '?').join(',');
-    countConditions.push(`assigned_to IN (${countPlaceholders})`);
-    countParams.push(...allUserIds);
-    
-    // Apply same filters but without table alias
-    if (req.query.mandal) {
-      countConditions.push('mandal = ?');
-      countParams.push(req.query.mandal);
-    }
-    if (req.query.state) {
-      countConditions.push('state = ?');
-      countParams.push(req.query.state);
-    }
-    if (req.query.district) {
-      countConditions.push('district = ?');
-      countParams.push(req.query.district);
-    }
-    if (req.query.leadStatus) {
-      countConditions.push('lead_status = ?');
-      countParams.push(req.query.leadStatus);
-    }
-    if (req.query.applicationStatus) {
-      countConditions.push('application_status = ?');
-      countParams.push(req.query.applicationStatus);
-    }
-    if (req.query.courseInterested) {
-      countConditions.push('course_interested = ?');
-      countParams.push(req.query.courseInterested);
-    }
-    if (req.query.source) {
-      countConditions.push('source = ?');
-      countParams.push(req.query.source);
-    }
-    if (req.query.startDate) {
-      const start = new Date(req.query.startDate);
-      start.setHours(0, 0, 0, 0);
-      countConditions.push('created_at >= ?');
-      countParams.push(start.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.endDate) {
-      const end = new Date(req.query.endDate);
-      end.setHours(23, 59, 59, 999);
-      countConditions.push('created_at <= ?');
-      countParams.push(end.toISOString().slice(0, 19).replace('T', ' '));
-    }
-    if (req.query.search) {
-      const searchTerm = req.query.search.trim();
-      if (searchTerm.length >= 2) {
-        const nameSql = buildLeadNameFuzzySql('name', searchTerm, countParams);
-        if (nameSql) {
-          if (searchTerm.toUpperCase().startsWith('ENQ')) {
-            countConditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
-            countParams.push(`${searchTerm}%`);
-          } else {
-            countConditions.push(`(${nameSql} OR enquiry_number LIKE ?)`);
-            countParams.push(`%${searchTerm}%`);
-          }
-        }
-      }
-    }
-    if (req.query.enquiryNumber) {
-      const searchTerm = req.query.enquiryNumber.trim();
-      if (searchTerm.toUpperCase().startsWith('ENQ')) {
-        countConditions.push('enquiry_number LIKE ?');
-        countParams.push(`${searchTerm}%`);
-      } else {
-        countConditions.push('enquiry_number LIKE ?');
-        countParams.push(`%${searchTerm}%`);
-      }
-    }
-    
+    const { conditions: countConditions, params: countParams } = buildManagerLeadsFilterSide(
+      req,
+      assigneeIds,
+      ''
+    );
     const countWhereClause = `WHERE ${countConditions.join(' AND ')}`;
     const [countResult] = await pool.execute(
       `SELECT COUNT(*) as total FROM leads ${countWhereClause}`,
       countParams
     );
-    const total = countResult[0].total;
+    const total = Number(countResult[0].total) || 0;
 
     const needsUpdateConditions = [...countConditions, 'needs_manual_update = 1'];
     const needsUpdateWhereClause = `WHERE ${needsUpdateConditions.join(' AND ')}`;
@@ -338,6 +405,53 @@ export const getManagerLeads = async (req, res) => {
   } catch (error) {
     console.error('Error getting manager leads:', error);
     return errorResponse(res, error.message || 'Failed to get leads', 500);
+  }
+};
+
+// @desc    Export manager team leads to Excel (same filters as GET /manager/leads)
+// @route   GET /api/manager/leads/export
+// @access  Private (Manager only)
+export const exportManagerLeads = async (req, res) => {
+  try {
+    if (!req.user.isManager) {
+      return errorResponse(res, 'Only managers can access this endpoint', 403);
+    }
+
+    const managerId = req.user.id || req.user._id;
+    const pool = getPool();
+    const { assigneeIds, invalidAssignee } = await resolveManagerAssigneeIds(
+      pool,
+      managerId,
+      req.query.assignedTo
+    );
+
+    const columnKeys = parseRequestedExportColumns(req.query);
+
+    if (invalidAssignee) {
+      await writeManagerLeadsExportWorkbook(res, [], columnKeys);
+      return;
+    }
+
+    const { conditions, params } = buildManagerLeadsFilterSide(req, assigneeIds, 'l.');
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const [leads] = await pool.execute(
+      `SELECT 
+        l.*,
+        u.name as assigned_to_name
+       FROM leads l
+       LEFT JOIN users u ON l.assigned_to = u.id
+       ${whereClause}
+       ORDER BY l.created_at DESC`,
+      params
+    );
+
+    await writeManagerLeadsExportWorkbook(res, leads, columnKeys);
+  } catch (error) {
+    console.error('Error exporting manager leads:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export leads', 500);
+    }
   }
 };
 

@@ -2,6 +2,7 @@ import express from 'express';
 import {
   getTeamMembers,
   getManagerLeads,
+  exportManagerLeads,
   getManagerAnalytics,
   getUnfollowedLeads,
   notifyTeam,
@@ -19,6 +20,7 @@ router.use(requireTimeTrackingEnabled);
 router.get('/team', getTeamMembers);
 
 // Get all leads (manager's + team's)
+router.get('/leads/export', exportManagerLeads);
 router.get('/leads', getManagerLeads);
 
 // Get manager analytics
