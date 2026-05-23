@@ -151,6 +151,87 @@ function normalizeAssignmentSource(source) {
   return String(source).trim();
 }
 
+/** Preferred dynamic_fields key order per source (assign → Excel export columns). */
+const SOURCE_DYNAMIC_EXPORT_ORDER = {
+  'polycet rank data': ['region', 'district_code', 'districtCode'],
+  'eamcet rank data': ['hall_ticket_number', 'hallTicketNumber', 'application_status', 'applicationStatus'],
+  'polycet': ['region'],
+};
+
+function parseLeadDynamicFieldsJson(raw) {
+  if (raw == null || raw === '') return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function dynamicFieldKeyToExportLabel(key) {
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Union of non-empty dynamic_fields keys on assigned leads; order aligned to source when provided. */
+function collectDynamicFieldColumnsForExport(leadsRows, sourceLabel) {
+  const keySet = new Set();
+  (leadsRows || []).forEach((row) => {
+    const df = parseLeadDynamicFieldsJson(row.dynamic_fields);
+    Object.entries(df).forEach(([k, v]) => {
+      if (!k) return;
+      const s = v == null ? '' : String(v).trim();
+      if (s !== '') keySet.add(k);
+    });
+  });
+  if (keySet.size === 0) return [];
+
+  const srcNorm = normalizeAssignmentSource(sourceLabel).toLowerCase();
+  const preferred = SOURCE_DYNAMIC_EXPORT_ORDER[srcNorm] || [];
+  const ordered = [];
+  preferred.forEach((k) => {
+    if (keySet.has(k)) {
+      ordered.push(k);
+      keySet.delete(k);
+    }
+  });
+  [...keySet].sort((a, b) => a.localeCompare(b)).forEach((k) => ordered.push(k));
+
+  return ordered.map((key) => ({
+    key,
+    label: dynamicFieldKeyToExportLabel(key),
+  }));
+}
+
+function formatAssignedLeadForExport(row, isProRole, dynamicFieldColumns) {
+  const dynamicFields = parseLeadDynamicFieldsJson(row.dynamic_fields);
+  const base = {
+    name: row.name,
+    phone: row.phone,
+    fatherName: row.father_name ?? '',
+    fatherPhone: row.father_phone ?? '',
+    enquiryNumber: row.enquiry_number ?? '',
+    remarks: row.notes || '',
+    rank: row.rank != null && row.rank !== '' ? row.rank : '',
+    source: row.source ?? '',
+    dynamicFields,
+  };
+  if (isProRole) {
+    Object.assign(base, {
+      district: row.district ?? '',
+      mandal: row.mandal ?? '',
+      village: row.village ?? '',
+      address: row.address ?? '',
+    });
+  }
+  return base;
+}
+
 /** Match leads.source case-insensitively; optional rank window (min 0 = no minimum, excludes NULL only when min > 0). */
 function appendSourceAndRankFilters(conditions, params, { source, minRank, maxRank }) {
   const src = normalizeAssignmentSource(source);
@@ -483,16 +564,22 @@ export const assignLeads = async (req, res) => {
 
     // Get full lead details for notification AND response (limit to 50 for email display, but we want all for export?)
     // Verify: If we assign 1000 leads, returning 1000 objects is fine.
-    const exportExtraFields = isProRole ? ', district, mandal, village, address' : '';
+    const exportExtraFields =
+      ', father_name, father_phone, enquiry_number, `rank`, source, dynamic_fields, district, mandal, village, address';
     let leadsDetails = [];
     if (successfullyAssignedLeadIds.length > 0) {
       const successPlaceholders = successfullyAssignedLeadIds.map(() => '?').join(',');
       const [rows] = await pool.execute(
-        `SELECT id, name, phone, enquiry_number, notes${exportExtraFields} FROM leads WHERE id IN (${successPlaceholders})`,
+        `SELECT id, name, phone, notes${exportExtraFields} FROM leads WHERE id IN (${successPlaceholders})`,
         successfullyAssignedLeadIds
       );
       leadsDetails = rows;
     }
+
+    const assignmentSourceNorm = normalizeAssignmentSource(source);
+    const dynamicFieldColumns = assignmentSourceNorm
+      ? collectDynamicFieldColumnsForExport(leadsDetails, assignmentSourceNorm)
+      : [];
 
     // Format for notification (limit to 50)
     const formattedLeadsNotification = leadsDetails.slice(0, 50).map(l => ({
@@ -514,21 +601,19 @@ export const assignLeads = async (req, res) => {
     });
 
     // Format for response (Include all assigned leads for Excel export; PRO gets location + address for field work)
-    const assignedLeadsForExport = leadsDetails.map((l) => {
-      const base = {
-        name: l.name,
-        phone: l.phone,
-        remarks: l.notes || '',
-      };
-      if (!isProRole) return base;
-      return {
-        ...base,
-        district: l.district ?? '',
-        mandal: l.mandal ?? '',
-        village: l.village ?? '',
-        address: l.address ?? '',
-      };
-    });
+    const assignedLeadsForExport = leadsDetails.map((l) =>
+      formatAssignedLeadForExport(l, isProRole, dynamicFieldColumns)
+    );
+
+    const exportMeta = assignmentSourceNorm
+      ? {
+          source: assignmentSourceNorm,
+          minRank: minRank != null && minRank !== '' ? Number(minRank) : null,
+          maxRank: maxRank != null && maxRank !== '' ? Number(maxRank) : null,
+          includeRankColumn: true,
+          dynamicFieldColumns,
+        }
+      : null;
 
     return successResponse(
       res,
@@ -546,6 +631,7 @@ export const assignLeads = async (req, res) => {
         mode: leadIds ? 'single' : 'bulk',
         skippedLeadIds: [...skippedProAlreadyAssignedLeadIds, ...skippedProConcurrentLeadIds],
         assignedLeads: assignedLeadsForExport,
+        exportMeta,
       },
       `Successfully assigned ${modifiedCount} lead${modifiedCount !== 1 ? 's' : ''} to ${user.name}`,
       200
