@@ -273,17 +273,17 @@ export const listTransactions = async (req, res) => {
     const conditions = [];
     const params = [];
 
-    if (leadId) {
+    // Prefer joiningId — callers often pass the joining UUID in the leadId route param.
+    if (joiningId) {
+      conditions.push('pt.joining_id = ?');
+      params.push(joiningId);
+    } else if (leadId) {
       conditions.push('pt.lead_id = ?');
       params.push(leadId);
     }
     if (admissionId) {
       conditions.push('pt.admission_id = ?');
       params.push(admissionId);
-    }
-    if (joiningId) {
-      conditions.push('pt.joining_id = ?');
-      params.push(joiningId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
