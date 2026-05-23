@@ -105,6 +105,15 @@ const resolveManagerAssigneeIds = async (pool, managerId, assignedToQuery) => {
   return { assigneeIds: [assigneeId], invalidAssignee: false };
 };
 
+const formatExportDate = (value) => {
+  if (value == null || value === '') return '';
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toISOString().replace('T', ' ').slice(0, 19);
+};
+
+const formatExportYesNo = (value) => (value === 1 || value === true ? 'Yes' : value === 0 || value === false ? 'No' : '');
+
 /** Excel export column registry (keys must match frontend managerLeadsExport.ts). */
 const MANAGER_LEADS_EXPORT_COLUMNS = {
   enquiryNumber: {
@@ -114,11 +123,23 @@ const MANAGER_LEADS_EXPORT_COLUMNS = {
   },
   name: { header: 'Name', width: 25, value: (lead) => lead.name ?? '' },
   phone: { header: 'Phone', width: 15, value: (lead) => lead.phone ?? '' },
+  alternateMobile: {
+    header: 'Alternate Mobile',
+    width: 15,
+    value: (lead) => lead.alternate_mobile ?? '',
+  },
   email: { header: 'Email', width: 25, value: (lead) => lead.email ?? '' },
   fatherName: { header: 'Father Name', width: 20, value: (lead) => lead.father_name ?? '' },
   fatherPhone: { header: 'Father Phone', width: 15, value: (lead) => lead.father_phone ?? '' },
   motherName: { header: 'Mother Name', width: 20, value: (lead) => lead.mother_name ?? '' },
+  address: { header: 'Address', width: 35, value: (lead) => lead.address ?? '' },
+  village: { header: 'Village', width: 20, value: (lead) => lead.village ?? '' },
+  mandal: { header: 'Mandal', width: 15, value: (lead) => lead.mandal ?? '' },
+  district: { header: 'District', width: 15, value: (lead) => lead.district ?? '' },
+  state: { header: 'State', width: 15, value: (lead) => lead.state ?? '' },
   leadStatus: { header: 'Lead Status', width: 15, value: (lead) => lead.lead_status ?? '' },
+  callStatus: { header: 'Call Status', width: 15, value: (lead) => lead.call_status ?? '' },
+  visitStatus: { header: 'Visit Status', width: 15, value: (lead) => lead.visit_status ?? '' },
   applicationStatus: {
     header: 'Application Status',
     width: 18,
@@ -134,11 +155,6 @@ const MANAGER_LEADS_EXPORT_COLUMNS = {
     width: 20,
     value: (lead) => lead.course_interested ?? '',
   },
-  state: { header: 'State', width: 15, value: (lead) => lead.state ?? '' },
-  district: { header: 'District', width: 15, value: (lead) => lead.district ?? '' },
-  mandal: { header: 'Mandal', width: 15, value: (lead) => lead.mandal ?? '' },
-  village: { header: 'Village', width: 20, value: (lead) => lead.village ?? '' },
-  source: { header: 'Source', width: 15, value: (lead) => lead.source ?? '' },
   gender: { header: 'Gender', width: 10, value: (lead) => lead.gender ?? '' },
   rank: { header: 'Rank', width: 10, value: (lead) => lead.rank ?? '' },
   quota: { header: 'Quota', width: 12, value: (lead) => lead.quota ?? '' },
@@ -157,12 +173,51 @@ const MANAGER_LEADS_EXPORT_COLUMNS = {
     width: 12,
     value: (lead) => (lead.academic_year != null ? String(lead.academic_year) : ''),
   },
+  admissionNumber: {
+    header: 'Admission Number',
+    width: 18,
+    value: (lead) => lead.admission_number ?? '',
+  },
+  isNri: {
+    header: 'NRI',
+    width: 8,
+    value: (lead) => formatExportYesNo(lead.is_nri),
+  },
   assignedToName: {
-    header: 'Assigned To',
+    header: 'Assigned Counsellor',
     width: 20,
     value: (lead) => lead.assigned_to_name || 'Unassigned',
   },
-  notes: { header: 'Notes', width: 30, value: (lead) => lead.notes ?? '' },
+  assignedToProName: {
+    header: 'Assigned PRO',
+    width: 20,
+    value: (lead) => lead.assigned_to_pro_name || '',
+  },
+  cycleNumber: {
+    header: 'Cycle Number',
+    width: 12,
+    value: (lead) => (lead.cycle_number != null ? String(lead.cycle_number) : ''),
+  },
+  assignedAt: {
+    header: 'Assigned At',
+    width: 20,
+    value: (lead) => formatExportDate(lead.assigned_at),
+  },
+  counsellorTargetDate: {
+    header: 'Counsellor Target Date',
+    width: 18,
+    value: (lead) => formatExportDate(lead.counsellor_target_date),
+  },
+  proTargetDate: {
+    header: 'PRO Target Date',
+    width: 18,
+    value: (lead) => formatExportDate(lead.pro_target_date),
+  },
+  targetDate: {
+    header: 'Target Date',
+    width: 18,
+    value: (lead) => formatExportDate(lead.target_date),
+  },
 };
 
 const MANAGER_LEADS_EXPORT_COLUMN_KEYS = Object.keys(MANAGER_LEADS_EXPORT_COLUMNS);
@@ -438,9 +493,11 @@ export const exportManagerLeads = async (req, res) => {
     const [leads] = await pool.execute(
       `SELECT 
         l.*,
-        u.name as assigned_to_name
+        u.name as assigned_to_name,
+        pro_u.name as assigned_to_pro_name
        FROM leads l
        LEFT JOIN users u ON l.assigned_to = u.id
+       LEFT JOIN users pro_u ON l.assigned_to_pro = pro_u.id
        ${whereClause}
        ORDER BY l.created_at DESC`,
       params
