@@ -23,6 +23,30 @@ const DEFAULT_GENERAL_RESERVATION = 'oc';
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
 
+/** Last 10 digits for Indian mobile numbers. */
+const normalizeMobileDigits = (value) =>
+  String(value ?? '')
+    .replace(/\D/g, '')
+    .slice(-10);
+
+const PREFERRED_MOBILE_REG_KEYS = [
+  'preferred_mobile_number',
+  'preferred_mobile',
+  'preferred_mobileno',
+  'preferred_contact_number',
+  'preferred_phone',
+  'preferred_phone_number',
+];
+
+/** SMS / contact: explicit preferred number, else student mobile. */
+const resolveContactMobileNumber = (studentInfo) => {
+  const preferred = normalizeMobileDigits(studentInfo?.preferredMobileNumber);
+  if (preferred.length === 10) return preferred;
+  const student = normalizeMobileDigits(studentInfo?.phone);
+  if (student.length === 10) return student;
+  return '';
+};
+
 /** Raw UI / student-DB course or branch id for `managed_*` columns (no FK to primary catalog). */
 const normalizeManagedIdForDb = (value) => {
   if (value === undefined || value === null) return null;
@@ -547,6 +571,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     studentInfo: {
       name: joiningData.student_name || '',
       phone: joiningData.student_phone || '',
+      preferredMobileNumber: joiningData.preferred_mobile_number || '',
       gender: joiningData.student_gender || '',
       dateOfBirth: joiningData.student_date_of_birth || '',
       notes: joiningData.student_notes || '',
@@ -962,6 +987,7 @@ export const getJoining = async (req, res) => {
         studentInfo: {
           name: '',
           phone: '',
+          preferredMobileNumber: '',
           gender: '',
           dateOfBirth: '',
           notes: 'As per SSC for no issues',
@@ -1272,6 +1298,18 @@ const normalizeJoiningPayload = (payload) => {
   if (safePayload.studentInfo) {
     safePayload.studentInfo.name = sanitizeString(safePayload.studentInfo.name);
     safePayload.studentInfo.phone = sanitizeString(safePayload.studentInfo.phone);
+    const preferredFromPayload = normalizeMobileDigits(
+      safePayload.studentInfo.preferredMobileNumber
+    );
+    const preferredFromReg = pickFromRegistrationFormData(
+      rawRegForMerge,
+      PREFERRED_MOBILE_REG_KEYS
+    );
+    const preferredResolved = normalizeMobileDigits(
+      preferredFromPayload || preferredFromReg
+    );
+    safePayload.studentInfo.preferredMobileNumber =
+      preferredResolved.length === 10 ? preferredResolved : '';
     safePayload.studentInfo.gender = sanitizeString(safePayload.studentInfo.gender);
     safePayload.studentInfo.dateOfBirth = sanitizeString(
       safePayload.studentInfo.dateOfBirth
@@ -1918,6 +1956,7 @@ export const saveJoiningDraft = async (req, res) => {
         mother_name = ?,
         mother_phone = ?,
         mother_aadhaar_number = ?,
+        preferred_mobile_number = ?,
         father_photo = ?,
         mother_photo = ?,
         reservation_general = ?,
@@ -1981,6 +2020,10 @@ export const saveJoiningDraft = async (req, res) => {
         parents.mother?.name || '',
         parents.mother?.phone || '',
         parents.mother?.aadhaarNumber || null,
+        (() => {
+          const p = normalizeMobileDigits(studentInfo?.preferredMobileNumber);
+          return p.length === 10 ? p : null;
+        })(),
         fatherPhotoForRow,
         motherPhotoForRow,
         reservation.general || DEFAULT_GENERAL_RESERVATION,
@@ -2630,7 +2673,7 @@ export const approveJoining = async (req, res) => {
           course_id = ?, branch_id = ?, managed_course_id = ?, managed_branch_id = ?, course = ?, branch = ?, quota = ?,
           student_name = ?, student_phone = ?, student_gender = ?, student_date_of_birth = ?, student_notes = ?, student_aadhaar_number = ?,
           father_name = ?, father_phone = ?, father_aadhaar_number = ?, father_photo = ?,
-          mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?, mother_photo = ?,
+          mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?, preferred_mobile_number = ?, mother_photo = ?,
           reservation_general = ?, reservation_other = ?,
           address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?,
           qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_merit = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
@@ -2666,6 +2709,10 @@ export const approveJoining = async (req, res) => {
           formattedJoining.parents?.mother?.name || '',
           formattedJoining.parents?.mother?.phone || '',
           formattedJoining.parents?.mother?.aadhaarNumber || null,
+          (() => {
+            const p = normalizeMobileDigits(formattedJoining.studentInfo?.preferredMobileNumber);
+            return p.length === 10 ? p : null;
+          })(),
           String(formattedJoining.parents?.mother?.photo || '').trim() || null,
           formattedJoining.reservation?.general || 'oc',
           JSON.stringify(formattedJoining.reservation?.other || []),
@@ -2709,7 +2756,7 @@ export const approveJoining = async (req, res) => {
           course_id, branch_id, managed_course_id, managed_branch_id, course, branch, quota,
           student_name, student_phone, student_gender, student_date_of_birth, student_notes, student_aadhaar_number,
           father_name, father_phone, father_aadhaar_number, father_photo,
-          mother_name, mother_phone, mother_aadhaar_number, mother_photo,
+          mother_name, mother_phone, mother_aadhaar_number, preferred_mobile_number, mother_photo,
           reservation_general, reservation_other,
           address_door_street, address_landmark, address_village_city, address_mandal, address_district, address_pin_code,
           qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_merit, qualification_mediums, qualification_other_medium_label,
@@ -2719,7 +2766,7 @@ export const approveJoining = async (req, res) => {
           document_bank_passbook, document_ration_card,
           reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -2748,6 +2795,10 @@ export const approveJoining = async (req, res) => {
           formattedJoining.parents?.mother?.name || '', // 23
           formattedJoining.parents?.mother?.phone || '', // 24
           formattedJoining.parents?.mother?.aadhaarNumber || null, // 25
+          (() => {
+            const p = normalizeMobileDigits(formattedJoining.studentInfo?.preferredMobileNumber);
+            return p.length === 10 ? p : null;
+          })(), // preferred_mobile_number
           String(formattedJoining.parents?.mother?.photo || '').trim() || null, // 26
           formattedJoining.reservation?.general || 'oc', // 27
           JSON.stringify(formattedJoining.reservation?.other || []), // 28
@@ -2842,7 +2893,9 @@ export const approveJoining = async (req, res) => {
     // failures never roll back the admission.
     {
       const studentPhone =
-        formattedJoining?.studentInfo?.phone || lead?.phone || '';
+        resolveContactMobileNumber(formattedJoining?.studentInfo) ||
+        normalizeMobileDigits(lead?.phone) ||
+        '';
       const studentName =
         formattedJoining?.studentInfo?.name || lead?.name || 'Student';
       if (studentPhone && admissionNumber) {

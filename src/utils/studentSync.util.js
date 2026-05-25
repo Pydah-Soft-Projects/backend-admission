@@ -541,6 +541,17 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData?.parents?.mother?.photo ||
       registrationExtras?.mother_photo;
 
+    const preferredMobileForSecondary = (() => {
+      const preferred = String(admissionData.studentInfo?.preferredMobileNumber ?? '')
+        .replace(/\D/g, '')
+        .slice(-10);
+      if (preferred.length === 10) return preferred;
+      const student = String(admissionData.studentInfo?.phone ?? '')
+        .replace(/\D/g, '')
+        .slice(-10);
+      return student.length === 10 ? student : null;
+    })();
+
     const studentParams = [
       resolvedAdmissionNumber,
       resolvedAdmissionNumber,
@@ -563,6 +574,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         `${admissionData.address?.communication?.doorOrStreet || ''}, ${admissionData.address?.communication?.landmark || ''}`.trim(),
       JSON.stringify(studentDataSecondary),
       admissionData.parents?.mother?.phone || '',
+      preferredMobileForSecondary,
       toNullableText(resolvedBatch),
       resolvedCollegeName ||
         toNullableText(registrationExtras?.school_or_college_name) ||
@@ -601,6 +613,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           student_address = ?,
           student_data = ?,
           parent_mobile2 = ?,
+          preferred_mobile_number = ?,
           batch = ?,
           college = ?,
           stud_type = ?,
@@ -642,6 +655,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           student_address,
           student_data,
           parent_mobile2,
+          preferred_mobile_number,
           batch,
           college,
           stud_type,
@@ -658,7 +672,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           updated_at,
           admission_date,
           student_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
         studentParams
       );
       console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);

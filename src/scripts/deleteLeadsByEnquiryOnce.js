@@ -11,6 +11,8 @@
  */
 import dotenv from 'dotenv';
 import { getPool } from '../config-sql/database.js';
+import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+import { JOINING_STUDENT_FEE_MONGO_COLLECTION } from '../services/joiningStudentFeeMongoSync.service.js';
 
 dotenv.config();
 
@@ -49,13 +51,26 @@ async function main() {
 
   const leadIds = leadRows.map((r) => r.id);
 
+  const leadIdPh = leadIds.map(() => '?').join(',');
+
   const [joiningRows] = await pool.execute(
     `SELECT id, lead_id, status
      FROM joinings
-     WHERE lead_id IN (${leadIds.map(() => '?').join(',')})`,
+     WHERE lead_id IN (${leadIdPh})`,
     leadIds
   );
-  const joiningIds = joiningRows.map((r) => r.id);
+
+  const [orphanJoiningRows] = await pool.execute(
+    `SELECT j.id, j.lead_id, j.status
+     FROM joinings j
+     WHERE JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.enquiryNumber')) IN (${ph})
+       AND (j.lead_id IS NULL OR j.lead_id NOT IN (${leadIdPh}))`,
+    [...ENQUIRIES, ...leadIds]
+  );
+
+  const joiningIds = [
+    ...new Set([...joiningRows, ...orphanJoiningRows].map((r) => r.id)),
+  ];
 
   // Admissions can link by lead_id OR enquiry_number (lead_id may be NULL after lead deletions).
   const [admissionRows] = await pool.execute(
@@ -72,6 +87,7 @@ async function main() {
         requested: ENQUIRIES,
         matchedLeads: leadRows,
         matchedJoinings: joiningRows,
+        matchedOrphanJoinings: orphanJoiningRows,
         matchedAdmissions: admissionRows,
       },
       null,
@@ -103,6 +119,8 @@ async function main() {
     if (joiningIds.length > 0) {
       for (const ids of chunk(joiningIds, 200)) {
         const p = ids.map(() => '?').join(',');
+        // payment_transactions.joining_id is ON DELETE CASCADE; explicit delete is safe if FK differs.
+        await conn.execute(`DELETE FROM payment_transactions WHERE joining_id IN (${p})`, ids);
         await conn.execute(`DELETE FROM joinings WHERE id IN (${p})`, ids);
       }
     }
@@ -122,12 +140,31 @@ async function main() {
     }
 
     await conn.commit();
-    console.log(JSON.stringify({ deletedLeadIds: leadIds, deletedJoiningIds: joiningIds, deletedAdmissionIds: admissionIds }, null, 2));
+    console.log(
+      JSON.stringify(
+        { deletedLeadIds: leadIds, deletedJoiningIds: joiningIds, deletedAdmissionIds: admissionIds },
+        null,
+        2
+      )
+    );
   } catch (e) {
     await conn.rollback();
     throw e;
   } finally {
     conn.release();
+  }
+
+  const uri = process.env.FEE_MANAGEMENT_MONGO_URI?.trim();
+  if (uri && joiningIds.length > 0) {
+    try {
+      const m = await connectFeeManagement();
+      const mr = await m.db
+        .collection(JOINING_STUDENT_FEE_MONGO_COLLECTION)
+        .deleteMany({ joiningId: { $in: joiningIds } });
+      console.log(JSON.stringify({ feeMongoDeleted: mr.deletedCount }, null, 2));
+    } catch (e) {
+      console.warn(e?.message || e);
+    }
   }
 }
 

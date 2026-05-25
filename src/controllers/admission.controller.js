@@ -347,6 +347,34 @@ const reconcileAdmissionCourseInfoFromRow = async (row) => {
   return enrichAdmissionCourseInfoFromSecondary(base);
 };
 
+/** Managed course ids under a secondary `colleges.id` (for admission filters). */
+const loadManagedCourseIdsForCollege = async (collegeId) => {
+  const id = String(collegeId ?? '').trim();
+  if (!id) return null;
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [rows] = await secondaryPool.execute(
+      'SELECT id FROM courses WHERE college_id = ?',
+      [id]
+    );
+    return (rows || []).map((r) => String(r.id ?? '').trim()).filter(Boolean);
+  } catch (err) {
+    console.error('loadManagedCourseIdsForCollege failed:', err?.message || err);
+    return [];
+  }
+};
+
+const appendManagedCollegeCourseFilter = (conditions, params, courseIdExpr, managedCourseIds) => {
+  if (managedCourseIds === null) return;
+  if (managedCourseIds.length === 0) {
+    conditions.push('1 = 0');
+    return;
+  }
+  const placeholders = managedCourseIds.map(() => '?').join(', ');
+  conditions.push(`${courseIdExpr} IN (${placeholders})`);
+  params.push(...managedCourseIds);
+};
+
 const loadSecondaryCourseBranchLabelMaps = async () => {
   const courses = new Map();
   const branches = new Map();
@@ -401,6 +429,43 @@ const resolveStatsBranchDisplayName = (row, secondaryLabels, intakeBranchLabels)
     if (fromCatalog) return fromCatalog;
   }
   return String(row.branchName || '').trim();
+};
+
+/** Lead-group / 2026 import labels — not secondary catalog course names. */
+const GENERIC_IMPORT_COURSE_LABELS = new Set([
+  'degree',
+  'diploma',
+  'inter',
+  '10th',
+  '10+2',
+  'others',
+  'dap-ptv',
+]);
+
+const isGenericImportCourseLabel = (name) => {
+  const n = String(name || '').trim().toLowerCase();
+  return !n || GENERIC_IMPORT_COURSE_LABELS.has(n);
+};
+
+/** Prefer secondary `courses.name` when admission text is a generic import label (e.g. "Degree"). */
+const resolveStatsCourseDisplayName = (row, secondaryLabels) => {
+  const courseId = String(row.courseId || '').trim();
+  const fromStored = String(row.courseName || '').trim();
+  let label = fromStored;
+  if (courseId) {
+    const fromCatalog = secondaryLabels.courses.get(courseId);
+    if (!fromCatalog) {
+      label = fromStored;
+    } else if (!fromStored || isGenericImportCourseLabel(fromStored)) {
+      label = fromCatalog;
+    } else if (/\(lateral\)/i.test(fromStored) && !/\(lateral\)/i.test(fromCatalog)) {
+      label = fromStored;
+    } else {
+      label = fromCatalog;
+    }
+  }
+  const lateral = Number(row.lateralTrack) === 1;
+  return resolveBtechCourseDisplayName(label, lateral) || label;
 };
 
 const syncLinkedJoiningCourseInfo = async (pool, joiningId, courseInfo, userId) => {
@@ -703,6 +768,7 @@ export const formatAdmission = async (admissionData, pool) => {
     studentInfo: {
       name: admissionData.student_name || '',
       phone: admissionData.student_phone || '',
+      preferredMobileNumber: admissionData.preferred_mobile_number || '',
       gender: admissionData.student_gender || '',
       dateOfBirth: admissionData.student_date_of_birth || '',
       notes: admissionData.student_notes || '',
@@ -1110,7 +1176,12 @@ export const listAdmissions = async (req, res) => {
       page = 1,
       limit = 20,
       search = '',
-      status, courseId, branchId, courseName, branchName,
+      status,
+      collegeId,
+      courseId,
+      branchId,
+      courseName,
+      branchName,
     } = req.query;
 
     const pool = getPool();
@@ -1126,6 +1197,13 @@ export const listAdmissions = async (req, res) => {
       conditions.push('a.status = ?');
       params.push(status);
     }
+    const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
+    appendManagedCollegeCourseFilter(
+      conditions,
+      params,
+      SQL_A_EFF_COURSE_ID,
+      collegeCourseIds
+    );
     if (courseId || courseName) {
       if (courseId && courseName) {
         conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
@@ -2151,10 +2229,18 @@ export const patchAdmissionReferenceById = async (req, res) => {
 
 export const getAdmissionStats = async (req, res) => {
   try {
-    const { startDate, endDate, courseId, branchId, courseName, branchName } = req.query;
+    const { startDate, endDate, collegeId, courseId, branchId, courseName, branchName } =
+      req.query;
     const pool = getPool();
     const conditions = [];
     const params = [];
+    const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
+    appendManagedCollegeCourseFilter(
+      conditions,
+      params,
+      SQL_EFF_COURSE_ID,
+      collegeCourseIds
+    );
     if (startDate) {
       conditions.push('DATE(COALESCE(admission_date, created_at)) >= ?');
       params.push(String(startDate).slice(0, 10));
@@ -2224,8 +2310,11 @@ export const getAdmissionStats = async (req, res) => {
     const branchIntakeMap = await loadBranchIntakeMap();
     const secondaryLabels = await loadSecondaryCourseBranchLabelMaps();
     const intakeBranchLabels = await loadAdmissionBranchIntakeLabelMap(pool);
-    const courseStats = stats.map((course) => ({
+    const courseStats = stats.map((course) => {
+      const courseName = resolveStatsCourseDisplayName(course, secondaryLabels);
+      return {
       ...course,
+      courseName: courseName || course.courseName,
       branches: branchStats
         .filter(
           (b) =>
@@ -2239,8 +2328,10 @@ export const getAdmissionStats = async (req, res) => {
             secondaryLabels,
             intakeBranchLabels
           );
+          const branchCourseName = resolveStatsCourseDisplayName(b, secondaryLabels);
           return {
             ...b,
+            courseName: branchCourseName || courseName || b.courseName,
             branchName: branchName || b.branchName,
             cqIntake: intake.cqIntake ?? null,
             mqIntake: intake.mqIntake ?? null,
@@ -2254,7 +2345,8 @@ export const getAdmissionStats = async (req, res) => {
             meritNo: Number(b.meritNo) || 0,
           };
         }),
-    }));
+    };
+    });
     return successResponse(res, { stats: courseStats }, 'Admission stats retrieved successfully', 200);
   } catch (error) {
     console.error('Error getting admission stats:', error);
@@ -2319,10 +2411,11 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
  * Shared filters for admission pivot reports (alias `a`).
  * When status is omitted or `all`, excludes "Admission Cancelled" to match course-wise stats.
  */
-const buildAdmissionPivotFilters = (query) => {
+const buildAdmissionPivotFilters = async (query) => {
   const {
     startDate,
     endDate,
+    collegeId,
     courseId,
     branchId,
     courseName,
@@ -2332,6 +2425,14 @@ const buildAdmissionPivotFilters = (query) => {
   const conditions = [];
   const params = [];
   const c = (field) => `a.${field}`;
+
+  const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
+  appendManagedCollegeCourseFilter(
+    conditions,
+    params,
+    SQL_A_EFF_COURSE_ID,
+    collegeCourseIds
+  );
 
   if (startDate) {
     conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) >= ?`);
@@ -2459,10 +2560,13 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
     const idStr =
       rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '__none__';
     const fromAdmissionText = String(row.courseName || '').trim();
+    const catalogName = idToSecondaryName.get(idStr) || '';
     const label =
       idStr === '__none__'
         ? '—'
-        : fromAdmissionText || idToSecondaryName.get(idStr) || 'Unknown';
+        : isGenericImportCourseLabel(fromAdmissionText) && catalogName
+          ? catalogName
+          : fromAdmissionText || catalogName || 'Unknown';
     const k = idStr === '__none__' ? '__none__' : normalizeAdmissionCourseColumnName(label);
     addToBucket(k, label, idStr);
     if (idStr !== '__none__') assignedCourseIds.add(idStr);
@@ -2560,7 +2664,7 @@ export const listDistinctReferenceNames = async (req, res) => {
 export const getAdmissionStatsByReference = async (req, res) => {
   try {
     const pool = getPool();
-    const { conditions, params } = buildAdmissionPivotFilters(req.query);
+    const { conditions, params } = await buildAdmissionPivotFilters(req.query);
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
@@ -2642,7 +2746,7 @@ export const getAdmissionStatsByReference = async (req, res) => {
 export const getAdmissionStatsByDate = async (req, res) => {
   try {
     const pool = getPool();
-    const { conditions, params } = buildAdmissionPivotFilters(req.query);
+    const { conditions, params } = await buildAdmissionPivotFilters(req.query);
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
@@ -2707,25 +2811,33 @@ export const getAdmissionStatsByDate = async (req, res) => {
 export const exportAdmissions = async (req, res) => {
   try {
     const pool = getPool();
-    const { 
-      search, 
-      status, 
-      startDate, 
-      endDate, 
-      courseId, 
+    const {
+      search,
+      status,
+      collegeId,
+      startDate,
+      endDate,
+      courseId,
       branchId,
       courseName,
-      branchName
+      branchName,
     } = req.query;
 
     const conditions = [];
     const params = [];
 
-
     if (status && status !== 'all') {
       conditions.push('a.status = ?');
       params.push(status);
     }
+
+    const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
+    appendManagedCollegeCourseFilter(
+      conditions,
+      params,
+      SQL_A_EFF_COURSE_ID,
+      collegeCourseIds
+    );
 
     if (courseId || courseName) {
       if (courseId && courseName) {

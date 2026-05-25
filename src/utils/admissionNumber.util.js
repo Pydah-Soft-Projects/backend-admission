@@ -1,8 +1,34 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getPool } from '../config-sql/database.js';
 
+const formatAdmissionNumber = (yearPrefix, sequenceNumber) =>
+  `${yearPrefix}${String(sequenceNumber).padStart(4, '0')}`;
+
+/**
+ * Lowest unused sequence for the year (fills gaps when a number was removed).
+ */
+export async function findNextAdmissionSequenceNumber(executor, year = new Date().getFullYear()) {
+  const db = executor || getPool();
+  const yearPrefix = String(year);
+
+  const [rows] = await db.execute(
+    `SELECT CAST(SUBSTRING(admission_number, 5) AS UNSIGNED) AS seq
+     FROM admissions
+     WHERE admission_number LIKE ?`,
+    [`${yearPrefix}%`]
+  );
+
+  const used = new Set(rows.map((r) => Number(r.seq)));
+  let candidate = 1;
+  while (used.has(candidate)) {
+    candidate += 1;
+  }
+  return candidate;
+}
+
 /**
  * Next admission number for the current calendar year (e.g. 20260057).
+ * Reuses the lowest gap (e.g. 20260098) before incrementing past the current max.
  * Must run inside an open transaction on `executor` when approving joinings so
  * a rollback does not leave burned sequence values.
  *
@@ -18,16 +44,7 @@ export async function generateAdmissionNumber(executor) {
     [currentYear]
   );
 
-  const [maxRows] = await db.execute(
-    `SELECT MAX(CAST(SUBSTRING(admission_number, 5) AS UNSIGNED)) AS max_seq
-     FROM admissions
-     WHERE admission_number LIKE ?`,
-    [`${yearPrefix}%`]
-  );
-
-  const maxFromAdmissions = Number(maxRows[0]?.max_seq || 0);
-  const lastFromSequence = sequences.length > 0 ? Number(sequences[0].last_sequence || 0) : 0;
-  const sequenceNumber = Math.max(maxFromAdmissions, lastFromSequence) + 1;
+  const sequenceNumber = await findNextAdmissionSequenceNumber(db, currentYear);
 
   if (sequences.length > 0) {
     await db.execute(
@@ -41,7 +58,7 @@ export async function generateAdmissionNumber(executor) {
     );
   }
 
-  return `${yearPrefix}${String(sequenceNumber).padStart(4, '0')}`;
+  return formatAdmissionNumber(yearPrefix, sequenceNumber);
 }
 
 /**
