@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import bulkSmsService from '../services/bulkSms.service.js';
 import axios from 'axios';
 import { connectHRMS } from '../config-mongo/hrms.js';
+import { matchHrmsEmployeePassword } from '../utils/employeePasswordAuth.util.js';
 
 
 
@@ -73,42 +74,57 @@ export const login = async (req, res) => {
       return errorResponse(res, 'Your account has been deactivated', 403);
     }
 
-    // Check if password matches
+    // Password: CRM MySQL users table and/or HRMS Mongo (users collection, then employees)
     let isMatch = false;
+    let sqlMatch = false;
+    let hrmsMatch = false;
 
-    if (userData.emp_no) {
-      console.log('Authenticating via HRMS for emp_no:', userData.emp_no);
+    const hasEmployeeLink =
+      (userData.emp_no != null && String(userData.emp_no).trim() !== '') ||
+      (userData.hrms_id != null && String(userData.hrms_id).trim() !== '');
+
+    if (userData.password) {
+      sqlMatch = await bcrypt.compare(password, userData.password);
+    }
+
+    if (hasEmployeeLink) {
+      console.log('Authenticating HRMS-linked user:', {
+        emp_no: userData.emp_no,
+        hrms_id: userData.hrms_id,
+      });
+
       try {
         const hrmsConn = await connectHRMS();
-        const Employee = hrmsConn.models.employees || hrmsConn.model('employees', new hrmsConn.base.Schema({}, { strict: false }));
-        
-        // Find employee by emp_no
-        const employee = await Employee.findOne({ emp_no: userData.emp_no });
-        
-        if (!employee) {
-          console.log('Employee not found in HRMS:', userData.emp_no);
-          return errorResponse(res, 'Invalid credentials (HRMS)', 401);
-        }
-
-        // Check password - assuming it's also hashed with bcrypt in HRMS
-        // If not, we might need to adjust this.
-        if (employee.password) {
-          isMatch = await bcrypt.compare(password, employee.password);
-        } else {
-          console.error('No password found for employee in HRMS:', userData.emp_no);
-          return errorResponse(res, 'HRMS Authentication Error', 500);
+        const hrmsResult = await matchHrmsEmployeePassword(hrmsConn, {
+          plainPassword: password,
+          emp_no: userData.emp_no,
+          hrms_id: userData.hrms_id,
+        });
+        hrmsMatch = hrmsResult.matched;
+        if (hrmsMatch) {
+          console.log(`Authenticated via HRMS mongo (${hrmsResult.collection})`);
+        } else if (hrmsResult.reason === 'not_found') {
+          console.log('User/employee not found in HRMS mongo:', userData.emp_no || userData.hrms_id);
+        } else if (hrmsResult.reason === 'no_password') {
+          console.log(
+            `No password on HRMS ${hrmsResult.collection} record:`,
+            userData.emp_no || userData.hrms_id
+          );
         }
       } catch (hrmsError) {
         console.error('HRMS Login Error:', hrmsError);
-        return errorResponse(res, 'HRMS Connection failed', 500);
+      }
+
+      isMatch = sqlMatch || hrmsMatch;
+      if (!isMatch && !userData.password && !hrmsMatch) {
+        console.log('No valid password in CRM users or HRMS mongo (users/employees)');
       }
     } else {
-      // Legacy SQL Authentication
       if (!userData.password) {
         console.error('User has no password set:', userData.email);
         return errorResponse(res, 'Database error: User password not found', 500);
       }
-      isMatch = await bcrypt.compare(password, userData.password);
+      isMatch = sqlMatch;
     }
 
     if (!isMatch) {

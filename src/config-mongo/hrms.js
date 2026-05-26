@@ -27,8 +27,8 @@ const getHRMSConnection = () => {
 };
 
 /**
- * Open HRMS Mongo as soon as the API boots (non-blocking). First HRMS hydrate avoids cold connect.
- * Safe to call multiple times; connectHRMS is idempotent after first success.
+ * HRMS Mongo (HRMS_MONGO_URI): org data in `employees`; login passwords in `users` (then `employees` fallback).
+ * Open as soon as the API boots (non-blocking). Safe to call multiple times; connectHRMS is idempotent.
  */
 export const warmupHrmsMongo = () => {
   const uri = process.env.HRMS_MONGO_URI?.trim();
