@@ -9,7 +9,9 @@ export const mapCourseLabel = (course) => {
   if (/^polytechnic$/i.test(c)) return 'Diploma';
   if (/^diploma\s*technical$/i.test(c)) return 'Diploma';
   if (/^b\.?\s*tech\s*le$/i.test(c)) return 'B.Tech';
-  return c;
+  if (/^degree$/i.test(c)) return 'B.Sc';
+  if (/^b\.?\s*sc$/i.test(c)) return 'B.Sc';
+  return c.replace(/\s*\(lateral\)\s*/gi, '').trim();
 };
 
 const STATIC_BRANCH = {
@@ -63,6 +65,8 @@ export const SECONDARY_COURSE_BRANCH_IDS = {
   'DIPLOMA|DMEC': { courseId: '2', branchId: '53' },
   'DEGREE|AGRICULTURE & RURAL DEVELOPMENT': { courseId: '4', branchId: '46' },
   'DEGREE|FISHERIES': { courseId: '4', branchId: '47' },
+  'B.SC|AGRICULTURE & RURAL DEVELOPMENT': { courseId: '4', branchId: '46' },
+  'B.SC|FISHERIES': { courseId: '4', branchId: '47' },
   'DAP-PTV|DAP': { courseId: '17', branchId: '198' },
   'DEGREE PVRT|DAP': { courseId: '17', branchId: '198' },
   'M.PHARM|PHARMACEUTICAL QUALITY ASSURANCE': { courseId: '10', branchId: '64' },

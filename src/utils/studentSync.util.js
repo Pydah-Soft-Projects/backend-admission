@@ -1,9 +1,14 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import {
+  deriveAdmissionSeriesYear,
+  isBtechCourseName,
   isLateralRegistrationExtras,
+  normalizeCourseNameForSecondarySync,
   resolveExpectedBatchYear,
+  resolveSecondarySemesterForSync,
   resolveSecondaryYearOfStudy,
 } from './lateralBatch.util.js';
 
@@ -224,23 +229,61 @@ const isUuidLike = (value) =>
 
 /** @see resolveExpectedBatchYear — respects B.Tech lateral (2026 admission no, 2025 batch). */
 export const resolveSecondaryStudentBatch = (registrationExtras, admissionNumber) => {
+  const lateral =
+    isLateralRegistrationExtras(registrationExtras, admissionNumber) ||
+    /lateral/i.test(
+      String(registrationExtras?.student_status ?? registrationExtras?.studentStatus ?? '').trim()
+    );
+  const expected = resolveExpectedBatchYear(registrationExtras, admissionNumber);
+
+  if (lateral && expected && !isUuidLike(expected) && /^(19|20)\d{2}$/.test(expected)) {
+    return expected;
+  }
+
   const fromBatch =
     registrationExtras?.batch != null && String(registrationExtras.batch).trim() !== ''
       ? String(registrationExtras.batch).trim()
       : null;
 
   if (fromBatch && !isUuidLike(fromBatch) && /^(19|20)\d{2}$/.test(fromBatch)) {
-    const expected = resolveExpectedBatchYear(registrationExtras, admissionNumber);
     if (!expected || fromBatch === expected) return fromBatch;
-    if (isLateralRegistrationExtras(registrationExtras, admissionNumber)) {
-      return expected;
-    }
+    if (lateral) return expected;
     return expected;
   }
 
-  const expected = resolveExpectedBatchYear(registrationExtras, admissionNumber);
   if (expected && !isUuidLike(expected)) return expected;
   return null;
+};
+
+/**
+ * Secondary `students.course` must match catalog names (B.Tech, B.Sc, …) — not UI labels like "B.Tech (LATERAL)".
+ */
+export const resolveSecondaryCourseNameForSync = async (
+  secondaryPool,
+  { managedCourseId, courseLabel, registrationExtras, admissionNumber }
+) => {
+  const courseId = Number.parseInt(
+    String(managedCourseId ?? registrationExtras?.managed_course_id ?? '').trim(),
+    10
+  );
+  if (Number.isFinite(courseId)) {
+    try {
+      const [rows] = await secondaryPool.execute(
+        'SELECT name FROM courses WHERE id = ? LIMIT 1',
+        [courseId]
+      );
+      if (rows.length > 0 && rows[0].name != null) {
+        const catalogName = String(rows[0].name).trim();
+        if (catalogName) return normalizeCourseNameForSecondarySync(catalogName);
+      }
+    } catch (err) {
+      console.warn('[secondary-sync] courses lookup failed:', err?.message || err);
+    }
+  }
+
+  const raw = String(courseLabel || '').trim();
+  const mapped = mapCourseLabel(normalizeCourseNameForSecondarySync(raw));
+  return mapped || normalizeCourseNameForSecondarySync(raw) || raw;
 };
 
 export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './lateralBatch.util.js';
@@ -467,17 +510,43 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     };
 
     const reservationGeneral = toText(admissionData?.reservation?.general).toUpperCase();
-    const currentYearFromExtras =
+    const courseLabelRaw = admissionData?.courseInfo?.course || '';
+    const courseLabelNorm = normalizeCourseNameForSecondarySync(courseLabelRaw);
+    const isDegreeProgram =
+      /^degree$/i.test(String(courseLabelRaw).trim()) ||
+      /^b\.?\s*sc$/i.test(courseLabelNorm);
+    const lateralSignals =
+      isLateralRegistrationExtras(registrationExtras, resolvedAdmissionNumber) ||
+      /lateral/i.test(
+        String(registrationExtras?.student_status ?? registrationExtras?.studentStatus ?? '').trim()
+      ) ||
+      /lateral/i.test(String(admissionData?.courseInfo?.quota ?? '').trim()) ||
+      /\(lateral\)/i.test(String(courseLabelRaw));
+    const btechLateralForSync = isBtechCourseName(courseLabelNorm) && lateralSignals && !isDegreeProgram;
+
+    let currentYearFromExtras =
       resolveSecondaryYearOfStudy(registrationExtras) ??
       parseCurrentYear(registrationExtras?.current_year) ??
       parseCurrentYear(registrationExtras?.currentYear);
+    if (isDegreeProgram) {
+      currentYearFromExtras = currentYearFromExtras ?? 1;
+    } else if (currentYearFromExtras == null && btechLateralForSync) {
+      currentYearFromExtras = 2;
+    }
     const certificatesStatus = deriveCertificatesStatus(registrationExtras);
     const secondaryStudentStatus = deriveSecondaryStudentStatus(
       admissionData?.status,
       registrationExtras
     );
     const studType = deriveStudTypeFromQuota(admissionData?.courseInfo?.quota, registrationExtras);
-    const resolvedBatch = resolveSecondaryStudentBatch(registrationExtras, resolvedAdmissionNumber);
+    let resolvedBatch = isDegreeProgram
+      ? deriveAdmissionSeriesYear(resolvedAdmissionNumber) || '2026'
+      : resolveSecondaryStudentBatch(registrationExtras, resolvedAdmissionNumber);
+    const resolvedSemester = resolveSecondarySemesterForSync(
+      registrationExtras,
+      resolvedAdmissionNumber,
+      courseLabelRaw
+    );
     const normalizedDob = normalizeDobForSecondary(admissionData?.studentInfo?.dateOfBirth);
     const certificationCompat = deriveCertificationDialogCompat(certificatesStatus, registrationExtras);
 
@@ -523,6 +592,16 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       [resolvedAdmissionNumber]
     );
 
+    const resolvedSecondaryCourse = await resolveSecondaryCourseNameForSync(secondaryPool, {
+      managedCourseId:
+        admissionData?.courseInfo?.courseId ??
+        registrationExtras?.managed_course_id ??
+        registrationExtras?.managedCourseId,
+      courseLabel: admissionData?.courseInfo?.course || '',
+      registrationExtras,
+      admissionNumber: resolvedAdmissionNumber,
+    });
+
     const { payload: studentDataSecondary, studentAddressLine } = buildStudentDataForSecondaryStorage(
       admissionData,
       resolvedAdmissionNumber,
@@ -532,6 +611,22 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       certificationCompat,
       resolvedCollegeId
     );
+    if (resolvedSemester) {
+      studentDataSecondary.semester = resolvedSemester;
+      studentDataSecondary.current_semester = resolvedSemester;
+    }
+    if (resolvedBatch) {
+      studentDataSecondary.batch = resolvedBatch;
+      studentDataSecondary.academic_year = resolvedBatch;
+    }
+    if (btechLateralForSync) {
+      studentDataSecondary.student_status = 'Lateral';
+      const seriesYear = deriveAdmissionSeriesYear(resolvedAdmissionNumber);
+      if (seriesYear) {
+        studentDataSecondary._lateral_intake_year = String(Number(seriesYear) - 1);
+      }
+    }
+    studentDataSecondary._crm_secondary_course = resolvedSecondaryCourse;
 
     const fatherPhotoExtracted =
       admissionData?.parents?.father?.photo ||
@@ -562,7 +657,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData.parents?.father?.name || '',
       admissionData.parents?.father?.phone || '',
       extraInfo.email || '',
-      admissionData.courseInfo?.course || '',
+      resolvedSecondaryCourse,
       admissionData.courseInfo?.branch || '',
       admissionData.studentInfo?.gender || '',
       admissionData.address?.communication?.villageOrCity || '',
