@@ -13,6 +13,7 @@ import {
   mergeQuotaOptionLabels,
   quotaNamesFromCatalog,
 } from '../utils/studentQuotas.util.js';
+import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
@@ -1424,6 +1425,19 @@ export const updateLead = async (req, res) => {
       updateValues.push(0);
     }
 
+    const callMarkedConfirmed =
+      callStatus !== undefined && isCallStatusConfirmedValue(nextCall);
+    if (callMarkedConfirmed) {
+      await applyReference1OnCallStatusConfirm(
+        pool,
+        currentLead,
+        updateFields,
+        updateValues,
+        dynamicFields,
+        userId
+      );
+    }
+
     // Execute update
     if (updateFields.length > 0) {
       updateFields.push('updated_at = NOW()');
@@ -1464,17 +1478,41 @@ export const updateLead = async (req, res) => {
     // Log lead_status change (not from assignment row above)
     if (resolvedLead !== currentLead.lead_status && !assignmentChanged) {
       const activityLogId = uuidv4();
+      const statusMeta = {};
+      if (callStatus !== undefined) {
+        statusMeta.statusChannel = 'call_status';
+        statusMeta.callStatus = nextCall;
+      } else if (visitStatus !== undefined) {
+        statusMeta.statusChannel = 'visit_status';
+        statusMeta.visitStatus = nextVisit;
+      } else if (newLeadStatus) {
+        statusMeta.statusChannel = 'lead_status';
+      }
+      const hasMeta = Object.keys(statusMeta).length > 0;
       await pool.execute(
-        `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, performed_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-        [
-          activityLogId,
-          req.params.id,
-          'status_change',
-          currentLead.lead_status,
-          resolvedLead,
-          userId,
-        ]
+        hasMeta
+          ? `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, performed_by, metadata, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`
+          : `INSERT INTO activity_logs (id, lead_id, type, old_status, new_status, performed_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        hasMeta
+          ? [
+              activityLogId,
+              req.params.id,
+              'status_change',
+              currentLead.lead_status,
+              resolvedLead,
+              userId,
+              JSON.stringify(statusMeta),
+            ]
+          : [
+              activityLogId,
+              req.params.id,
+              'status_change',
+              currentLead.lead_status,
+              resolvedLead,
+              userId,
+            ]
       );
     }
 
