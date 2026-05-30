@@ -393,27 +393,53 @@ const formatUser = (userData) => {
   };
 };
 
+const buildAssignedCounsellorFromSqlRow = (row) => {
+  if (!row?.assigned_to_id) return null;
+  const roleName = row.assigned_to_role_name || undefined;
+  const designation = row.assigned_to_designation || undefined;
+  return {
+    id: row.assigned_to_id,
+    _id: row.assigned_to_id,
+    name: row.assigned_to_name,
+    email: row.assigned_to_email,
+    roleName,
+    designation,
+    /** Confirmed-leads table legacy field — show role when department is absent. */
+    department: roleName || designation || undefined,
+  };
+};
+
+const buildAssignedProFromSqlRow = (row) => {
+  if (!row?.assigned_to_pro_id) return null;
+  const roleName = row.assigned_to_pro_role_name || undefined;
+  const designation = row.assigned_to_pro_designation || undefined;
+  return {
+    id: row.assigned_to_pro_id,
+    _id: row.assigned_to_pro_id,
+    name: row.assigned_to_pro_name,
+    email: row.assigned_to_pro_email,
+    roleName,
+    designation,
+    department: roleName || designation || undefined,
+  };
+};
+
+const ASSIGNED_USER_SQL_SELECT = `
+        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
+        u1.role_name as assigned_to_role_name, u1.designation as assigned_to_designation,
+        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
+        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email,
+        u3.role_name as assigned_to_pro_role_name, u3.designation as assigned_to_pro_designation`;
+
 /** Raw row from leads + user joins (same shape as getLeads main SELECT). */
 function buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday) {
-  const assignedToUser = lead.assigned_to_id ? {
-    id: lead.assigned_to_id,
-    _id: lead.assigned_to_id,
-    name: lead.assigned_to_name,
-    email: lead.assigned_to_email,
-  } : null;
-
+  const assignedToUser = buildAssignedCounsellorFromSqlRow(lead);
   const uploadedByUser = lead.uploaded_by_id ? {
     id: lead.uploaded_by_id,
     _id: lead.uploaded_by_id,
     name: lead.uploaded_by_name,
   } : null;
-
-  const assignedToProUser = lead.assigned_to_pro_id ? {
-    id: lead.assigned_to_pro_id,
-    _id: lead.assigned_to_pro_id,
-    name: lead.assigned_to_pro_name,
-    email: lead.assigned_to_pro_email,
-  } : null;
+  const assignedToProUser = buildAssignedProFromSqlRow(lead);
 
   const formattedLead = formatLead(lead, assignedToUser, uploadedByUser, assignedToProUser, {
     viewerRoleName: req.user.roleName,
@@ -512,9 +538,7 @@ export const getLeads = async (req, res) => {
         l.visit_status, l.academic_year, l.student_group, l.admission_number, l.assigned_at, 
         l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
         l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
-        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
-        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
+        ${ASSIGNED_USER_SQL_SELECT}
       FROM (
         SELECT l.id
         FROM leads l
@@ -565,9 +589,7 @@ export const getLeads = async (req, res) => {
             l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
             l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
             DATE_FORMAT(DATE_SUB(DATE(l.next_scheduled_call), INTERVAL 1 DAY), '%Y-%m-%d') AS missed_schedule_prev_day,
-            u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-            u2.id as uploaded_by_id, u2.name as uploaded_by_name,
-            u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
+            ${ASSIGNED_USER_SQL_SELECT}
           FROM leads l
           LEFT JOIN users u1 ON l.assigned_to = u1.id
           LEFT JOIN users u2 ON l.uploaded_by = u2.id
@@ -634,9 +656,7 @@ export const getLead = async (req, res) => {
     const [leads] = await pool.execute(
       `SELECT 
         l.*,
-        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
-        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
+        ${ASSIGNED_USER_SQL_SELECT}
       FROM leads l
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
@@ -683,25 +703,13 @@ export const getLead = async (req, res) => {
       return errorResponse(res, 'Access denied', 403);
     }
 
-    const assignedToUser = leadData.assigned_to_id ? {
-      id: leadData.assigned_to_id,
-      _id: leadData.assigned_to_id,
-      name: leadData.assigned_to_name,
-      email: leadData.assigned_to_email,
-    } : null;
-
+    const assignedToUser = buildAssignedCounsellorFromSqlRow(leadData);
     const uploadedByUser = leadData.uploaded_by_id ? {
       id: leadData.uploaded_by_id,
       _id: leadData.uploaded_by_id,
       name: leadData.uploaded_by_name,
     } : null;
-
-    const assignedToProUser = leadData.assigned_to_pro_id ? {
-      id: leadData.assigned_to_pro_id,
-      _id: leadData.assigned_to_pro_id,
-      name: leadData.assigned_to_pro_name,
-      email: leadData.assigned_to_pro_email,
-    } : null;
+    const assignedToProUser = buildAssignedProFromSqlRow(leadData);
 
     const lead = formatLead(leadData, assignedToUser, uploadedByUser, assignedToProUser, {
       viewerRoleName: req.user.roleName,
@@ -1580,9 +1588,7 @@ export const updateLead = async (req, res) => {
     const [updatedLeads] = await pool.execute(
       `SELECT 
         l.*,
-        u1.id as assigned_to_id, u1.name as assigned_to_name, u1.email as assigned_to_email,
-        u2.id as uploaded_by_id, u2.name as uploaded_by_name,
-        u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email
+        ${ASSIGNED_USER_SQL_SELECT}
       FROM leads l
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
@@ -1591,25 +1597,13 @@ export const updateLead = async (req, res) => {
       [req.params.id]
     );
 
-    const assignedToUser = updatedLeads[0].assigned_to_id ? {
-      id: updatedLeads[0].assigned_to_id,
-      _id: updatedLeads[0].assigned_to_id,
-      name: updatedLeads[0].assigned_to_name,
-      email: updatedLeads[0].assigned_to_email,
-    } : null;
-
+    const assignedToUser = buildAssignedCounsellorFromSqlRow(updatedLeads[0]);
     const uploadedByUser = updatedLeads[0].uploaded_by_id ? {
       id: updatedLeads[0].uploaded_by_id,
       _id: updatedLeads[0].uploaded_by_id,
       name: updatedLeads[0].uploaded_by_name,
     } : null;
-
-    const assignedToProUser = updatedLeads[0].assigned_to_pro_id ? {
-      id: updatedLeads[0].assigned_to_pro_id,
-      _id: updatedLeads[0].assigned_to_pro_id,
-      name: updatedLeads[0].assigned_to_pro_name,
-      email: updatedLeads[0].assigned_to_pro_email,
-    } : null;
+    const assignedToProUser = buildAssignedProFromSqlRow(updatedLeads[0]);
 
     const lead = formatLead(updatedLeads[0], assignedToUser, uploadedByUser, assignedToProUser, {
       viewerRoleName: req.user.roleName,
