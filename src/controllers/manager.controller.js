@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { canonicalizeLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { buildLeadNameFuzzySql } from '../utils/leadNameSearch.util.js';
 
@@ -295,7 +296,7 @@ const formatLead = (leadData, assignedToUser = null) => {
     dynamicFields: typeof leadData.dynamic_fields === 'string' 
       ? JSON.parse(leadData.dynamic_fields) 
       : leadData.dynamic_fields || {},
-    leadStatus: leadData.lead_status || 'New',
+    leadStatus: canonicalizeLeadStatus(leadData.lead_status || 'New'),
     admissionNumber: leadData.admission_number,
     assignedTo: assignedToUser || leadData.assigned_to,
     assignedAt: leadData.assigned_at,

@@ -16,12 +16,25 @@
  * - Confirmed
  */
 
-const normalize = (v) => String(v ?? '').trim().toLowerCase();
+const normalize = (v) =>
+  String(v ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
 
 export const isInterestedValue = (v) => {
   const s = normalize(v);
   return s === 'interested' || s === 'cet applied' || s === 'cet_applied';
 };
+
+/** Map free-text / legacy values to canonical lead_status (case-insensitive). */
+export function canonicalizeLeadStatus(status) {
+  const mapped = mapChannelStatusToLeadStatus(status);
+  if (mapped) return mapped;
+  const trimmed = String(status ?? '').trim();
+  return trimmed || 'New';
+}
 
 function mapChannelStatusToLeadStatus(status) {
   const s = normalize(status);
@@ -80,7 +93,7 @@ export function isPipelineNewLeadStatus(leadStatus) {
 export function resolveLeadStatus(desiredLeadStatus, callStatus, visitStatus) {
   const mappedCall = mapChannelStatusToLeadStatus(callStatus);
   const mappedVisit = mapChannelStatusToLeadStatus(visitStatus);
-  const current = String(desiredLeadStatus ?? '').trim();
+  const current = canonicalizeLeadStatus(desiredLeadStatus);
 
   // 1. Get the best status from active channel updates
   let bestChannel = null;
@@ -98,5 +111,5 @@ export function resolveLeadStatus(desiredLeadStatus, callStatus, visitStatus) {
   }
 
   // 3. Fallback to current or default
-  return current || 'New';
+  return canonicalizeLeadStatus(current || 'New');
 }

@@ -7,7 +7,11 @@ import { generateEnquiryNumber } from '../utils/generateEnquiryNumber.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { notifyLeadCreated } from '../services/notification.service.js';
 import { buildLeadNameFuzzySql, buildLeadSearchPhoneOrSql } from '../utils/leadNameSearch.util.js';
-import { resolveLeadStatus, isPipelineNewLeadStatus } from '../utils/leadChannelStatus.util.js';
+import {
+  resolveLeadStatus,
+  isPipelineNewLeadStatus,
+  canonicalizeLeadStatus,
+} from '../utils/leadChannelStatus.util.js';
 import {
   fetchActiveStudentQuotas,
   mergeQuotaOptionLabels,
@@ -362,7 +366,7 @@ const formatLead = (leadData, assignedToUser = null, uploadedByUser = null, assi
     dynamicFields: typeof leadData.dynamic_fields === 'string'
       ? JSON.parse(leadData.dynamic_fields)
       : leadData.dynamic_fields || {},
-    leadStatus: leadData.lead_status || 'New',
+    leadStatus: canonicalizeLeadStatus(leadData.lead_status || 'New'),
     ...(viewerRole !== 'PRO' ? { callStatus } : {}),
     ...(viewerRole !== 'Student Counselor' ? { visitStatus } : {}),
     admissionNumber: leadData.admission_number,
@@ -2227,7 +2231,7 @@ export const getFilterOptions = async (req, res) => {
       villages: villages.map((r) => r.village),
       states: states.map(r => r.state),
       quotas: mergeQuotaOptionLabels(catalogQuotas, legacyQuotas),
-      leadStatuses: leadStatuses.map(r => r.lead_status),
+      leadStatuses: [...new Set(leadStatuses.map((r) => canonicalizeLeadStatus(r.lead_status)))].sort(),
       sources: [...new Set(sources.map((r) => String(r.source || '').trim()).filter(Boolean))].sort(),
       callStatuses: callStatuses.map(r => r.call_status),
       visitStatuses: visitStatuses.map(r => r.visit_status),
@@ -2383,7 +2387,7 @@ export const exportLeads = async (req, res) => {
         name: lead.name,
         phone: lead.phone,
         email: lead.email,
-        leadStatus: lead.lead_status,
+        leadStatus: canonicalizeLeadStatus(lead.lead_status),
         district: lead.district,
         mandal: lead.mandal,
         village: lead.village,

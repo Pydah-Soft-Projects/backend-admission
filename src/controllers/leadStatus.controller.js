@@ -3,6 +3,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { v4 as uuidv4 } from 'uuid';
 import { logStatusChangePerformance } from '../services/userPerformance.service.js';
+import { canonicalizeLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 // Helper function to format lead status log
 const formatStatusLog = (logData, changedByUser = null) => {
@@ -26,10 +27,11 @@ export const updateLeadStatus = async (req, res) => {
     const leadId = req.params.id;
     const pool = getPool();
     const userId = req.user.id || req.user._id;
+    const canonicalStatus = canonicalizeLeadStatus(status);
 
     // Validate status
     const validStatuses = ['New', 'Interested', 'Not Interested', 'Partial'];
-    if (!status || !validStatuses.includes(status)) {
+    if (!status || !validStatuses.includes(canonicalStatus)) {
       return errorResponse(res, 'Invalid status. Must be one of: New, Interested, Not Interested, Partial', 400);
     }
 
@@ -61,7 +63,7 @@ export const updateLeadStatus = async (req, res) => {
     // Update lead status
     await pool.execute(
       'UPDATE leads SET lead_status = ?, last_follow_up = NOW(), updated_at = NOW() WHERE id = ?',
-      [status, leadId]
+      [canonicalStatus, leadId]
     );
 
     // Add to status logs
@@ -69,13 +71,13 @@ export const updateLeadStatus = async (req, res) => {
     await pool.execute(
       `INSERT INTO lead_status_logs (id, lead_id, status, comment, changed_by, changed_at)
        VALUES (?, ?, ?, ?, ?, NOW())`,
-      [statusLogId, leadId, status, comment || '', userId]
+      [statusLogId, leadId, canonicalStatus, comment || '', userId]
     );
 
     // Track performance (increment handled leads and update status breakdown)
     const [fullLead] = await pool.execute('SELECT academic_year, student_group FROM leads WHERE id = ?', [leadId]);
     if (fullLead.length > 0) {
-      logStatusChangePerformance(userId, fullLead[0], status);
+      logStatusChangePerformance(userId, fullLead[0], canonicalStatus);
     }
 
     // Fetch updated lead with status logs
@@ -126,9 +128,9 @@ export const updateLeadStatus = async (req, res) => {
       res,
       {
         lead: formattedLead,
-        statusChanged: oldStatus !== status,
+        statusChanged: oldStatus !== canonicalStatus,
         oldStatus,
-        newStatus: status,
+        newStatus: canonicalStatus,
       },
       'Status updated successfully',
       200
