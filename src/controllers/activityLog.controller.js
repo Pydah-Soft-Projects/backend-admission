@@ -2,6 +2,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
+import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // Helper function to format activity log data
@@ -176,6 +177,12 @@ export const addActivity = async (req, res) => {
 
     // Update lead if modified
     if (leadModified) {
+      const callMarkedConfirmed =
+        metadata.statusChannel === 'call_status' &&
+        isCallStatusConfirmedValue(metadata.callStatus ?? newStatus);
+      if (callMarkedConfirmed) {
+        await applyReference1OnCallStatusConfirm(pool, lead, updateFields, updateValues, null, userId);
+      }
       updateFields.push('updated_at = NOW()');
       updateValues.push(leadId);
       await pool.execute(

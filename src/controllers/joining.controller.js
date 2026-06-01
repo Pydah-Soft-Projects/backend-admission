@@ -17,6 +17,12 @@ import {
   MOTHER_PHOTO_REG_KEYS,
 } from '../utils/joiningParentPhotos.util.js';
 import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
+import {
+  buildJoiningLeadDataSnapshot,
+  backfillJoiningReferenceFromLead,
+  resolveReference1ForLead,
+  readReference1FromDynamicFields,
+} from '../utils/joiningReference.util.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -106,7 +112,13 @@ const ensureLeadExists = async (leadId) => {
 
   const pool = getPool();
   const [leads] = await pool.execute(
-    'SELECT * FROM leads WHERE id = ?',
+    `SELECT l.*,
+            u.id AS assigned_to_user_id,
+            u.name AS assigned_to_name,
+            u.email AS assigned_to_email
+     FROM leads l
+     LEFT JOIN users u ON l.assigned_to = u.id
+     WHERE l.id = ?`,
     [leadId]
   );
 
@@ -152,6 +164,14 @@ const formatLead = (leadData) => {
     dynamicFields: typeof leadData.dynamic_fields === 'string'
       ? JSON.parse(leadData.dynamic_fields)
       : leadData.dynamic_fields || {},
+    assignedTo: leadData.assigned_to_user_id
+      ? {
+          id: leadData.assigned_to_user_id,
+          _id: leadData.assigned_to_user_id,
+          name: leadData.assigned_to_name,
+          email: leadData.assigned_to_email,
+        }
+      : undefined,
     createdAt: leadData.created_at,
     updatedAt: leadData.updated_at,
   };
@@ -924,10 +944,7 @@ export async function ensureJoiningDraftForLead(leadId, userId) {
     throw err;
   }
 
-  const leadDataSnapshot = { ...lead };
-  delete leadDataSnapshot._id;
-  delete leadDataSnapshot.id;
-  delete leadDataSnapshot.__v;
+  const leadDataSnapshot = await buildJoiningLeadDataSnapshot(pool, lead);
 
   const joiningId = uuidv4();
   await pool.execute(
@@ -1104,11 +1121,7 @@ export const getJoining = async (req, res) => {
     }
 
     if (!joiningDoc && lead) {
-      // Store complete lead data snapshot
-      const leadDataSnapshot = { ...lead };
-      delete leadDataSnapshot._id;
-      delete leadDataSnapshot.id;
-      delete leadDataSnapshot.__v;
+      const leadDataSnapshot = await buildJoiningLeadDataSnapshot(pool, lead);
       
       const joiningId = uuidv4();
       await pool.execute(
@@ -1152,6 +1165,15 @@ export const getJoining = async (req, res) => {
         userId: req.user.id,
         description: 'Joining draft created automatically',
       });
+    }
+
+    if (joiningDoc && lead) {
+      await backfillJoiningReferenceFromLead(pool, joiningDoc, lead);
+      const reference1 = await resolveReference1ForLead(pool, lead);
+      if (reference1 && !readReference1FromDynamicFields(lead.dynamicFields)) {
+        lead.dynamicFields = { ...(lead.dynamicFields || {}), reference1 };
+        lead.reference1 = reference1;
+      }
     }
 
     const formattedJoining = joiningDoc ? await formatJoining(joiningDoc, pool) : null;
@@ -1635,10 +1657,7 @@ export const saveJoiningDraft = async (req, res) => {
           // Create new joining for this lead
           joiningIdToUse = uuidv4();
           isNewRecord = true;
-          const leadDataSnapshot = lead ? { ...lead } : {};
-          delete leadDataSnapshot._id;
-          delete leadDataSnapshot.id;
-          delete leadDataSnapshot.__v;
+          const leadDataSnapshot = await buildJoiningLeadDataSnapshot(pool, lead);
 
           await pool.execute(
             `INSERT INTO joinings (id, lead_id, lead_data, status, reservation_general, reservation_other,
@@ -1786,10 +1805,7 @@ export const saveJoiningDraft = async (req, res) => {
         /* ignore parse errors */
       }
 
-      const leadDataSnapshot = { ...lead };
-      delete leadDataSnapshot._id;
-      delete leadDataSnapshot.id;
-      delete leadDataSnapshot.__v;
+      const leadDataSnapshot = await buildJoiningLeadDataSnapshot(pool, lead);
 
       const mergedRegistrationExtras = {
         ...preservedRegistrationExtras,

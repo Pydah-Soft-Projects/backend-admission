@@ -92,15 +92,21 @@ export const resolveExpectedBatchYear = (registrationExtras, admissionNumber) =>
   const lateral = isLateralRegistrationExtras(registrationExtras, admissionNumber);
 
   if (lateral) {
-    return (
-      pickFourDigitYear(
-        registrationExtras?.current_year,
-        registrationExtras?.currentYear,
-        registrationExtras?.batch,
-        registrationExtras?.academic_year,
-        registrationExtras?.academicYear
-      ) ?? (seriesYear ? String(Number(seriesYear) - 1) : null)
+    const seriesNum = Number(seriesYear);
+    const fromExtras = pickFourDigitYear(
+      registrationExtras?.batch,
+      registrationExtras?.academic_year,
+      registrationExtras?.academicYear,
+      registrationExtras?.current_year,
+      registrationExtras?.currentYear
     );
+    if (fromExtras && Number.isFinite(seriesNum)) {
+      const n = Number(fromExtras);
+      if (n === seriesNum - 1) return String(n);
+      // Extras sometimes store admission-cycle year (2026) instead of intake batch (2025).
+      if (n === seriesNum) return String(seriesNum - 1);
+    }
+    return seriesYear ? String(seriesNum - 1) : null;
   }
 
   return (
@@ -182,7 +188,7 @@ export const SQL_IS_BTECH_COURSE_NAME = `(
   AND LOWER(TRIM(COALESCE(course, ''))) NOT REGEXP 'm[.]?[[:space:]]*tech'
 )`;
 
-/** Lateral B.Tech track from registration extras + admission number (matches JS helper). */
+/** Lateral B.Tech track — registration extras, quota, or stored course label. */
 export const SQL_IS_BTECH_LATERAL_ADMISSION = `(
   ${SQL_IS_BTECH_COURSE_NAME}
   AND (
@@ -193,10 +199,55 @@ export const SQL_IS_BTECH_LATERAL_ADMISSION = `(
       AND ${SQL_REG_INTAKE_YEAR} IS NOT NULL
       AND ${SQL_REG_INTAKE_YEAR} = ${SQL_ADMISSION_SERIES_YEAR} - 1
     )
+    OR UPPER(TRIM(COALESCE(quota, ''))) LIKE '%LATERAL%ENTRY%'
+    OR UPPER(TRIM(COALESCE(quota, ''))) = 'LATERAL ENTRY'
+    OR LOWER(TRIM(COALESCE(course, ''))) LIKE '%(lateral)%'
   )
 )`;
 
 export const SQL_BTECH_LATERAL_TRACK = `(CASE WHEN ${SQL_IS_BTECH_LATERAL_ADMISSION} THEN 1 ELSE 0 END)`;
+
+/**
+ * Course string for secondary `students.course` — catalog names only (no "(LATERAL)" suffix).
+ */
+export const normalizeCourseNameForSecondarySync = (courseName) => {
+  let label = String(courseName ?? '').trim();
+  if (!label) return '';
+  label = label.replace(/\s*\(lateral\)\s*/gi, '').trim();
+  if (/^degree$/i.test(label)) return 'B.Sc';
+  if (/^b\.?\s*tech\s*le$/i.test(label)) return 'B.Tech';
+  if (isBtechCourseName(label)) return label.replace(/\s*\(lateral\)\s*/gi, '').trim() || 'B.Tech';
+  return label;
+};
+
+/** Semester token for student_data (e.g. 2-1 for B.Tech lateral only). */
+export const resolveSecondarySemesterForSync = (
+  registrationExtras,
+  admissionNumber,
+  courseLabel = ''
+) => {
+  const sem = String(
+    registrationExtras?.semester ??
+      registrationExtras?.current_semester ??
+      registrationExtras?.currentSemester ??
+      registrationExtras?.semister ??
+      ''
+  ).trim();
+  if (sem) return sem;
+
+  const baseCourse = normalizeCourseNameForSecondarySync(courseLabel);
+  if (/^b\.?\s*sc$/i.test(baseCourse) || /^degree$/i.test(String(courseLabel || '').trim())) {
+    return '1-1';
+  }
+
+  if (
+    isBtechCourseName(baseCourse) &&
+    isLateralRegistrationExtras(registrationExtras, admissionNumber)
+  ) {
+    return '2-1';
+  }
+  return null;
+};
 
 export const SQL_COURSE_DISPLAY_NAME = `MAX(
   CASE

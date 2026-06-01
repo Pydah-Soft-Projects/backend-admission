@@ -13,6 +13,8 @@ import {
   MOTHER_PHOTO_REG_KEYS,
 } from '../utils/joiningParentPhotos.util.js';
 import {
+  formatBtechCourseDisplayName,
+  isBtechCourseName,
   resolveBtechCourseDisplayName,
   SQL_BTECH_LATERAL_TRACK,
   SQL_COURSE_DISPLAY_NAME,
@@ -465,7 +467,10 @@ const resolveStatsCourseDisplayName = (row, secondaryLabels) => {
     }
   }
   const lateral = Number(row.lateralTrack) === 1;
-  return resolveBtechCourseDisplayName(label, lateral) || label;
+  if (isBtechCourseName(label)) {
+    return formatBtechCourseDisplayName(label, lateral) || label;
+  }
+  return label;
 };
 
 const syncLinkedJoiningCourseInfo = async (pool, joiningId, courseInfo, userId) => {
