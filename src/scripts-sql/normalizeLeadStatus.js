@@ -136,22 +136,26 @@ async function run() {
   const mappedDesiredSql = buildCaseSql('lead_status', leadMap, 'NULL');
   const resolvedLeadSql = buildResolvedLeadSql(mappedCallSql, mappedVisitSql, mappedDesiredSql);
 
-  const pool = mysql.createPool({
+  const port = Number(process.env.DB_PORT) || 3306;
+  const dbConfig = {
     host,
-    port: Number(process.env.DB_PORT) || 3306,
+    port,
     user,
     password: process.env.DB_PASSWORD,
     database,
-    waitForConnections: true,
-    connectionLimit: 1,
     connectTimeout: 25000,
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-  });
+  };
+
+  let connection;
 
   try {
     console.log(DRY ? 'Mode: DRY-RUN (no writes)' : 'Mode: APPLY (writes enabled)');
+    console.log(`Connecting to ${host}:${port}/${database}...`);
+    connection = await mysql.createConnection(dbConfig);
+    console.log('Connected.\n');
 
-    const [distinctBefore] = await pool.query(`
+    const [distinctBefore] = await connection.query(`
       SELECT lead_status AS v, COUNT(*) AS cnt
       FROM leads
       GROUP BY lead_status
@@ -161,7 +165,7 @@ async function run() {
     console.log('\nTop distinct existing lead_status values (up to 200 groups):');
     console.table(distinctBefore);
 
-    const [previewRows] = await pool.query(`
+    const [previewRows] = await connection.query(`
       SELECT
         lead_status AS old_lead_status,
         (${mappedCallSql}) AS mapped_call_status,
@@ -177,7 +181,7 @@ async function run() {
     console.log('\nPlanned lead_status changes (grouped by old + mapped channel statuses):');
     console.table(previewRows);
 
-    const [countRows] = await pool.query(`
+    const [countRows] = await connection.query(`
       SELECT COUNT(*) AS cnt
       FROM leads
       WHERE COALESCE(lead_status, '') <> COALESCE((${resolvedLeadSql}), '')
@@ -195,7 +199,7 @@ async function run() {
       return;
     }
 
-    const [ur] = await pool.query(`
+    const [ur] = await connection.query(`
       UPDATE leads
       SET lead_status = (${resolvedLeadSql}),
           updated_at = NOW()
@@ -205,13 +209,20 @@ async function run() {
     console.log('\nApply complete.');
   } catch (e) {
     console.error('Script failed:', e.message || e);
+    if (String(e.message || '').includes('ENOTFOUND')) {
+      console.error(
+        `Hint: DNS could not resolve DB_HOST (${host}). Use the same host as addLeadListPerformanceIndexes.js, connect via VPN if RDS is private, or run this script on the app server (EC2/SSM).`
+      );
+    }
     if (String(e.message || '').includes('REGEXP_REPLACE')) {
       console.error('Hint: REGEXP_REPLACE requires MySQL 8+.');
     }
     process.exitCode = 1;
   } finally {
-    await pool.end();
-    console.log('Connection closed.');
+    if (connection) {
+      await connection.end();
+      console.log('Connection closed.');
+    }
   }
 }
 

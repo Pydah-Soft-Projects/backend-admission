@@ -8,6 +8,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { findBestMatch } from '../utils/fuzzyMatch.util.js';
 import { v4 as uuidv4 } from 'uuid';
+import { canonicalizeLeadStatus } from '../utils/leadChannelStatus.util.js';
 
 const UPLOAD_SESSION_TTL_MS = 1000 * 60 * 30; // 30 minutes
 const PREVIEW_ROW_LIMIT = 10;
@@ -1007,7 +1008,7 @@ const processImportJob = async (jobId) => {
         source: toTrimmedString(normalizedLead.source) || job.source_label || 'Bulk Upload',
         uploadedBy: job.created_by,
         uploadBatchId: job.upload_batch_id,
-        leadStatus: toTrimmedString(normalizedLead.leadStatus) || 'New',
+        leadStatus: canonicalizeLeadStatus(toTrimmedString(normalizedLead.leadStatus) || 'New'),
         academicYear: normalizedLead.academicYear !== undefined ? normalizedLead.academicYear : null,
         isNRI: normalizedLead.isNRI === true || String(normalizedLead.isNRI).toLowerCase() === 'true',
         studentGroup: normalizedLead.studentGroup || 'Not Specified',
