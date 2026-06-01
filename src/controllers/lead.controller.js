@@ -85,6 +85,19 @@ const leadSqlDateToYmd = (v) => {
   return s.length >= 10 ? s.slice(0, 10) : undefined;
 };
 
+/** Calendar-day range [start, end) for DATETIME filters — index-friendly vs DATE(column). */
+const ymdSubtractDays = (ymd, days) => {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+};
+
+const ymdDayRangeExclusive = (ymd) => {
+  const start = `${ymd} 00:00:00`;
+  const endYmd = ymdSubtractDays(ymd, -1);
+  return [start, `${endYmd} 00:00:00`];
+};
+
 /**
  * Common logic to build WHERE conditions for leads across different controllers.
  * Optimized for large datasets (500k+) by using FULLTEXT index for general search
@@ -200,8 +213,12 @@ const buildLeadFilterConditions = (req, alias = 'l') => {
     params.push(end.toISOString().slice(0, 19).replace('T', ' '));
   }
   if (scheduledOn) {
-    conditions.push(`DATE(${p}next_scheduled_call) = ?`);
-    params.push(scheduledOn);
+    const ymd = String(scheduledOn).slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+      const [dayStart, dayEnd] = ymdDayRangeExclusive(ymd);
+      conditions.push(`${p}next_scheduled_call >= ? AND ${p}next_scheduled_call < ?`);
+      params.push(dayStart, dayEnd);
+    }
   }
 
   // Grouping and Cycles
@@ -471,19 +488,21 @@ export const getLeads = async (req, res) => {
     if (req.query.scheduledOn) {
       const requestedYmd = String(req.query.scheduledOn).slice(0, 10);
       if (/^\d{4}-\d{2}-\d{2}$/.test(requestedYmd)) {
+        const prevYmd = ymdSubtractDays(requestedYmd, 1);
+        const [prevDayStart, prevDayEnd] = ymdDayRangeExclusive(prevYmd);
         const [missedRows] = await pool.execute(
           `SELECT l.id, l.next_scheduled_call
            FROM leads l
            WHERE l.next_scheduled_call IS NOT NULL
-             AND DATE(l.next_scheduled_call) = DATE_SUB(?, INTERVAL 1 DAY)
+             AND l.next_scheduled_call >= ? AND l.next_scheduled_call < ?
              AND NOT EXISTS (
                SELECT 1
                FROM communications c
                WHERE c.lead_id = l.id
                  AND c.type = 'call'
-                 AND DATE(c.sent_at) = DATE(l.next_scheduled_call)
+                 AND c.sent_at >= ? AND c.sent_at < ?
              )`,
-          [requestedYmd]
+          [prevDayStart, prevDayEnd, prevDayStart, prevDayEnd]
         );
 
         if (missedRows.length > 0) {
