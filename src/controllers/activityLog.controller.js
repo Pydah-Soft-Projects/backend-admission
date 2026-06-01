@@ -84,6 +84,11 @@ export const addActivity = async (req, res) => {
       if (isSuperAdmin || isAdmin || (isStudentCounselor && lead.assigned_to === userId) || (isPro && lead.assigned_to_pro === userId) || (isAssigned && !isPro && !isStudentCounselor)) {
         
         if (requestedChannel === 'visit_status') {
+          // Guard: Visit Diary entries must never set visit_status to "Assigned".
+          // "Assigned" is reserved for assignment workflow, not outcomes.
+          if (metadata.visitDate && String(newStatus).trim() === 'Assigned') {
+            return errorResponse(res, 'Visit Diary outcome cannot be "Assigned". Please choose an actual visit outcome.', 400);
+          }
           const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
           oldStatus = lead.lead_status;
           newStatusValue = resolved;
