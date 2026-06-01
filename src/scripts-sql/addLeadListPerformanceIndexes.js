@@ -91,6 +91,32 @@ const INDEXES = [
     ddl:
       'CREATE INDEX idx_leads_stats_mandal_pro ON leads (academic_year, student_group, cycle_number, state(100), district(100), mandal(100), assigned_to_pro)',
   },
+  {
+    table: 'leads',
+    name: 'idx_leads_assigned_created_id',
+    ddl: 'CREATE INDEX idx_leads_assigned_created_id ON leads (assigned_to, created_at DESC, id ASC)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_assigned_pro_created_id',
+    ddl: 'CREATE INDEX idx_leads_assigned_pro_created_id ON leads (assigned_to_pro, created_at DESC, id ASC)',
+  },
+  {
+    table: 'leads',
+    name: 'idx_leads_next_scheduled_created',
+    ddl: 'CREATE INDEX idx_leads_next_scheduled_created ON leads (next_scheduled_call, created_at DESC, id ASC)',
+  },
+  {
+    table: 'communications',
+    name: 'idx_communications_lead_type_sent_at',
+    ddl: 'CREATE INDEX idx_communications_lead_type_sent_at ON communications (lead_id, type, sent_at)',
+  },
+  {
+    table: 'activity_logs',
+    name: 'idx_activity_logs_lead_performed_created',
+    ddl:
+      'CREATE INDEX idx_activity_logs_lead_performed_created ON activity_logs (lead_id, performed_by, created_at)',
+  },
 ];
 
 const run = async () => {
