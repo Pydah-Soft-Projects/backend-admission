@@ -90,7 +90,13 @@ const normalizeStudentPhotoForSecondary = (value) => {
 };
 
 export const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras) => {
-  const explicitStatus = String(registrationExtras?.student_status ?? '').trim();
+  const admission = String(admissionStatus ?? '').trim().toLowerCase();
+  if (admission === 'withdrawn') return 'Discontinued';
+  if (admission === 'admission cancelled') return 'Admission Cancelled';
+
+  const explicitStatus = String(
+    registrationExtras?.student_status ?? registrationExtras?.studentStatus ?? ''
+  ).trim();
   if (explicitStatus) {
     const lower = explicitStatus.toLowerCase();
     // Never persist primary workflow labels into secondary student_status.
@@ -98,12 +104,12 @@ export const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras
       return 'Regular';
     }
     if (lower === 'withdrawn') return 'Discontinued';
-    if (lower === 'lateral') return 'Lateral';
+    // Lateral entry is intake metadata (batch/semester/year) — not lifecycle student_status on sync.
+    if (lower === 'lateral') return 'Regular';
 
     // Keep known secondary lifecycle values, fallback to Regular for unknown workflow-like tokens.
     const allowed = new Set([
       'regular',
-      'lateral',
       'discontinued',
       'admission cancelled',
       'detained',
@@ -114,10 +120,6 @@ export const deriveSecondaryStudentStatus = (admissionStatus, registrationExtras
     if (allowed.has(lower)) return explicitStatus;
     return 'Regular';
   }
-
-  const admission = String(admissionStatus ?? '').trim().toLowerCase();
-  if (admission === 'withdrawn') return 'Discontinued';
-  if (admission === 'admission cancelled') return 'Admission Cancelled';
 
   // Secondary DB: academic student status, not admission row status (active/withdrawn).
   return 'Regular';
@@ -289,7 +291,18 @@ export const resolveSecondaryCourseNameForSync = async (
 export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './lateralBatch.util.js';
 
 const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
-  const q = String(quotaValue ?? '').trim().toUpperCase();
+  const raw =
+    quotaValue ??
+    registrationExtras?.quota ??
+    registrationExtras?.admission_quota ??
+    registrationExtras?.quota_type ??
+    '';
+  const q = String(raw).trim().toUpperCase();
+
+  // Lateral quota variants map to underlying seat type (matches admissions stats SQL).
+  if (q.includes('LATERAL') && q.includes('ENTRY')) return 'CONV';
+  if (q.includes('LATERAL') && (q.includes('SPOT') || q.includes('MANG'))) return 'MANG';
+
   if (
     q === 'MANG' ||
     q === 'MANAGEMENT' ||
@@ -308,10 +321,21 @@ const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
   ) {
     return 'CONV';
   }
+  if (
+    q === 'SPOT' ||
+    q === 'SPOT ADMISSION' ||
+    (q.includes('SPOT') &&
+      !q.includes('LATERAL') &&
+      !q.includes('MANG') &&
+      !q.includes('CONV'))
+  ) {
+    return 'SPOT';
+  }
 
   const fallback = String(registrationExtras?.data_collection_type ?? '').trim().toUpperCase();
   if (fallback === 'MANG' || fallback === 'MANAGEMENT') return 'MANG';
   if (fallback === 'CONV' || fallback === 'CONVENOR' || fallback === 'CONVENER') return 'CONV';
+  if (fallback === 'SPOT') return 'SPOT';
   return null;
 };
 
@@ -538,7 +562,10 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData?.status,
       registrationExtras
     );
-    const studType = deriveStudTypeFromQuota(admissionData?.courseInfo?.quota, registrationExtras);
+    const studType = deriveStudTypeFromQuota(
+      admissionData?.courseInfo?.quota || admissionData?.leadData?.quota,
+      registrationExtras
+    );
     let resolvedBatch = isDegreeProgram
       ? deriveAdmissionSeriesYear(resolvedAdmissionNumber) || '2026'
       : resolveSecondaryStudentBatch(registrationExtras, resolvedAdmissionNumber);
@@ -620,10 +647,30 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       studentDataSecondary.academic_year = resolvedBatch;
     }
     if (btechLateralForSync) {
-      studentDataSecondary.student_status = 'Lateral';
       const seriesYear = deriveAdmissionSeriesYear(resolvedAdmissionNumber);
       if (seriesYear) {
         studentDataSecondary._lateral_intake_year = String(Number(seriesYear) - 1);
+      }
+      if (!studentDataSecondary.semester) {
+        studentDataSecondary.semester = '2-1';
+        studentDataSecondary.current_semester = '2-1';
+      }
+      if (studentDataSecondary.current_year == null) {
+        studentDataSecondary.current_year = 2;
+        studentDataSecondary.currentYear = 2;
+      }
+    }
+    if (studType) {
+      studentDataSecondary.stud_type = studType;
+      if (studentDataSecondary.courseInfo && typeof studentDataSecondary.courseInfo === 'object') {
+        studentDataSecondary.courseInfo = {
+          ...studentDataSecondary.courseInfo,
+          quota:
+            admissionData?.courseInfo?.quota ||
+            admissionData?.leadData?.quota ||
+            studentDataSecondary.courseInfo.quota ||
+            '',
+        };
       }
     }
     studentDataSecondary._crm_secondary_course = resolvedSecondaryCourse;

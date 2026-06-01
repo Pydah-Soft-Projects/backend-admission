@@ -197,7 +197,7 @@ async function main() {
         batch: expectedBatch,
         current_year: 2,
         semester: '2-1',
-        student_status: 'Lateral',
+        student_status: 'Regular',
       },
     };
 

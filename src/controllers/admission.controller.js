@@ -20,6 +20,10 @@ import {
   SQL_COURSE_DISPLAY_NAME,
 } from '../utils/lateralBatch.util.js';
 import { resolveSecondaryManagedIds } from '../data/admissionsCourseBranchMap2026.js';
+import {
+  readReference1FromDynamicFields,
+  resolveAdmissionReference1,
+} from '../utils/joiningReference.util.js';
 
 const normCourseBranchLabel = (value) =>
   String(value ?? '')
@@ -546,6 +550,14 @@ const resolveAdmissionRowByRouteParam = async (pool, paramId) => {
 const SQL_A_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(a.lead_data) THEN a.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
 /** Excel / student Reference 1 from lead_data. */
 const SQL_A_REFERENCE1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.reference1'))), '')`;
+/** Joining / lead fallbacks for reports (requires LEFT JOIN j, l on admissions queries). */
+const SQL_J_LEAD_DATA_JSON = `COALESCE(CASE WHEN JSON_VALID(j.lead_data) THEN j.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+const SQL_J_REFERENCE1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_J_LEAD_DATA_JSON}, '$.reference1'))), '')`;
+const SQL_L_DYNAMIC_JSON = `COALESCE(CASE WHEN JSON_VALID(l.dynamic_fields) THEN l.dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+const SQL_L_REFERENCE1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_L_DYNAMIC_JSON}, '$.reference1'))), '')`;
+/** Resolved Reference 1 for an admission row (admission → joining → CRM lead). */
+const SQL_A_EFFECTIVE_REFERENCE1 = `COALESCE(${SQL_A_REFERENCE1}, ${SQL_J_REFERENCE1}, ${SQL_L_REFERENCE1})`;
+const SQL_ADMISSION_PIVOT_JOINS = `LEFT JOIN joinings j ON j.id = a.joining_id LEFT JOIN leads l ON l.id = a.lead_id`;
 /** Business admission date; falls back to record created_at when not set. */
 const SQL_A_EFFECTIVE_ADMISSION_DATE = `COALESCE(a.admission_date, a.created_at)`;
 
@@ -647,9 +659,24 @@ function pickFromRegistrationFormData(registrationFormData, keys) {
   return '';
 }
 
+const parseLeadDynamicFieldsColumn = (raw) => {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
+};
+
 // Helper function to format lead data from SQL
 const formatLead = (leadData) => {
   if (!leadData) return null;
+  const dynamicFields = parseLeadDynamicFieldsColumn(leadData.dynamic_fields);
+  const reference1 = readReference1FromDynamicFields(dynamicFields);
   return {
     _id: leadData.id,
     id: leadData.id,
@@ -660,6 +687,8 @@ const formatLead = (leadData) => {
     fatherPhone: leadData.father_phone,
     leadStatus: leadData.lead_status,
     admissionNumber: leadData.admission_number,
+    dynamicFields,
+    ...(reference1 ? { reference1 } : {}),
   };
 };
 
@@ -737,12 +766,23 @@ export const formatAdmission = async (admissionData, pool) => {
     ? JSON.parse(admissionData.qualification_mediums)
     : admissionData.qualification_mediums || [];
 
+  const referenceName = await resolveAdmissionReference1(pool, {
+    leadDataRaw,
+    joiningId: admissionData.joining_id,
+    leadId: admissionData.lead_id,
+  });
+  const leadDataWithReference =
+    referenceName && leadData && typeof leadData === 'object' && !String(leadData.reference1 ?? '').trim()
+      ? { ...leadData, reference1: referenceName }
+      : leadData;
+
   return {
     _id: admissionData.id,
     id: admissionData.id,
     leadId: admissionData.lead_id,
     enquiryNumber: admissionData.enquiry_number,
-    leadData,
+    referenceName,
+    leadData: leadDataWithReference,
     registrationFormData,
     joiningId: admissionData.joining_id,
     admissionNumber: admissionData.admission_number,
@@ -947,11 +987,8 @@ const persistAdmissionManagedIdsInLeadData = async (pool, admissionId, courseInf
   );
 };
 
-const parseReferenceNameFromRow = (row) => {
-  const direct = String(row.reference_name ?? '').trim();
-  if (direct) return direct;
+const parseReferenceFromJsonBlob = (raw) => {
   try {
-    const raw = row.lead_data;
     const text =
       Buffer.isBuffer(raw) ? raw.toString('utf8') : typeof raw === 'string' ? raw : null;
     const ld =
@@ -961,6 +998,29 @@ const parseReferenceNameFromRow = (row) => {
           ? raw
           : {};
     return String(ld.reference1 ?? ld.referenceName ?? '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const parseReferenceNameFromRow = (row) => {
+  const direct = String(row.reference_name ?? '').trim();
+  if (direct) return direct;
+  const fromAdm = parseReferenceFromJsonBlob(row.lead_data);
+  if (fromAdm) return fromAdm;
+  const fromJoin = parseReferenceFromJsonBlob(row.joining_lead_data);
+  if (fromJoin) return fromJoin;
+  try {
+    const rawDyn = row.lead_dynamic_fields;
+    const dyn =
+      Buffer.isBuffer(rawDyn)
+        ? JSON.parse(rawDyn.toString('utf8') || '{}')
+        : typeof rawDyn === 'string'
+          ? JSON.parse(rawDyn || '{}')
+          : rawDyn && typeof rawDyn === 'object'
+            ? rawDyn
+            : {};
+    return readReference1FromDynamicFields(dyn);
   } catch {
     return '';
   }
@@ -1288,10 +1348,12 @@ export const listAdmissions = async (req, res) => {
                 a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
                 a.document_bank_passbook, a.document_ration_card,
                 a.lead_data,
+                j.lead_data AS joining_lead_data,
                 l.name as lead_name, l.phone as lead_phone, l.source as lead_source,
                 l.upload_batch_id as upload_batch_id,
                 l.dynamic_fields as lead_dynamic_fields
          FROM admissions a
+         LEFT JOIN joinings j ON j.id = a.joining_id
          LEFT JOIN leads l ON a.lead_id = l.id
          WHERE a.id IN (${inMarks})`,
         pageIds
@@ -1351,7 +1413,7 @@ export const getAdmissionById = async (req, res) => {
     let lead = null;
     if (admissionData.lead_id) {
       const [leads] = await pool.execute(
-        `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number
+        `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number, dynamic_fields
          FROM leads WHERE id = ?`,
         [admissionData.lead_id]
       );
@@ -1405,7 +1467,7 @@ export const getAdmissionByJoiningId = async (req, res) => {
     let lead = null;
     if (admissionData.lead_id) {
       const [leads] = await pool.execute(
-        `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number
+        `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number, dynamic_fields
          FROM leads WHERE id = ?`,
         [admissionData.lead_id]
       );
@@ -1455,7 +1517,7 @@ export const getAdmissionByLead = async (req, res) => {
 
     // Fetch lead
     const [leads] = await pool.execute(
-      `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number
+      `SELECT id, name, phone, father_name, father_phone, lead_status, admission_number, enquiry_number, dynamic_fields
        FROM leads WHERE id = ?`,
       [leadId]
     );
@@ -2674,15 +2736,16 @@ export const getAdmissionStatsByReference = async (req, res) => {
 
     const courses = await getAdmissionReportCourses(pool, whereClause, params);
 
+    const pivotFrom = `FROM admissions a ${SQL_ADMISSION_PIVOT_JOINS}`;
     const [agg] = await pool.execute(
       `SELECT
-         COALESCE(${SQL_A_REFERENCE1}, '__none__') AS referenceKey,
-         MAX(${SQL_A_REFERENCE1}) AS referenceName,
+         COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__') AS referenceKey,
+         MAX(${SQL_A_EFFECTIVE_REFERENCE1}) AS referenceName,
          ${SQL_A_EFF_COURSE_ID} AS courseId,
          COUNT(*) AS cnt
-       FROM admissions a
+       ${pivotFrom}
        ${whereClause}
-       GROUP BY COALESCE(${SQL_A_REFERENCE1}, '__none__'), ${SQL_A_EFF_COURSE_ID}`,
+       GROUP BY COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__'), ${SQL_A_EFF_COURSE_ID}`,
       params
     );
 

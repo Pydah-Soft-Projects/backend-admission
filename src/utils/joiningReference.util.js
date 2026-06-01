@@ -145,6 +145,118 @@ export async function applyReference1OnCallStatusConfirm(
   }
 }
 
+const parseJsonObject = (value) => {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' ? value : {};
+};
+
+/**
+ * Resolve Excel Reference 1 for an admission from admission.lead_data, linked joining, then CRM lead.
+ */
+export async function resolveAdmissionReference1(pool, { leadDataRaw, joiningId, leadId }) {
+  const admLd = leadDataRaw && typeof leadDataRaw === 'object' ? leadDataRaw : parseJsonObject(leadDataRaw);
+  const fromAdm = String(admLd.reference1 ?? admLd.referenceName ?? '').trim();
+  if (fromAdm) return fromAdm;
+
+  if (joiningId) {
+    const [joinRows] = await pool.execute('SELECT lead_data FROM joinings WHERE id = ? LIMIT 1', [
+      joiningId,
+    ]);
+    if (joinRows.length) {
+      const jLd = parseJsonObject(joinRows[0].lead_data);
+      const fromJoin = String(jLd.reference1 ?? jLd.referenceName ?? '').trim();
+      if (fromJoin) return fromJoin;
+    }
+  }
+
+  if (leadId) {
+    const [leadRows] = await pool.execute(
+      'SELECT id, dynamic_fields FROM leads WHERE id = ? LIMIT 1',
+      [leadId]
+    );
+    if (leadRows.length) {
+      const row = leadRows[0];
+      const dyn =
+        typeof row.dynamic_fields === 'string'
+          ? parseJsonObject(row.dynamic_fields)
+          : parseJsonObject(row.dynamic_fields);
+      const fromLead = await resolveReference1ForLead(pool, {
+        id: row.id,
+        dynamicFields: dyn,
+      });
+      if (fromLead) return fromLead;
+    }
+  }
+
+  return '';
+};
+
+/**
+ * Write Reference 1 on lead, all joinings, and all admissions for a CRM lead.
+ * Used by backfill scripts (no activity log / user audit on admissions beyond updated_at).
+ */
+export async function persistLeadReference1(pool, leadId, reference1, options = {}) {
+  const ref = String(reference1 ?? '').trim();
+  const leadKey = String(leadId ?? '').trim();
+  if (!ref || !leadKey) {
+    return { leadUpdated: false, joiningsUpdated: 0, admissionsUpdated: 0 };
+  }
+
+  const [leadResult] = await pool.execute(
+    `UPDATE leads SET
+       dynamic_fields = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(dynamic_fields) THEN dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE id = ?`,
+    [ref, leadKey]
+  );
+
+  const [joinResult] = await pool.execute(
+    `UPDATE joinings SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE lead_id = ?`,
+    [ref, leadKey]
+  );
+
+  let admissionsUpdated = 0;
+  if (options.syncAdmissions !== false) {
+    const [admRows] = await pool.execute('SELECT id FROM admissions WHERE lead_id = ?', [leadKey]);
+    for (const row of admRows) {
+      await pool.execute(
+        `UPDATE admissions SET
+           lead_data = JSON_SET(
+             COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+             '$.reference1', ?
+           ),
+           updated_at = NOW()
+         WHERE id = ?`,
+        [ref, row.id]
+      );
+      admissionsUpdated += 1;
+    }
+  }
+
+  return {
+    leadUpdated: (leadResult.affectedRows ?? 0) > 0,
+    joiningsUpdated: joinResult.affectedRows ?? 0,
+    admissionsUpdated,
+  };
+};
+
 /** Backfill joinings.lead_data.reference1 from last call_status Confirmed activity. */
 export async function backfillJoiningReferenceFromLead(pool, joiningRow, lead) {
   if (!joiningRow?.id || !lead) return false;
