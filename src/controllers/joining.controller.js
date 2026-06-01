@@ -23,6 +23,10 @@ import {
   resolveReference1ForLead,
   readReference1FromDynamicFields,
 } from '../utils/joiningReference.util.js';
+import {
+  reconcileFatherPhoneFromLead,
+  suggestPreferredMobileDigits,
+} from '../utils/parentPhone.util.js';
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
@@ -147,6 +151,7 @@ const formatLead = (leadData) => {
     motherName: leadData.mother_name || '',
     fatherPhone: leadData.father_phone,
     motherPhone: leadData.mother_phone || '',
+    alternateMobile: leadData.alternate_mobile || '',
     hallTicketNumber: leadData.hall_ticket_number || '',
     village: leadData.village,
     address: leadData.address || '',
@@ -213,6 +218,14 @@ const applyLeadDefaultsToJoining = (joiningDoc, lead) => {
   }
   if (!joiningDoc.parents.father.phone) {
     joiningDoc.parents.father.phone = lead.fatherPhone || '';
+  } else if (joiningDoc.studentInfo.phone && lead.fatherPhone) {
+    const reconciled = reconcileFatherPhoneFromLead({
+      studentPhone: joiningDoc.studentInfo.phone,
+      fatherPhone: joiningDoc.parents.father.phone,
+      leadFatherPhone: lead.fatherPhone,
+      leadAlternateMobile: lead.alternateMobile,
+    });
+    if (reconciled) joiningDoc.parents.father.phone = reconciled;
   }
   if (!joiningDoc.parents.mother.name) {
     joiningDoc.parents.mother.name = lead.motherName || '';
@@ -334,10 +347,20 @@ const ensureLeadForApprovedJoining = async ({
     formattedJoining?.studentInfo?.phone || joiningLeadData?.phone || '0000000000';
   const fatherName =
     formattedJoining?.parents?.father?.name || joiningLeadData?.fatherName || 'Not Provided';
-  const fatherPhone =
+  let fatherPhone =
     formattedJoining?.parents?.father?.phone ||
     joiningLeadData?.fatherPhone ||
-    studentPhone;
+    '';
+  fatherPhone =
+    reconcileFatherPhoneFromLead({
+      studentPhone,
+      fatherPhone,
+      leadFatherPhone: joiningLeadData?.fatherPhone,
+      leadAlternateMobile: joiningLeadData?.alternateMobile,
+    }) || fatherPhone;
+  if (!fatherPhone) {
+    fatherPhone = studentPhone;
+  }
   const motherName =
     formattedJoining?.parents?.mother?.name || joiningLeadData?.motherName || '';
   const village =
@@ -1330,8 +1353,15 @@ const normalizeJoiningPayload = (payload) => {
     const preferredResolved = normalizeMobileDigits(
       preferredFromPayload || preferredFromReg
     );
-    safePayload.studentInfo.preferredMobileNumber =
-      preferredResolved.length === 10 ? preferredResolved : '';
+    if (preferredResolved.length === 10) {
+      safePayload.studentInfo.preferredMobileNumber = preferredResolved;
+    } else {
+      safePayload.studentInfo.preferredMobileNumber = suggestPreferredMobileDigits(
+        safePayload.studentInfo?.phone,
+        safePayload.parents?.father?.phone,
+        safePayload.parents?.mother?.phone
+      );
+    }
     safePayload.studentInfo.gender = sanitizeString(safePayload.studentInfo.gender);
     safePayload.studentInfo.dateOfBirth = sanitizeString(
       safePayload.studentInfo.dateOfBirth
@@ -1351,6 +1381,16 @@ const normalizeJoiningPayload = (payload) => {
     safePayload.parents.father.phone = sanitizeString(
       safePayload.parents.father.phone
     );
+    if (safePayload.studentInfo) {
+      const leadData =
+        payload.leadData && typeof payload.leadData === 'object' ? payload.leadData : {};
+      safePayload.parents.father.phone = reconcileFatherPhoneFromLead({
+        studentPhone: safePayload.studentInfo.phone,
+        fatherPhone: safePayload.parents.father.phone,
+        leadFatherPhone: leadData.fatherPhone,
+        leadAlternateMobile: leadData.alternateMobile,
+      });
+    }
   }
 
   if (safePayload.parents?.mother) {

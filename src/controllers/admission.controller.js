@@ -51,6 +51,58 @@ const ensureAdmissionId = (admissionId) => {
 
 const ADMISSION_CANCELLED_STATUS = 'Admission Cancelled';
 
+/** In-memory caches for admission desk reads (stats labels, intake map, list counts). */
+const admissionQueryCache = new Map();
+const ADMISSION_CACHE_TTL = {
+  statsAuxMs: Number(process.env.ADMISSION_STATS_AUX_CACHE_MS || 120000),
+  collegeCoursesMs: Number(process.env.ADMISSION_COLLEGE_COURSES_CACHE_MS || 300000),
+  listCountMs: Number(process.env.ADMISSION_LIST_COUNT_CACHE_MS || 15000),
+};
+
+const stableStringify = (value) => {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${k}:${stableStringify(value[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const getAdmissionCached = (key) => {
+  const entry = admissionQueryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    admissionQueryCache.delete(key);
+    return null;
+  }
+  return entry.value;
+};
+
+const setAdmissionCached = (key, value, ttlMs) => {
+  admissionQueryCache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+};
+
+const clearAdmissionQueryCache = () => {
+  admissionQueryCache.clear();
+};
+
+const getAdmissionCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
+  const key = `admission-count:${scopeKey}:${sql}:${stableStringify(params)}`;
+  const cached = getAdmissionCached(key);
+  if (cached !== null) return cached;
+  const [rows] = await pool.execute(sql, params);
+  const raw = rows?.[0]?.total ?? 0;
+  const count = typeof raw === 'bigint' ? Number(raw) : Number(raw || 0);
+  setAdmissionCached(key, count, ttlMs);
+  return count;
+};
+
 /** Convenor quota (CQ / CONV) — matches admissions.quota and lead source labels. */
 const SQL_IS_CONV_QUOTA = `(
   UPPER(TRIM(COALESCE(quota, ''))) IN ('CONV', 'CONVENOR', 'CONVENER')
@@ -148,6 +200,10 @@ const ensureAdmissionBranchIntakeTable = async (pool) => {
 };
 
 const loadBranchIntakeMap = async () => {
+  const cacheKey = 'admission:branch-intake-map:v1';
+  const cached = getAdmissionCached(cacheKey);
+  if (cached) return cached;
+
   const map = new Map();
   const pool = getPool();
   try {
@@ -178,6 +234,7 @@ const loadBranchIntakeMap = async () => {
   } catch (err) {
     console.error('loadBranchIntakeMap: secondary course_branches query failed:', err?.message || err);
   }
+  setAdmissionCached(cacheKey, map, ADMISSION_CACHE_TTL.statsAuxMs);
   return map;
 };
 
@@ -357,13 +414,20 @@ const reconcileAdmissionCourseInfoFromRow = async (row) => {
 const loadManagedCourseIdsForCollege = async (collegeId) => {
   const id = String(collegeId ?? '').trim();
   if (!id) return null;
+
+  const cacheKey = `admission:college-courses:${id}`;
+  const cached = getAdmissionCached(cacheKey);
+  if (cached) return cached;
+
   try {
     const secondaryPool = getSecondaryPool();
     const [rows] = await secondaryPool.execute(
       'SELECT id FROM courses WHERE college_id = ?',
       [id]
     );
-    return (rows || []).map((r) => String(r.id ?? '').trim()).filter(Boolean);
+    const courseIds = (rows || []).map((r) => String(r.id ?? '').trim()).filter(Boolean);
+    setAdmissionCached(cacheKey, courseIds, ADMISSION_CACHE_TTL.collegeCoursesMs);
+    return courseIds;
   } catch (err) {
     console.error('loadManagedCourseIdsForCollege failed:', err?.message || err);
     return [];
@@ -382,6 +446,10 @@ const appendManagedCollegeCourseFilter = (conditions, params, courseIdExpr, mana
 };
 
 const loadSecondaryCourseBranchLabelMaps = async () => {
+  const cacheKey = 'admission:secondary-label-maps:v1';
+  const cached = getAdmissionCached(cacheKey);
+  if (cached) return cached;
+
   const courses = new Map();
   const branches = new Map();
   try {
@@ -406,10 +474,16 @@ const loadSecondaryCourseBranchLabelMaps = async () => {
       err?.message || err
     );
   }
-  return { courses, branches };
+  const payload = { courses, branches };
+  setAdmissionCached(cacheKey, payload, ADMISSION_CACHE_TTL.statsAuxMs);
+  return payload;
 };
 
 const loadAdmissionBranchIntakeLabelMap = async (pool) => {
+  const cacheKey = 'admission:intake-branch-labels:v1';
+  const cached = getAdmissionCached(cacheKey);
+  if (cached) return cached;
+
   const map = new Map();
   try {
     await ensureAdmissionBranchIntakeTable(pool);
@@ -424,6 +498,7 @@ const loadAdmissionBranchIntakeLabelMap = async (pool) => {
   } catch (err) {
     console.error('loadAdmissionBranchIntakeLabelMap failed:', err?.message || err);
   }
+  setAdmissionCached(cacheKey, map, ADMISSION_CACHE_TTL.statsAuxMs);
   return map;
 };
 
@@ -698,21 +773,21 @@ export const formatAdmission = async (admissionData, pool) => {
 
   const admissionId = admissionData.id;
 
-  // Fetch related data
-  const [relatives] = await pool.execute(
-    'SELECT * FROM admission_relatives WHERE admission_id = ?',
-    [admissionId]
-  );
-
-  const [educationHistory] = await pool.execute(
-    'SELECT * FROM admission_education_history WHERE admission_id = ? ORDER BY created_at ASC',
-    [admissionId]
-  );
-
-  const [siblings] = await pool.execute(
-    'SELECT * FROM admission_siblings WHERE admission_id = ? ORDER BY created_at ASC',
-    [admissionId]
-  );
+  // Fetch related data in parallel (detail view).
+  const [relativesResult, educationHistoryResult, siblingsResult] = await Promise.all([
+    pool.execute('SELECT * FROM admission_relatives WHERE admission_id = ?', [admissionId]),
+    pool.execute(
+      'SELECT * FROM admission_education_history WHERE admission_id = ? ORDER BY created_at ASC',
+      [admissionId]
+    ),
+    pool.execute(
+      'SELECT * FROM admission_siblings WHERE admission_id = ? ORDER BY created_at ASC',
+      [admissionId]
+    ),
+  ]);
+  const relatives = relativesResult[0];
+  const educationHistory = educationHistoryResult[0];
+  const siblings = siblingsResult[0];
 
   // Parse JSON fields
   const leadDataRaw = typeof admissionData.lead_data === 'string'
@@ -1006,8 +1081,20 @@ const parseReferenceFromJsonBlob = (raw) => {
 const parseReferenceNameFromRow = (row) => {
   const direct = String(row.reference_name ?? '').trim();
   if (direct) return direct;
+
+  const fromAdmExtracted = String(
+    row.lead_data_reference1 ?? row.lead_data_reference_name ?? ''
+  ).trim();
+  if (fromAdmExtracted) return fromAdmExtracted;
+
   const fromAdm = parseReferenceFromJsonBlob(row.lead_data);
   if (fromAdm) return fromAdm;
+
+  const fromJoinExtracted = String(
+    row.joining_lead_reference1 ?? row.joining_lead_reference_name ?? ''
+  ).trim();
+  if (fromJoinExtracted) return fromJoinExtracted;
+
   const fromJoin = parseReferenceFromJsonBlob(row.joining_lead_data);
   if (fromJoin) return fromJoin;
   try {
@@ -1032,21 +1119,53 @@ const registrationExtrasFromLeadDataRaw = (leadDataRaw) => {
   return ex && typeof ex === 'object' ? ex : {};
 };
 
-const formatAdmissionListItem = (row) => {
-  let leadDataRaw = {};
+const registrationExtrasFromListRow = (row) => {
+  const raw = row.lead_data_registration_extras;
+  if (!raw) return registrationExtrasFromLeadDataRaw(parseListRowLeadDataRaw(row));
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
+};
+
+const parseListRowLeadDataRaw = (row) => {
+  if (!row?.lead_data) return {};
   try {
     const raw = row.lead_data;
     const text =
       Buffer.isBuffer(raw) ? raw.toString('utf8') : typeof raw === 'string' ? raw : null;
-    leadDataRaw =
-      text != null
-        ? JSON.parse(text || '{}')
-        : raw && typeof raw === 'object'
-          ? raw
-          : {};
+    return text != null
+      ? JSON.parse(text || '{}')
+      : raw && typeof raw === 'object'
+        ? raw
+        : {};
   } catch {
-    leadDataRaw = {};
+    return {};
   }
+};
+
+const leadDataStubFromListRow = (row) => {
+  const fromExtract =
+    row.lead_data_source != null ||
+    row.lead_data_utm_source != null ||
+    row.lead_data_lead_source != null;
+  if (fromExtract) {
+    return {
+      source: row.lead_data_source,
+      utmSource: row.lead_data_utm_source,
+      leadSource: row.lead_data_lead_source,
+    };
+  }
+  return parseListRowLeadDataRaw(row);
+};
+
+const formatAdmissionListItem = (row) => {
+  const leadDataRaw = leadDataStubFromListRow(row);
   const parseLeadDynamicFields = (raw) => {
     if (!raw) return {};
     if (typeof raw === 'string') {
@@ -1104,7 +1223,7 @@ const formatAdmissionListItem = (row) => {
   const effectiveIds = effectiveAdmissionCourseBranchIds(row);
   const courseLabel = resolveBtechCourseDisplayName(
     row.course || '',
-    registrationExtrasFromLeadDataRaw(leadDataRaw),
+    registrationExtrasFromListRow(row),
     row.admission_number
   );
   return {
@@ -1242,6 +1361,8 @@ export const listAdmissions = async (req, res) => {
       limit = 20,
       search = '',
       status,
+      startDate,
+      endDate,
       collegeId,
       courseId,
       branchId,
@@ -1290,6 +1411,15 @@ export const listAdmissions = async (req, res) => {
       }
     }
 
+    if (startDate) {
+      conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) >= ?`);
+      params.push(String(startDate).slice(0, 10));
+    }
+    if (endDate) {
+      conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) <= ?`);
+      params.push(String(endDate).slice(0, 10));
+    }
+
     // Search filtering
     if (search) {
       const searchPattern = `%${search}%`;
@@ -1314,12 +1444,14 @@ export const listAdmissions = async (req, res) => {
       ? 'FROM admissions a LEFT JOIN leads l ON a.lead_id = l.id'
       : 'FROM admissions a';
 
-    // Get total count
-    const [countResult] = await pool.execute(
+    // Get total count (brief cache — pagination/filter toggles hit this often).
+    const total = await getAdmissionCachedCount(
+      pool,
       `SELECT COUNT(*) as total ${fromClause} ${whereClause}`,
-      params
+      params,
+      ADMISSION_CACHE_TTL.listCountMs,
+      'list-admissions'
     );
-    const total = countResult[0]?.total || 0;
 
     // Phase 1: paginate ids only — no lead join unless search needs it; no wide row payload in sort.
     const [idRowsResult] = await pool.execute(
@@ -1347,8 +1479,14 @@ export const listAdmissions = async (req, res) => {
                 a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
                 a.document_cet_hall_ticket, a.document_allotment_letter, a.document_joining_report,
                 a.document_bank_passbook, a.document_ration_card,
-                a.lead_data,
-                j.lead_data AS joining_lead_data,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.reference1')) AS lead_data_reference1,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.referenceName')) AS lead_data_reference_name,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.source')) AS lead_data_source,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.utmSource')) AS lead_data_utm_source,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.leadSource')) AS lead_data_lead_source,
+                JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras') AS lead_data_registration_extras,
+                JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.reference1')) AS joining_lead_reference1,
+                JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.referenceName')) AS joining_lead_reference_name,
                 l.name as lead_name, l.phone as lead_phone, l.source as lead_source,
                 l.upload_batch_id as upload_batch_id,
                 l.dynamic_fields as lead_dynamic_fields
@@ -1614,6 +1752,8 @@ export const cancelAdmissionById = async (req, res) => {
       })
     );
 
+    clearAdmissionQueryCache();
+
     return successResponse(
       res,
       formattedAdmission,
@@ -1803,6 +1943,13 @@ export const updateAdmissionById = async (req, res) => {
       if (payload.studentInfo.aadhaarNumber !== undefined) {
         updateFields.push('student_aadhaar_number = ?');
         updateParams.push(payload.studentInfo.aadhaarNumber || null);
+      }
+      if (payload.studentInfo.preferredMobileNumber !== undefined) {
+        updateFields.push('preferred_mobile_number = ?');
+        const preferred = String(payload.studentInfo.preferredMobileNumber || '')
+          .replace(/\D/g, '')
+          .slice(-10);
+        updateParams.push(preferred.length === 10 ? preferred : '');
       }
     }
 
@@ -2064,6 +2211,13 @@ export const updateAdmissionByLead = async (req, res) => {
       if (payload.studentInfo.aadhaarNumber !== undefined) {
         updateFields.push('student_aadhaar_number = ?');
         updateParams.push(payload.studentInfo.aadhaarNumber || null);
+      }
+      if (payload.studentInfo.preferredMobileNumber !== undefined) {
+        updateFields.push('preferred_mobile_number = ?');
+        const preferred = String(payload.studentInfo.preferredMobileNumber || '')
+          .replace(/\D/g, '')
+          .slice(-10);
+        updateParams.push(preferred.length === 10 ? preferred : '');
       }
     }
 
@@ -2349,8 +2503,6 @@ export const getAdmissionStats = async (req, res) => {
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_BTECH_LATERAL_TRACK}
       ORDER BY totalAdmissions DESC
     `;
-    const [stats] = await pool.execute(query, params);
-
     const queryBranches = `
       SELECT 
         ${SQL_EFF_COURSE_ID} as courseId,
@@ -2373,10 +2525,17 @@ export const getAdmissionStats = async (req, res) => {
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}, ${SQL_BTECH_LATERAL_TRACK}
       ORDER BY courseName, branchName
     `;
-    const [branchStats] = await pool.execute(queryBranches, params);
-    const branchIntakeMap = await loadBranchIntakeMap();
-    const secondaryLabels = await loadSecondaryCourseBranchLabelMaps();
-    const intakeBranchLabels = await loadAdmissionBranchIntakeLabelMap(pool);
+
+    const [statsResult, branchStatsResult, branchIntakeMap, secondaryLabels, intakeBranchLabels] =
+      await Promise.all([
+        pool.execute(query, params),
+        pool.execute(queryBranches, params),
+        loadBranchIntakeMap(),
+        loadSecondaryCourseBranchLabelMaps(),
+        loadAdmissionBranchIntakeLabelMap(pool),
+      ]);
+    const stats = statsResult[0];
+    const branchStats = branchStatsResult[0];
     const courseStats = stats.map((course) => {
       const courseName = resolveStatsCourseDisplayName(course, secondaryLabels);
       return {
@@ -2461,6 +2620,8 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
         req.user?.id || null,
       ]
     );
+
+    clearAdmissionQueryCache();
 
     return successResponse(
       res,
