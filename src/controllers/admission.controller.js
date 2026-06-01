@@ -16,6 +16,7 @@ import {
   formatBtechCourseDisplayName,
   isBtechCourseName,
   resolveBtechCourseDisplayName,
+  SQL_A_BTECH_LATERAL_TRACK,
   SQL_BTECH_LATERAL_TRACK,
   SQL_COURSE_DISPLAY_NAME,
 } from '../utils/lateralBatch.util.js';
@@ -2707,17 +2708,65 @@ const normalizeAdmissionCourseColumnName = (name) =>
     .toUpperCase()
     .replace(/\s+/g, ' ');
 
+const stripLateralCourseSuffix = (name) =>
+  String(name ?? '')
+    .replace(/\s*\(lateral\)\s*/gi, '')
+    .trim();
+
+/** Pivot count key: course id(s) + B.Tech lateral track (0 = regular, 1 = lateral entry). */
+const admissionPivotCountKey = (courseId, lateralTrack = 0) => {
+  if (courseId === undefined || courseId === null) return '__none__';
+  const s = String(courseId).trim();
+  if (s === '' || s === '__none__') return '__none__';
+  const lat = Number(lateralTrack) === 1 ? 1 : 0;
+  return `${s}::${lat}`;
+};
+
+const admissionPivotBucketKey = (label, catalogName, idStr, lateralTrack = 0) => {
+  if (idStr === '__none__') return '__none__';
+  const base = stripLateralCourseSuffix(label || catalogName);
+  const norm = normalizeAdmissionCourseColumnName(base);
+  if (isBtechCourseName(base) || isBtechCourseName(catalogName) || isBtechCourseName(label)) {
+    return `${norm}::${Number(lateralTrack) === 1 ? 1 : 0}`;
+  }
+  return norm;
+};
+
+const parsePivotBucketLateral = (bucketKey) => {
+  const m = String(bucketKey).match(/::([01])$/);
+  return m ? Number(m[1]) : 0;
+};
+
+const admissionPivotColumnKey = (col) => {
+  const ids = col.courseIds?.length
+    ? col.courseIds
+    : String(col.courseId || '')
+        .split('|')
+        .map((id) => id.trim())
+        .filter(Boolean);
+  const idPart = ids.length > 0 ? ids.join('|') : '__none__';
+  return admissionPivotCountKey(idPart, col.lateralTrack ?? 0);
+};
+
 const sumCountsForCourseColumn = (countsRaw, col) => {
+  const lateral = Number(col.lateralTrack) || 0;
   const ids = col.courseIds || [col.courseId];
   let sum = 0;
   for (const rawId of ids) {
-    const id = String(rawId);
-    let v = countsRaw[id];
-    if (v === undefined && /^\d+$/.test(id)) {
-      const n = Number(id);
-      if (Number.isSafeInteger(n)) v = countsRaw[n];
+    const id = String(rawId).trim();
+    if (!id || id === '__none__') continue;
+    const keys = [admissionPivotCountKey(id, lateral), id];
+    for (const key of keys) {
+      let v = countsRaw[key];
+      if (v === undefined && /^\d+$/.test(key)) {
+        const n = Number(key);
+        if (Number.isSafeInteger(n)) v = countsRaw[n];
+      }
+      if (v !== undefined && v !== null) {
+        sum += Number(v) || 0;
+        break;
+      }
     }
-    if (v !== undefined && v !== null) sum += Number(v) || 0;
   }
   return sum;
 };
@@ -2752,10 +2801,12 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
   }
 
   const [distinctCourseRows] = await primaryPool.execute(
-    `SELECT ${SQL_A_EFF_COURSE_ID} AS courseId, MAX(a.course) AS courseName
+    `SELECT ${SQL_A_EFF_COURSE_ID} AS courseId,
+            ${SQL_A_BTECH_LATERAL_TRACK} AS lateralTrack,
+            MAX(a.course) AS courseName
      FROM admissions a
      ${whereClause}
-     GROUP BY ${SQL_A_EFF_COURSE_ID}`,
+     GROUP BY ${SQL_A_EFF_COURSE_ID}, ${SQL_A_BTECH_LATERAL_TRACK}`,
     params
   );
 
@@ -2787,23 +2838,38 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
     const rawId = row.courseId;
     const idStr =
       rawId != null && String(rawId).trim() !== '' ? String(rawId).trim() : '__none__';
+    const lateralTrack = Number(row.lateralTrack) === 1 ? 1 : 0;
     const fromAdmissionText = String(row.courseName || '').trim();
     const catalogName = idToSecondaryName.get(idStr) || '';
-    const label =
+    let label =
       idStr === '__none__'
         ? '—'
         : isGenericImportCourseLabel(fromAdmissionText) && catalogName
           ? catalogName
           : fromAdmissionText || catalogName || 'Unknown';
-    const k = idStr === '__none__' ? '__none__' : normalizeAdmissionCourseColumnName(label);
+    label = stripLateralCourseSuffix(label);
+    if (isBtechCourseName(label) || isBtechCourseName(catalogName)) {
+      label = formatBtechCourseDisplayName(catalogName || label, lateralTrack === 1);
+    }
+    const k = admissionPivotBucketKey(label, catalogName, idStr, lateralTrack);
     addToBucket(k, label, idStr);
     if (idStr !== '__none__') assignedCourseIds.add(idStr);
   }
 
   for (const r of activeCourses) {
     const id = String(r.id);
-    if (assignedCourseIds.has(id)) continue;
     const nm = String(r.name || '').trim() || 'Unknown';
+    if (isBtechCourseName(nm)) {
+      const norm = normalizeAdmissionCourseColumnName(stripLateralCourseSuffix(nm));
+      for (const lateralTrack of [0, 1]) {
+        const k = `${norm}::${lateralTrack}`;
+        if (!buckets.has(k)) {
+          addToBucket(k, formatBtechCourseDisplayName(nm, lateralTrack === 1), id);
+        }
+      }
+      continue;
+    }
+    if (assignedCourseIds.has(id)) continue;
     const k = normalizeAdmissionCourseColumnName(nm);
     addToBucket(k, nm, id);
   }
@@ -2822,20 +2888,27 @@ const getAdmissionReportCourses = async (primaryPool, whereClause, params) => {
       .filter((id) => id !== '__none__')
       .sort((x, y) => String(x).localeCompare(String(y)));
     if (ids.length === 0) continue;
+    const lateralTrack = parsePivotBucketLateral(k);
+    const courseId = ids.length === 1 ? ids[0] : ids.join('|');
     out.push({
-      courseId: ids.length === 1 ? ids[0] : ids.join('|'),
+      courseId,
       courseName: b.courseName,
       courseIds: ids,
+      lateralTrack,
+      pivotKey: admissionPivotCountKey(courseId, lateralTrack),
     });
   }
 
   if (buckets.has('__none__')) {
     const b = buckets.get('__none__');
     const ids = [...b.mergeIds].sort((x, y) => String(x).localeCompare(String(y)));
+    const courseId = ids.length === 1 ? ids[0] : ids.join('|');
     out.push({
-      courseId: ids.length === 1 ? ids[0] : ids.join('|'),
+      courseId,
       courseName: b.courseName,
       courseIds: ids,
+      lateralTrack: 0,
+      pivotKey: admissionPivotCountKey(courseId, 0),
     });
   }
 
@@ -2903,20 +2976,13 @@ export const getAdmissionStatsByReference = async (req, res) => {
          COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__') AS referenceKey,
          MAX(${SQL_A_EFFECTIVE_REFERENCE1}) AS referenceName,
          ${SQL_A_EFF_COURSE_ID} AS courseId,
+         ${SQL_A_BTECH_LATERAL_TRACK} AS lateralTrack,
          COUNT(*) AS cnt
        ${pivotFrom}
        ${whereClause}
-       GROUP BY COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__'), ${SQL_A_EFF_COURSE_ID}`,
+       GROUP BY COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__'), ${SQL_A_EFF_COURSE_ID}, ${SQL_A_BTECH_LATERAL_TRACK}`,
       params
     );
-
-    const courseKey = (courseId) => {
-      if (courseId === undefined || courseId === null) return '__none__';
-      const s = String(courseId).trim();
-      if (s === '') return '__none__';
-      if (typeof courseId === 'bigint') return String(courseId);
-      return s;
-    };
 
     const byReference = new Map();
     for (const row of agg) {
@@ -2931,7 +2997,7 @@ export const getAdmissionStatsByReference = async (req, res) => {
       }
       const bucket = byReference.get(refKey);
       if (!bucket.counts) bucket.counts = {};
-      const ck = courseKey(row.courseId);
+      const ck = admissionPivotCountKey(row.courseId, row.lateralTrack);
       bucket.counts[ck] = (bucket.counts[ck] || 0) + (Number(row.cnt) || 0);
     }
 
@@ -2945,7 +3011,7 @@ export const getAdmissionStatsByReference = async (req, res) => {
         const countsRaw = bucket.counts || {};
         const counts = {};
         for (const c of courses) {
-          counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
+          counts[admissionPivotColumnKey(c)] = sumCountsForCourseColumn(countsRaw, c);
         }
         const total = Object.values(countsRaw).reduce((sum, n) => sum + (Number(n) || 0), 0);
         return {
@@ -2983,27 +3049,20 @@ export const getAdmissionStatsByDate = async (req, res) => {
     const [agg] = await pool.execute(
       `SELECT DATE_FORMAT(${SQL_A_EFFECTIVE_ADMISSION_DATE}, '%Y-%m-%d') AS d,
               ${SQL_A_EFF_COURSE_ID} AS courseId,
+              ${SQL_A_BTECH_LATERAL_TRACK} AS lateralTrack,
               COUNT(*) AS cnt
        FROM admissions a
        ${whereClause}
-       GROUP BY DATE_FORMAT(${SQL_A_EFFECTIVE_ADMISSION_DATE}, '%Y-%m-%d'), ${SQL_A_EFF_COURSE_ID}`,
+       GROUP BY DATE_FORMAT(${SQL_A_EFFECTIVE_ADMISSION_DATE}, '%Y-%m-%d'), ${SQL_A_EFF_COURSE_ID}, ${SQL_A_BTECH_LATERAL_TRACK}`,
       params
     );
-
-    const courseKey = (courseId) => {
-      if (courseId === undefined || courseId === null) return '__none__';
-      const s = String(courseId).trim();
-      if (s === '') return '__none__';
-      if (typeof courseId === 'bigint') return String(courseId);
-      return s;
-    };
 
     const byDate = new Map();
     for (const row of agg) {
       const dateStr = row.d ? String(row.d).slice(0, 10) : '';
       if (!dateStr) continue;
       if (!byDate.has(dateStr)) byDate.set(dateStr, {});
-      const ck = courseKey(row.courseId);
+      const ck = admissionPivotCountKey(row.courseId, row.lateralTrack);
       const cur = byDate.get(dateStr);
       cur[ck] = (cur[ck] || 0) + (Number(row.cnt) || 0);
     }
@@ -3014,7 +3073,7 @@ export const getAdmissionStatsByDate = async (req, res) => {
         const countsRaw = byDate.get(date) || {};
         const counts = {};
         for (const c of courses) {
-          counts[c.courseId] = sumCountsForCourseColumn(countsRaw, c);
+          counts[admissionPivotColumnKey(c)] = sumCountsForCourseColumn(countsRaw, c);
         }
         const total = Object.values(countsRaw).reduce((sum, n) => sum + (Number(n) || 0), 0);
         return { date, counts, total };

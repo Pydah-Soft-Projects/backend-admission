@@ -145,7 +145,71 @@ export const resolveSecondaryYearOfStudy = (registrationExtras) => {
   return null;
 };
 
-/** `lead_data._joiningRegistrationExtras` JSON for stats / list SQL. */
+/** Build lateral-track SQL for `admissions` rows (`''` or `'a'` table alias). */
+export const buildSqlBtechLateralTrack = (tableAlias = '') => {
+  const p = tableAlias ? `${tableAlias}.` : '';
+  const sqlJoiningRegistrationExtras = `COALESCE(
+  CASE
+    WHEN JSON_VALID(${p}lead_data)
+      AND JSON_TYPE(JSON_EXTRACT(${p}lead_data, '$._joiningRegistrationExtras')) = 'OBJECT'
+    THEN JSON_EXTRACT(${p}lead_data, '$._joiningRegistrationExtras')
+    ELSE JSON_OBJECT()
+  END,
+  JSON_OBJECT()
+)`;
+
+  const sqlRegStudentStatus = `NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.student_status')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.studentStatus')),
+  ''
+)), '')`;
+
+  const sqlRegSemester = `NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.semester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.current_semester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.currentSemester')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.semister')),
+  ''
+)), '')`;
+
+  const sqlRegIntakeYear = `CAST(NULLIF(TRIM(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.current_year')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.currentYear')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.academic_year')),
+  JSON_UNQUOTE(JSON_EXTRACT(${sqlJoiningRegistrationExtras}, '$.academicYear')),
+  ''
+)), '') AS UNSIGNED)`;
+
+  const sqlAdmissionSeriesYear = `CAST(NULLIF(LEFT(TRIM(${p}admission_number), 4), '') AS UNSIGNED)`;
+
+  const sqlIsBtechCourseName = `(
+  (
+    LOWER(TRIM(COALESCE(${p}course, ''))) REGEXP 'b[.]?[[:space:]]*tech'
+    OR REPLACE(LOWER(TRIM(COALESCE(${p}course, ''))), ' ', '') LIKE '%btech%'
+  )
+  AND LOWER(TRIM(COALESCE(${p}course, ''))) NOT REGEXP 'm[.]?[[:space:]]*tech'
+)`;
+
+  const sqlIsBtechLateralAdmission = `(
+  ${sqlIsBtechCourseName}
+  AND (
+    LOWER(${sqlRegStudentStatus}) LIKE '%lateral%'
+    OR ${sqlRegSemester} = '2-1'
+    OR (
+      ${sqlAdmissionSeriesYear} IS NOT NULL
+      AND ${sqlRegIntakeYear} IS NOT NULL
+      AND ${sqlRegIntakeYear} = ${sqlAdmissionSeriesYear} - 1
+    )
+    OR UPPER(TRIM(COALESCE(${p}quota, ''))) LIKE '%LATERAL%ENTRY%'
+    OR UPPER(TRIM(COALESCE(${p}quota, ''))) = 'LATERAL ENTRY'
+    OR LOWER(TRIM(COALESCE(${p}course, ''))) LIKE '%(lateral)%'
+  )
+)`;
+
+  return `(CASE WHEN ${sqlIsBtechLateralAdmission} THEN 1 ELSE 0 END)`;
+};
+
+/** `lead_data._joiningRegistrationExtras` JSON for stats / list SQL (unqualified `admissions`). */
 export const SQL_JOINING_REGISTRATION_EXTRAS = `COALESCE(
   CASE
     WHEN JSON_VALID(lead_data)
@@ -205,7 +269,9 @@ export const SQL_IS_BTECH_LATERAL_ADMISSION = `(
   )
 )`;
 
-export const SQL_BTECH_LATERAL_TRACK = `(CASE WHEN ${SQL_IS_BTECH_LATERAL_ADMISSION} THEN 1 ELSE 0 END)`;
+export const SQL_BTECH_LATERAL_TRACK = buildSqlBtechLateralTrack('');
+/** Lateral track on pivot queries (`FROM admissions a …`). */
+export const SQL_A_BTECH_LATERAL_TRACK = buildSqlBtechLateralTrack('a');
 
 /**
  * Course string for secondary `students.course` — catalog names only (no "(LATERAL)" suffix).
