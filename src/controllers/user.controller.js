@@ -236,7 +236,7 @@ export const getAssignableUsers = async (req, res) => {
   try {
     const pool = getPool();
     const [users] = await pool.execute(
-      `SELECT id, hrms_id, emp_no, name, email, role_name, is_active
+      `SELECT id, hrms_id, emp_no, name, email, role_name, designation, is_active
        FROM users
        WHERE is_active = 1
          AND role_name IN ('Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO')
@@ -251,6 +251,7 @@ export const getAssignableUsers = async (req, res) => {
       name: u.name,
       email: u.email,
       roleName: u.role_name,
+      designation: u.designation,
       isActive: u.is_active === 1 || u.is_active === true,
     }));
 
@@ -263,7 +264,10 @@ export const getAssignableUsers = async (req, res) => {
       email: u.email,
       roleName: u.roleName,
       isActive: u.isActive,
+      division: u.division,
       department: u.department,
+      group: u.group,
+      designation: u.designation,
     }));
 
     return successResponse(res, payload, 'Assignable users retrieved successfully', 200);
