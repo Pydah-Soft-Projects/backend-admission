@@ -114,6 +114,38 @@ export function resolveLeadStatus(desiredLeadStatus, callStatus, visitStatus) {
   return canonicalizeLeadStatus(current || 'New');
 }
 
+function isHighPriorityPipelineStatus(status) {
+  const i = LEAD_STATUS_PRIORITY.indexOf(status);
+  return i >= 0 && i <= 1; // Confirmed, Visited
+}
+
+/**
+ * Merged lead_status after explicitly writing call_status or visit_status.
+ * The channel being written drives the pipeline unless the other channel is Confirmed/Visited.
+ * (Avoids visit "Interested" blocking call "Not Interested" on manager/counsellor updates.)
+ *
+ * @param {'call_status'|'visit_status'} channel
+ * @param {string} newChannelValue
+ * @param {string|null|undefined} otherChannelValue
+ * @param {string|null|undefined} currentLeadStatus
+ */
+export function resolveLeadStatusAfterChannelWrite(
+  channel,
+  newChannelValue,
+  otherChannelValue,
+  currentLeadStatus
+) {
+  const mappedWritten = mapChannelStatusToLeadStatus(newChannelValue);
+  if (!mappedWritten) return canonicalizeLeadStatus(currentLeadStatus);
+
+  const mappedOther = mapChannelStatusToLeadStatus(otherChannelValue);
+  if (mappedOther && isHighPriorityPipelineStatus(mappedOther)) {
+    return selectHigherPriorityStatus(mappedOther, mappedWritten);
+  }
+
+  return mappedWritten;
+}
+
 /**
  * Activity log channel for role defaults (managers write call/visit, not raw lead_status).
  * @param {{ statusChannel?: string, isManager?: boolean, roleName?: string, newStatus?: string }} opts

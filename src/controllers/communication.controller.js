@@ -1,6 +1,6 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
-import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
+import { resolveLeadStatusAfterChannelWrite } from '../utils/leadChannelStatus.util.js';
 import { sendSmsThroughBulkSmsApps, getBulkSmsAccountInfo } from '../services/bulkSms.service.js';
 import {
   ensureLeadAndNumbers,
@@ -60,7 +60,12 @@ export const logCallCommunication = async (req, res) => {
         [lead.id]
       );
       const st = stRows[0] || {};
-      const nextLead = resolveLeadStatus(st.lead_status || 'New', oc, st.visit_status ?? null);
+      const nextLead = resolveLeadStatusAfterChannelWrite(
+        'call_status',
+        oc,
+        st.visit_status ?? null,
+        st.lead_status || 'New'
+      );
       
       const visitSql = st.assigned_to_pro ? ', visit_status = ?' : '';
       const visitParams = st.assigned_to_pro 

@@ -1,7 +1,11 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
-import { resolveLeadStatus, defaultActivityStatusChannel } from '../utils/leadChannelStatus.util.js';
+import {
+  resolveLeadStatus,
+  resolveLeadStatusAfterChannelWrite,
+  defaultActivityStatusChannel,
+} from '../utils/leadChannelStatus.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -105,7 +109,12 @@ export const addActivity = async (req, res) => {
           if (metadata.visitDate && String(newStatus).trim() === 'Assigned') {
             return errorResponse(res, 'Visit Diary outcome cannot be "Assigned". Please choose an actual visit outcome.', 400);
           }
-          const resolved = resolveLeadStatus(lead.lead_status, nextCallBase, newStatus);
+          const resolved = resolveLeadStatusAfterChannelWrite(
+            'visit_status',
+            newStatus,
+            nextCallBase,
+            lead.lead_status
+          );
           oldStatus = lead.lead_status;
           newStatusValue = resolved;
           activityType = 'status_change';
@@ -125,7 +134,12 @@ export const addActivity = async (req, res) => {
           updateValues.push(resolved);
           leadModified = true;
         } else if (requestedChannel === 'call_status') {
-          const resolved = resolveLeadStatus(lead.lead_status, newStatus, nextVisitBase);
+          const resolved = resolveLeadStatusAfterChannelWrite(
+            'call_status',
+            newStatus,
+            nextVisitBase,
+            lead.lead_status
+          );
           oldStatus = lead.lead_status;
           newStatusValue = resolved;
           activityType = 'status_change';
