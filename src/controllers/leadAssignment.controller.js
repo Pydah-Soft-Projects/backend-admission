@@ -2925,6 +2925,8 @@ export const getUserAnalytics = async (req, res) => {
       perfRole,
       /** When true/1, return only roster fields + active lead counts (communications UI); skips heavy analytics SQL. */
       rosterOnly,
+      /** Print detailed report: only return matching users list (no heavy analytics). */
+      printUsersOnly,
       /** Super Admin dashboard: current `leads` rows only (no activity date window / default rolling range). */
       currentPortfolioOnly,
       /** Communications roster: filter portfolio counts / student-group column by `leads.student_group`. */
@@ -2953,6 +2955,11 @@ export const getUserAnalytics = async (req, res) => {
       String(rosterOnly || '').toLowerCase() === 'true' ||
       rosterOnly === '1' ||
       String(rosterOnly || '') === '1';
+
+    const isPrintUsersOnly =
+      String(printUsersOnly || '').toLowerCase() === 'true' ||
+      printUsersOnly === '1' ||
+      String(printUsersOnly || '') === '1';
 
     const isVisitDiaryOnly =
       String(visitDiaryOnly || '').toLowerCase() === 'true' ||
@@ -2992,6 +2999,7 @@ export const getUserAnalytics = async (req, res) => {
       academicYear,
       includeAssignmentDetails,
       visitDiaryOnly: isVisitDiaryOnly,
+      printUsersOnly: isPrintUsersOnly,
       division,
       department,
       group,
@@ -3642,13 +3650,17 @@ export const getUserAnalytics = async (req, res) => {
       );
       if (!portfolioPagedFastPath) {
         const batch1Ids = perfFilteredUsers.map((u) => u.id).filter(Boolean);
-        if (deferHrmsHydrateToPage) {
-          batch1Results = await runBatch1(batch1Ids);
-        } else {
-          [, batch1Results] = await Promise.all([
-            hydrateUserOrgFromHrms(users, pool),
-            runBatch1(batch1Ids),
-          ]);
+        if (!isPrintUsersOnly) {
+          if (deferHrmsHydrateToPage) {
+            batch1Results = await runBatch1(batch1Ids);
+          } else {
+            [, batch1Results] = await Promise.all([
+              hydrateUserOrgFromHrms(users, pool),
+              runBatch1(batch1Ids),
+            ]);
+          }
+        } else if (!deferHrmsHydrateToPage) {
+          await hydrateUserOrgFromHrms(users, pool);
         }
       } else if (!deferHrmsHydrateToPage) {
         await hydrateUserOrgFromHrms(users, pool);
@@ -3673,7 +3685,7 @@ export const getUserAnalytics = async (req, res) => {
       perfFilteredUsers = [...perfFilteredUsers].sort((a, b) =>
         String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
       );
-      if (!portfolioPagedFastPath) {
+      if (!portfolioPagedFastPath && !isPrintUsersOnly) {
         const batch1IdsElse = perfFilteredUsers.map((u) => u.id).filter(Boolean);
         batch1Results = await runBatch1(batch1IdsElse);
       }
@@ -3724,6 +3736,32 @@ export const getUserAnalytics = async (req, res) => {
       const start = (safePage - 1) * limitNum;
       pageUsers = perfFilteredUsers.slice(start, start + limitNum);
       pagination = { page: safePage, limit: limitNum, total, pages };
+    }
+
+    if (isPrintUsersOnly) {
+      // Ensure org fields exist for printing filters/labels.
+      if (pageUsers.length > 0) {
+        await hydrateUserOrgFromHrms(pageUsers, pool);
+      }
+      const minimalUsers = pageUsers.map((u) => ({
+        id: u.id,
+        userId: u.id,
+        _id: u.id,
+        name: u.name,
+        userName: u.user_name,
+        email: u.email,
+        roleName: u.role_name,
+        isActive: u.is_active === 1 || u.is_active === true,
+        division: u.division || null,
+        department: u.department || null,
+        group: u.group || null,
+      }));
+      return successResponse(
+        res,
+        { users: minimalUsers, ...(pagination ? { pagination } : {}) },
+        'User list retrieved successfully',
+        200
+      );
     }
 
     if (portfolioPagedFastPath) {
@@ -4222,7 +4260,11 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
            FROM pro_leave_logs
            WHERE user_id IN (${cohortUserIdPlaceholders})
              AND leave_date BETWEEN ? AND ?`,
-          [...cohortScopeUserIds, startDate, endDate]
+          [
+            ...cohortScopeUserIds,
+            rangeStartStr || '1970-01-01',
+            rangeEndStr || '2099-12-31',
+          ]
         )
       ]);
 
