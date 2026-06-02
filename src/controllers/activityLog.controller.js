@@ -3,6 +3,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
 import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
+import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // Helper function to format activity log data
@@ -53,8 +54,10 @@ export const addActivity = async (req, res) => {
     const isPro = req.user.roleName === 'PRO';
     const isStudentCounselor = req.user.roleName === 'Student Counselor';
     const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
+    const managerHasLeadAccess =
+      req.user.isManager === true && (await managerCanAccessLead(pool, userId, lead));
 
-    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
+    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned && !managerHasLeadAccess) {
       return errorResponse(res, 'Access denied', 403);
     }
 
@@ -82,7 +85,14 @@ export const addActivity = async (req, res) => {
       // Can be overridden by statusChannel in request body.
       const requestedChannel = statusChannel || (isPro ? 'visit_status' : isStudentCounselor ? 'call_status' : 'lead_status');
       
-      if (isSuperAdmin || isAdmin || (isStudentCounselor && lead.assigned_to === userId) || (isPro && lead.assigned_to_pro === userId) || (isAssigned && !isPro && !isStudentCounselor)) {
+      if (
+        isSuperAdmin ||
+        isAdmin ||
+        managerHasLeadAccess ||
+        (isStudentCounselor && lead.assigned_to === userId) ||
+        (isPro && lead.assigned_to_pro === userId) ||
+        (isAssigned && !isPro && !isStudentCounselor)
+      ) {
         
         if (requestedChannel === 'visit_status') {
           // Guard: Visit Diary entries must never set visit_status to "Assigned".
@@ -264,10 +274,12 @@ export const getActivityLogs = async (req, res) => {
     const isAdmin = req.user.roleName === 'Admin';
     const isProViewer = req.user.roleName === 'PRO';
     const isStudentCounselorViewer = req.user.roleName === 'Student Counselor';
-    const isElevatedViewer = isSuperAdmin || isAdmin;
+    const managerHasLeadAccess =
+      req.user.isManager === true && (await managerCanAccessLead(pool, userId, lead));
+    const isElevatedViewer = isSuperAdmin || isAdmin || managerHasLeadAccess;
     const isAssigned = lead.assigned_to === userId || lead.assigned_to_pro === userId;
 
-    if (!isSuperAdmin && !isAdmin && !isProViewer && !isAssigned) {
+    if (!isSuperAdmin && !isAdmin && !isProViewer && !isAssigned && !managerHasLeadAccess) {
       return errorResponse(res, 'Access denied', 403);
     }
 

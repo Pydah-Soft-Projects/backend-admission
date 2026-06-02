@@ -18,6 +18,7 @@ import {
   quotaNamesFromCatalog,
 } from '../utils/studentQuotas.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
+import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
@@ -708,18 +709,8 @@ export const getLead = async (req, res) => {
     else if (leadData.assigned_to === userId || leadData.assigned_to_pro === userId) {
       hasAccess = true;
     }
-    // If user is a Manager, check if lead is assigned to one of their team members
     else if (req.user.isManager) {
-      const [teamMembers] = await pool.execute(
-        'SELECT id FROM users WHERE managed_by = ?',
-        [userId]
-      );
-      const teamMemberIds = teamMembers.map(m => m.id);
-
-      // Check if lead is assigned to manager or any team member
-      if (leadData.assigned_to && (leadData.assigned_to === userId || teamMemberIds.includes(leadData.assigned_to))) {
-        hasAccess = true;
-      }
+      hasAccess = await managerCanAccessLead(pool, userId, leadData);
     }
 
     if (!hasAccess) {
@@ -1139,8 +1130,10 @@ export const updateLead = async (req, res) => {
     const isPro = req.user.roleName === 'PRO';
     const isStudentCounselor = req.user.roleName === 'Student Counselor';
     const isAssigned = currentLead.assigned_to === userId || currentLead.assigned_to_pro === userId;
+    const managerHasLeadAccess =
+      req.user.isManager === true && (await managerCanAccessLead(pool, userId, currentLead));
 
-    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned) {
+    if (!isSuperAdmin && !isAdmin && !isPro && !isAssigned && !managerHasLeadAccess) {
       return errorResponse(res, 'Access denied', 403);
     }
 
