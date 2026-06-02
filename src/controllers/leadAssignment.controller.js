@@ -2676,15 +2676,19 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
   const cohortUserIdSet = new Set(cohortScopeUserIds);
   const cohortUserIdPlaceholders = cohortScopeUserIds.map(() => '?').join(',');
 
+  // Visit Diary date range must filter by the selected visit date (metadata.visitDate),
+  // not by when the log row was written (a.created_at).
+  const visitDateExpr = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitDate')), '')`;
+
   const assignmentDateConditions = [];
   const assignmentDateParams = [];
   if (rangeStartStr) {
-    assignmentDateConditions.push('a.created_at >= ?');
-    assignmentDateParams.push(`${rangeStartStr} 00:00:00`);
+    assignmentDateConditions.push(`${visitDateExpr} >= ?`);
+    assignmentDateParams.push(`${rangeStartStr}`);
   }
   if (rangeEndStr) {
-    assignmentDateConditions.push('a.created_at <= ?');
-    assignmentDateParams.push(`${rangeEndStr} 23:59:59`);
+    assignmentDateConditions.push(`${visitDateExpr} <= ?`);
+    assignmentDateParams.push(`${rangeEndStr}`);
   }
   if (academicYearFilter?.useAcademicYear) {
     assignmentDateConditions.push('l.academic_year = ?');
@@ -2699,6 +2703,7 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
 
   const visitLogWhere = `a.type = 'status_change'
     AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status'
+    AND NULLIF(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitDate')), '') IS NOT NULL
     AND a.new_status IS NOT NULL AND TRIM(a.new_status) <> '' AND a.new_status <> 'Assigned'
     AND (
       a.performed_by IN (${cohortUserIdPlaceholders})
@@ -2754,12 +2759,18 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
   if (visitLeadsSet.size > 0) {
     const leadIdArray = Array.from(visitLeadsSet);
     const [allVisitDates] = await pool.execute(
-      `SELECT lead_id, DATE(created_at) as visit_date
+      `SELECT
+         lead_id,
+         COALESCE(
+           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitDate')), ''),
+           DATE_FORMAT(created_at, '%Y-%m-%d')
+         ) as visit_date
        FROM activity_logs
        WHERE lead_id IN (${leadIdArray.map(() => '?').join(',')})
          AND type = 'status_change'
          AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.statusChannel')) = 'visit_status'
-       GROUP BY lead_id, DATE(created_at)
+         AND NULLIF(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitDate')), '') IS NOT NULL
+      GROUP BY lead_id, visit_date
        ORDER BY lead_id, visit_date ASC`,
       leadIdArray
     );
