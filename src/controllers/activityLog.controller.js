@@ -114,7 +114,13 @@ export const addActivity = async (req, res) => {
           
           updateFields.push('visit_status = ?');
           updateValues.push(newStatus);
-          
+
+          const visitUnchanged =
+            String(lead.visit_status ?? '').trim() === String(newStatus).trim();
+          if (visitUnchanged && resolved !== lead.lead_status) {
+            metadata.pipelineResync = true;
+          }
+
           updateFields.push('lead_status = ?');
           updateValues.push(resolved);
           leadModified = true;
@@ -125,10 +131,16 @@ export const addActivity = async (req, res) => {
           activityType = 'status_change';
           metadata.statusChannel = 'call_status';
           metadata.callStatus = newStatus;
-          
+
+          const callUnchanged =
+            String(lead.call_status ?? '').trim() === String(newStatus).trim();
+          if (callUnchanged && resolved !== lead.lead_status) {
+            metadata.pipelineResync = true;
+          }
+
           updateFields.push('call_status = ?');
           updateValues.push(newStatus);
-          
+
           updateFields.push('lead_status = ?');
           updateValues.push(resolved);
           leadModified = true;
