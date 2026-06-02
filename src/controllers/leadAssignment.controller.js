@@ -2998,6 +2998,7 @@ export const getUserAnalytics = async (req, res) => {
       userId,
       academicYear,
       includeAssignmentDetails,
+      activeOnly: true,
       visitDiaryOnly: isVisitDiaryOnly,
       printUsersOnly: isPrintUsersOnly,
       division,
@@ -3455,6 +3456,9 @@ export const getUserAnalytics = async (req, res) => {
       userConditions.push('role_name = ?');
       userParams.push(perfRoleNorm);
     }
+
+    /** Reports: exclude inactive users by default (table + print). */
+    userConditions.push('(is_active = 1 OR is_active = true)');
 
     /** Visit Diary report: only PRO officers unless a specific userId is selected. */
     if (isVisitDiaryOnly && !userId) {
