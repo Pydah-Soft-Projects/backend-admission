@@ -113,3 +113,20 @@ export function resolveLeadStatus(desiredLeadStatus, callStatus, visitStatus) {
   // 3. Fallback to current or default
   return canonicalizeLeadStatus(current || 'New');
 }
+
+/**
+ * Activity log channel for role defaults (managers write call/visit, not raw lead_status).
+ * @param {{ statusChannel?: string, isManager?: boolean, roleName?: string, newStatus?: string }} opts
+ */
+export function defaultActivityStatusChannel(opts) {
+  const { statusChannel, isManager, roleName, newStatus } = opts;
+  if (statusChannel) return statusChannel;
+  if (roleName === 'PRO') return 'visit_status';
+  if (roleName === 'Student Counselor') return 'call_status';
+  if (isManager && newStatus) {
+    const s = normalize(newStatus);
+    if (s === 'scheduled revisit' || s === 're-visit' || s === 'revisit') return 'visit_status';
+    return 'call_status';
+  }
+  return 'lead_status';
+}

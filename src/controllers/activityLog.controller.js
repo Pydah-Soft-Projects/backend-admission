@@ -1,7 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { hasElevatedAdminPrivileges } from '../utils/role.util.js';
-import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
+import { resolveLeadStatus, defaultActivityStatusChannel } from '../utils/leadChannelStatus.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -83,7 +83,12 @@ export const addActivity = async (req, res) => {
       // Determine which channel to update. 
       // Defaults: PRO -> visit_status, Student Counselor -> call_status, Others -> lead_status.
       // Can be overridden by statusChannel in request body.
-      const requestedChannel = statusChannel || (isPro ? 'visit_status' : isStudentCounselor ? 'call_status' : 'lead_status');
+      const requestedChannel = defaultActivityStatusChannel({
+        statusChannel,
+        isManager: req.user.isManager === true,
+        roleName: req.user.roleName,
+        newStatus,
+      });
       
       if (
         isSuperAdmin ||
