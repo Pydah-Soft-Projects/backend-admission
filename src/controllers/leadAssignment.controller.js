@@ -2554,6 +2554,158 @@ async function fetchPortfolioCohortSummaryTotals(pool, userIds, leadFiltersSql, 
   };
 }
 
+/** Stable string key for user id maps (MySQL may return Buffer/string variants). */
+function analyticsUserIdKey(id) {
+  if (id == null) return '';
+  return String(id).trim();
+}
+
+/** Distinct portfolio lead counts per user and `leads.student_group` (current assignment snapshot). */
+async function fetchPortfolioStudentGroupCountsByUser(pool, userIds, leadFiltersSql, leadFiltersParams) {
+  if (!userIds?.length) return [];
+  const ph = userIds.map(() => '?').join(',');
+  const [rows] = await pool.execute(
+    `SELECT u.id AS user_id,
+            COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') AS student_group,
+            COUNT(DISTINCT l.id) AS cnt
+     FROM users u
+     INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+     WHERE u.id IN (${ph})${leadFiltersSql}
+     GROUP BY u.id, COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
+     ORDER BY u.id, cnt DESC`,
+    [...userIds, ...leadFiltersParams]
+  );
+  return rows || [];
+}
+
+/** Portfolio leads per user × mandal × student_group (raw mandal; normalized in JS). */
+async function fetchPortfolioMandalStudentGroupCountsByUser(pool, userIds, leadFiltersSql, leadFiltersParams) {
+  if (!userIds?.length) return [];
+  const ph = userIds.map(() => '?').join(',');
+  const [rows] = await pool.execute(
+    `SELECT u.id AS user_id,
+            COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') AS mandal,
+            l.needs_manual_update,
+            COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') AS student_group,
+            COUNT(DISTINCT l.id) AS cnt
+     FROM users u
+     INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+     WHERE u.id IN (${ph})${leadFiltersSql}
+     GROUP BY u.id,
+              COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown'),
+              l.needs_manual_update,
+              COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
+     ORDER BY u.id, cnt DESC`,
+    [...userIds, ...leadFiltersParams]
+  );
+  return rows || [];
+}
+
+async function fetchActiveMandalNamesSet(pool) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT DISTINCT LOWER(TRIM(name)) AS name FROM mandals WHERE is_active = 1`
+    );
+    return new Set((rows || []).map((r) => String(r.name || '').trim().toLowerCase()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+function normalizePortfolioMandalLabel(mandalRaw, needsManualUpdate, validMandalsSet) {
+  let mandal = String(mandalRaw || '').trim() || 'Unknown';
+  const mandalLow = mandal.toLowerCase();
+  if (
+    needsManualUpdate === 1 ||
+    needsManualUpdate === 2 ||
+    (validMandalsSet && validMandalsSet.size > 0 && !validMandalsSet.has(mandalLow))
+  ) {
+    return mandal !== 'Unknown' ? 'Others' : 'Unknown';
+  }
+  return mandal;
+}
+
+function applyPortfolioMandalRowsToStats(stats, rows, validMandalsSet) {
+  if (!stats) return;
+  if (!stats._mandalBreakdownMap) stats._mandalBreakdownMap = new Map();
+  rows.forEach((row) => {
+    const mandal = normalizePortfolioMandalLabel(row.mandal, row.needs_manual_update, validMandalsSet);
+    const sg = String(row.student_group || 'Unknown').trim() || 'Unknown';
+    const cnt = typeof row.cnt === 'bigint' ? Number(row.cnt) : Number(row.cnt ?? 0);
+    if (!cnt) return;
+    if (!stats._mandalBreakdownMap.has(mandal)) {
+      stats._mandalBreakdownMap.set(mandal, { total: 0, studentGroups: {}, statusCounts: {} });
+    }
+    const bucket = stats._mandalBreakdownMap.get(mandal);
+    bucket.total += cnt;
+    bucket.studentGroups[sg] = (bucket.studentGroups[sg] || 0) + cnt;
+  });
+}
+
+/** Portfolio leads per user × mandal × role-based status (call_status / visit_status / lead_status). */
+async function fetchPortfolioMandalStatusCountsByUser(pool, userIds, leadFiltersSql, leadFiltersParams) {
+  if (!userIds?.length) return [];
+  const ph = userIds.map(() => '?').join(',');
+  const [rows] = await pool.execute(
+    `SELECT u.id AS user_id,
+            u.role_name,
+            COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') AS mandal,
+            l.needs_manual_update,
+            CASE
+              WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
+              WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
+                   AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
+              ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
+            END AS computed_status,
+            COUNT(DISTINCT l.id) AS cnt
+     FROM users u
+     INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
+     WHERE u.id IN (${ph})${leadFiltersSql}
+     GROUP BY u.id,
+              u.role_name,
+              COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown'),
+              l.needs_manual_update,
+              CASE
+                WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
+                WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
+                     AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
+                ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
+              END
+     ORDER BY u.id, cnt DESC`,
+    [...userIds, ...leadFiltersParams]
+  );
+  return rows || [];
+}
+
+function applyPortfolioMandalStatusRowsToStats(stats, rows, validMandalsSet) {
+  if (!stats) return;
+  if (!stats._mandalBreakdownMap) stats._mandalBreakdownMap = new Map();
+  rows.forEach((row) => {
+    const mandal = normalizePortfolioMandalLabel(row.mandal, row.needs_manual_update, validMandalsSet);
+    const cnt = typeof row.cnt === 'bigint' ? Number(row.cnt) : Number(row.cnt ?? 0);
+    if (!cnt) return;
+    if (!stats._mandalBreakdownMap.has(mandal)) {
+      stats._mandalBreakdownMap.set(mandal, { total: 0, studentGroups: {}, statusCounts: {} });
+    }
+    const bucket = stats._mandalBreakdownMap.get(mandal);
+    const statusKey = canonicalCohortBucketForRole(row.role_name, row.computed_status);
+    bucket.statusCounts[statusKey] = (bucket.statusCounts[statusKey] || 0) + cnt;
+  });
+}
+
+function mandalBreakdownMapToArray(mandalBreakdownMap) {
+  if (!mandalBreakdownMap || !(mandalBreakdownMap instanceof Map)) return [];
+  return Array.from(mandalBreakdownMap.entries())
+    .map(([mandal, data]) => ({
+      mandal,
+      total: Number(data.total) || 0,
+      studentGroups: data.studentGroups || {},
+      statusCounts: data.statusCounts || {},
+    }))
+    .filter((x) => x.total > 0)
+    .sort((a, b) => b.total - a.total || String(a.mandal).localeCompare(String(b.mandal)));
+}
+
 /**
  * Users with ≥1 current portfolio lead in this `leads.student_group` (MySQL only).
  */
@@ -2927,6 +3079,10 @@ export const getUserAnalytics = async (req, res) => {
       rosterOnly,
       /** Print detailed report: only return matching users list (no heavy analytics). */
       printUsersOnly,
+      /** User Performance print: larger page size cap (fewer round-trips). */
+      printPortfolioReport,
+      /** Skip `fetchPortfolioCohortSummaryTotals` when UI only needs per-user rows (e.g. print). */
+      skipCohortSummary,
       /** Super Admin dashboard: current `leads` rows only (no activity date window / default rolling range). */
       currentPortfolioOnly,
       /** Communications roster: filter portfolio counts / student-group column by `leads.student_group`. */
@@ -2960,6 +3116,16 @@ export const getUserAnalytics = async (req, res) => {
       String(printUsersOnly || '').toLowerCase() === 'true' ||
       printUsersOnly === '1' ||
       String(printUsersOnly || '') === '1';
+
+    const isPrintPortfolioReport =
+      String(printPortfolioReport || '').toLowerCase() === 'true' ||
+      printPortfolioReport === '1' ||
+      String(printPortfolioReport || '') === '1';
+
+    const skipCohortSummaryTotals =
+      String(skipCohortSummary || '').toLowerCase() === 'true' ||
+      skipCohortSummary === '1' ||
+      String(skipCohortSummary || '') === '1';
 
     const isVisitDiaryOnly =
       String(visitDiaryOnly || '').toLowerCase() === 'true' ||
@@ -3001,6 +3167,8 @@ export const getUserAnalytics = async (req, res) => {
       activeOnly: true,
       visitDiaryOnly: isVisitDiaryOnly,
       printUsersOnly: isPrintUsersOnly,
+      printPortfolioReport: isPrintPortfolioReport,
+      skipCohortSummary: skipCohortSummaryTotals,
       division,
       department,
       group,
@@ -3014,6 +3182,10 @@ export const getUserAnalytics = async (req, res) => {
       perfRole,
       rosterOnly: isRosterOnly,
       currentPortfolioOnly: isCurrentPortfolioOnly,
+      /** Bumps analytics cache when portfolio per-user student_group breakdown is included. */
+      portfolioStudentGroupBreakdown: isCurrentPortfolioOnly,
+      portfolioMandalBreakdown: isCurrentPortfolioOnly,
+      portfolioMandalStatusBreakdown: isCurrentPortfolioOnly,
       studentGroup: studentGroupQuery != null && String(studentGroupQuery).trim() !== '' ? String(studentGroupQuery).trim() : null,
       rosterDistrict:
         rosterDistrictQuery != null && String(rosterDistrictQuery).trim() !== '' ? String(rosterDistrictQuery).trim() : null,
@@ -3647,6 +3819,10 @@ export const getUserAnalytics = async (req, res) => {
     let perfFilteredUsers;
     let batch1Results = null;
     let portfolioCohortSummaryPrefetched = null;
+    let portfolioStudentGroupRows = [];
+    let portfolioMandalStudentGroupRows = [];
+    let portfolioMandalStatusRows = [];
+    let validMandalsSet = new Set();
 
     if (!needsPostHydratePerfFilter && !includeAssignmentDetailsForWork) {
       perfFilteredUsers = [...users].sort((a, b) =>
@@ -3712,9 +3888,10 @@ export const getUserAnalytics = async (req, res) => {
       allowPagination && pageQuery != null && pageQuery !== ''
         ? Math.max(1, parseInt(String(pageQuery), 10) || 1)
         : null;
+    const maxPageLimit = isPrintPortfolioReport ? 500 : 100;
     const limitNum =
       allowPagination && limitQuery != null && limitQuery !== ''
-        ? Math.min(100, Math.max(1, parseInt(String(limitQuery), 10) || 25))
+        ? Math.min(maxPageLimit, Math.max(1, parseInt(String(limitQuery), 10) || 25))
         : null;
     const isPaginated = pageNum != null && limitNum != null;
 
@@ -3776,10 +3953,28 @@ export const getUserAnalytics = async (req, res) => {
       } else if (!deferHrmsHydrateToPage && perfFilteredUsers.length > 0) {
         await hydrateUserOrgFromHrms(perfFilteredUsers, pool);
       }
-      [batch1Results, portfolioCohortSummaryPrefetched] = await Promise.all([
-        runBatch1(pageIds),
-        fetchPortfolioCohortSummaryTotals(pool, cohortIds, leadFiltersSql, leadFiltersParams),
-      ]);
+      const cohortSummaryPromise = skipCohortSummaryTotals
+        ? Promise.resolve(null)
+        : fetchPortfolioCohortSummaryTotals(pool, cohortIds, leadFiltersSql, leadFiltersParams);
+      const studentGroupPromise = fetchPortfolioStudentGroupCountsByUser(
+        pool,
+        pageIds,
+        leadFiltersSql,
+        leadFiltersParams
+      );
+      const mandalBreakdownPromise = (async () => {
+        validMandalsSet = await fetchActiveMandalNamesSet(pool);
+        const [sgRows, statusRows] = await Promise.all([
+          fetchPortfolioMandalStudentGroupCountsByUser(pool, pageIds, leadFiltersSql, leadFiltersParams),
+          fetchPortfolioMandalStatusCountsByUser(pool, pageIds, leadFiltersSql, leadFiltersParams),
+        ]);
+        return { sgRows, statusRows };
+      })();
+      let mandalBreakdownResult;
+      [batch1Results, portfolioCohortSummaryPrefetched, portfolioStudentGroupRows, mandalBreakdownResult] =
+        await Promise.all([runBatch1(pageIds), cohortSummaryPromise, studentGroupPromise, mandalBreakdownPromise]);
+      portfolioMandalStudentGroupRows = mandalBreakdownResult?.sgRows || [];
+      portfolioMandalStatusRows = mandalBreakdownResult?.statusRows || [];
     } else if (deferHrmsHydrateToPage && pageUsers.length > 0) {
       await hydrateUserOrgFromHrms(pageUsers, pool);
     }
@@ -3820,23 +4015,25 @@ export const getUserAnalytics = async (req, res) => {
 
     // Initialize statsByUserId Map with all filtered users
     const statsByUserId = new Map();
-    filteredUserIds.forEach(uid => {
-      statsByUserId.set(uid, {
+    filteredUserIds.forEach((uid) => {
+      statsByUserId.set(analyticsUserIdKey(uid), {
         total_assigned: 0,
-        active_leads: 0, 
+        active_leads: 0,
         total_converted: 0,
-        statusBreakdown: {}
+        statusBreakdown: {},
+        studentGroupBreakdown: {},
+        _mandalBreakdownMap: new Map(),
       });
     });
 
     // Hydrate from query results
     portfolioCounts.forEach(row => {
-      const stats = statsByUserId.get(row.user_id);
+      const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
       if (stats) stats.total_assigned = row.total_handled;
     });
 
     actionCounts.forEach(row => {
-      const stats = statsByUserId.get(row.user_id);
+      const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
       const statusKey = row.lead_status || row.computed_status || row.bucket;
       const countVal = Number(row.status_count ?? row.cnt ?? 0);
       if (stats && statusKey) {
@@ -3845,13 +4042,65 @@ export const getUserAnalytics = async (req, res) => {
     });
 
     conversionCounts.forEach(row => {
-      const stats = statsByUserId.get(row.user_id);
+      const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
       if (stats) stats.total_converted = row.converted_count;
     });
 
     activePortfolioCounts.forEach(row => {
-      const stats = statsByUserId.get(row.user_id);
+      const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
       if (stats) stats.active_leads = row.active_leads;
+    });
+
+    if (isCurrentPortfolioOnly && filteredUserIds.length) {
+      const needStudentGroups = portfolioStudentGroupRows.length === 0;
+      const needMandalSg = portfolioMandalStudentGroupRows.length === 0;
+      const needMandalStatus = portfolioMandalStatusRows.length === 0;
+      if (needStudentGroups || needMandalSg || needMandalStatus) {
+        if (!validMandalsSet || validMandalsSet.size === 0) {
+          validMandalsSet = await fetchActiveMandalNamesSet(pool);
+        }
+        const fetches = [
+          needStudentGroups
+            ? fetchPortfolioStudentGroupCountsByUser(pool, filteredUserIds, leadFiltersSql, leadFiltersParams)
+            : Promise.resolve(portfolioStudentGroupRows),
+          needMandalSg
+            ? fetchPortfolioMandalStudentGroupCountsByUser(pool, filteredUserIds, leadFiltersSql, leadFiltersParams)
+            : Promise.resolve(portfolioMandalStudentGroupRows),
+          needMandalStatus
+            ? fetchPortfolioMandalStatusCountsByUser(pool, filteredUserIds, leadFiltersSql, leadFiltersParams)
+            : Promise.resolve(portfolioMandalStatusRows),
+        ];
+        [portfolioStudentGroupRows, portfolioMandalStudentGroupRows, portfolioMandalStatusRows] =
+          await Promise.all(fetches);
+      } else if (!validMandalsSet || validMandalsSet.size === 0) {
+        validMandalsSet = await fetchActiveMandalNamesSet(pool);
+      }
+    }
+    portfolioStudentGroupRows.forEach((row) => {
+      const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
+      if (!stats) return;
+      if (!stats.studentGroupBreakdown) stats.studentGroupBreakdown = {};
+      const sg = String(row.student_group || 'Unknown').trim() || 'Unknown';
+      const cnt = typeof row.cnt === 'bigint' ? Number(row.cnt) : Number(row.cnt ?? 0);
+      stats.studentGroupBreakdown[sg] = (stats.studentGroupBreakdown[sg] || 0) + cnt;
+    });
+    const mandalSgRowsByUser = new Map();
+    portfolioMandalStudentGroupRows.forEach((row) => {
+      const uid = analyticsUserIdKey(row.user_id);
+      if (!mandalSgRowsByUser.has(uid)) mandalSgRowsByUser.set(uid, []);
+      mandalSgRowsByUser.get(uid).push(row);
+    });
+    const mandalStatusRowsByUser = new Map();
+    portfolioMandalStatusRows.forEach((row) => {
+      const uid = analyticsUserIdKey(row.user_id);
+      if (!mandalStatusRowsByUser.has(uid)) mandalStatusRowsByUser.set(uid, []);
+      mandalStatusRowsByUser.get(uid).push(row);
+    });
+    filteredUserIds.forEach((uid) => {
+      const uidKey = analyticsUserIdKey(uid);
+      const stats = statsByUserId.get(uidKey);
+      applyPortfolioMandalRowsToStats(stats, mandalSgRowsByUser.get(uidKey) || [], validMandalsSet);
+      applyPortfolioMandalStatusRowsToStats(stats, mandalStatusRowsByUser.get(uidKey) || [], validMandalsSet);
     });
 
     const numAgg = (v) => {
@@ -4813,7 +5062,14 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
 
     // Compile analytics for each user (one page when paginated)
     const userAnalytics = pageUsers.map((user) => {
-      const stats = statsByUserId.get(user.id) || { total_assigned: 0, active_leads: 0, total_converted: 0, statusBreakdown: {} };
+      const stats = statsByUserId.get(analyticsUserIdKey(user.id)) || {
+        total_assigned: 0,
+        active_leads: 0,
+        total_converted: 0,
+        statusBreakdown: {},
+        studentGroupBreakdown: {},
+        _mandalBreakdownMap: new Map(),
+      };
       const comms = commMap.get(user.id) || { calls: { total: 0, duration: 0, unique: 0 }, sms: 0 };
       const logs = logsMap.get(user.id) || { total_logs: 0, status_changes: 0 };
       const callsOnCurrentPortfolio = currentPortfolioCallsMap.get(user.id) || 0;
@@ -4873,6 +5129,8 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         admittedLeads: numAgg(stats.statusBreakdown['Admitted']),
         conversionRate: totalAssigned > 0 ? parseFloat(((stats.total_converted / totalAssigned) * 100).toFixed(2)) : 0,
         statusBreakdown: stats.statusBreakdown,
+        studentGroupBreakdown: stats.studentGroupBreakdown || {},
+        mandalBreakdown: mandalBreakdownMapToArray(stats._mandalBreakdownMap),
         activityLogsCount: logs.total_logs,
         calls: {
           // Counsellors / PRO: sum of allotted-period breakdown by current call/visit status, excluding Assigned — matches expanded footer.
