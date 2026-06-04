@@ -2814,6 +2814,47 @@ async function fetchCommunicationsRosterStudentGroups(pool, userIds, studentGrou
   return map;
 }
 
+function parseActivityLogMetadata(raw) {
+  if (raw == null) return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+/** Diary visit day: explicit visitDate from Visit Diary, else calendar day of the activity log. */
+function visitDiaryEffectiveDateYmd(logMeta, logCreatedAt) {
+  const fromMeta = logMeta?.visitDate;
+  if (typeof fromMeta === 'string' && /^\d{4}-\d{2}-\d{2}/.test(fromMeta.trim())) {
+    return fromMeta.trim().slice(0, 10);
+  }
+  if (logCreatedAt instanceof Date) return logCreatedAt.toISOString().slice(0, 10);
+  const s = String(logCreatedAt || '');
+  return s.length >= 10 ? s.slice(0, 10) : '';
+}
+
+function visitDiaryOutcomeLabel(logMeta, logNewStatus) {
+  const v = logMeta?.visitStatus ?? logNewStatus ?? '';
+  return String(v).trim() || 'Assigned';
+}
+
+/** Multiple status changes same lead + same day = one visit; Assigned is not a field outcome. */
+function isVisitDiaryCountableOutcome(logMeta, logNewStatus) {
+  return visitDiaryOutcomeLabel(logMeta, logNewStatus) !== 'Assigned';
+}
+
+const VISIT_DIARY_EFFECTIVE_DATE_SQL = `COALESCE(
+  NULLIF(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitDate')), ''),
+  DATE_FORMAT(a.created_at, '%Y-%m-%d')
+)`;
+
+const VISIT_DIARY_EFFECTIVE_DATE_SQL_PLAIN = `COALESCE(
+  NULLIF(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitDate')), ''),
+  DATE_FORMAT(created_at, '%Y-%m-%d')
+)`;
+
 /**
  * Visit Diary report fast path: only visit_status activity_logs + PRO leave rows.
  * Avoids full user-analytics batch1/batch2, cohort SQL, and assignment-by-date aggregation.
@@ -2828,18 +2869,14 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
   const cohortUserIdSet = new Set(cohortScopeUserIds);
   const cohortUserIdPlaceholders = cohortScopeUserIds.map(() => '?').join(',');
 
-  // Visit Diary date range must filter by the selected visit date (metadata.visitDate),
-  // not by when the log row was written (a.created_at).
-  const visitDateExpr = `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitDate')), '')`;
-
   const assignmentDateConditions = [];
   const assignmentDateParams = [];
   if (rangeStartStr) {
-    assignmentDateConditions.push(`${visitDateExpr} >= ?`);
+    assignmentDateConditions.push(`${VISIT_DIARY_EFFECTIVE_DATE_SQL} >= ?`);
     assignmentDateParams.push(`${rangeStartStr}`);
   }
   if (rangeEndStr) {
-    assignmentDateConditions.push(`${visitDateExpr} <= ?`);
+    assignmentDateConditions.push(`${VISIT_DIARY_EFFECTIVE_DATE_SQL} <= ?`);
     assignmentDateParams.push(`${rangeEndStr}`);
   }
   if (academicYearFilter?.useAcademicYear) {
@@ -2855,8 +2892,10 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
 
   const visitLogWhere = `a.type = 'status_change'
     AND JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.statusChannel')) = 'visit_status'
-    AND NULLIF(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitDate')), '') IS NOT NULL
-    AND a.new_status IS NOT NULL AND TRIM(a.new_status) <> '' AND a.new_status <> 'Assigned'
+    AND (
+      NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitStatus'))), '') IS NULL
+      OR TRIM(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitStatus'))) <> 'Assigned'
+    )
     AND (
       a.performed_by IN (${cohortUserIdPlaceholders})
       OR a.target_user_id IN (${cohortUserIdPlaceholders})
@@ -2913,15 +2952,15 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
     const [allVisitDates] = await pool.execute(
       `SELECT
          lead_id,
-         COALESCE(
-           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitDate')), ''),
-           DATE_FORMAT(created_at, '%Y-%m-%d')
-         ) as visit_date
+         ${VISIT_DIARY_EFFECTIVE_DATE_SQL_PLAIN} as visit_date
        FROM activity_logs
        WHERE lead_id IN (${leadIdArray.map(() => '?').join(',')})
          AND type = 'status_change'
          AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.statusChannel')) = 'visit_status'
-         AND NULLIF(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitDate')), '') IS NOT NULL
+         AND (
+           NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitStatus'))), '') IS NULL
+           OR TRIM(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitStatus'))) <> 'Assigned'
+         )
       GROUP BY lead_id, visit_date
        ORDER BY lead_id, visit_date ASC`,
       leadIdArray
@@ -2948,16 +2987,13 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
       uidsToAttribute.add(row.performed_by);
     }
 
-    let logMeta = null;
-    try {
-      logMeta = typeof row.log_metadata === 'string' ? JSON.parse(row.log_metadata) : row.log_metadata;
-    } catch {
-      /* ignore */
-    }
+    const logMeta = parseActivityLogMetadata(row.log_metadata);
 
     if (logMeta?.statusChannel === 'visit_status' && row.assigned_to_pro && cohortUserIdSet.has(row.assigned_to_pro)) {
       uidsToAttribute.add(row.assigned_to_pro);
     }
+
+    if (!isVisitDiaryCountableOutcome(logMeta, row.log_new_status)) return;
 
     uidsToAttribute.forEach((uid) => {
       const userKey = String(uid).trim().toLowerCase();
@@ -2967,12 +3003,7 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
         visitDiaryUpdatesMap.set(userKey, userUpdates);
       }
 
-      const rawDateKey =
-        logMeta?.visitDate ||
-        (row.log_created_at instanceof Date
-          ? row.log_created_at.toISOString().slice(0, 10)
-          : String(row.log_created_at || '').slice(0, 10));
-      const dateKey = typeof rawDateKey === 'string' ? rawDateKey.slice(0, 10) : '';
+      const dateKey = visitDiaryEffectiveDateYmd(logMeta, row.log_created_at);
 
       if (!dateKey || dateKey === 'null') return;
 
@@ -2986,8 +3017,7 @@ async function buildVisitDiaryUpdatesByUser(pool, proUsers, rangeStartStr, range
         userUpdates.set(dateKey, dateBucket);
       }
 
-      const statusToDisplay = logMeta?.visitStatus || row.log_new_status || 'Assigned';
-      dateBucket.statusCounts[statusToDisplay] = (dateBucket.statusCounts[statusToDisplay] || 0) + 1;
+      const statusToDisplay = visitDiaryOutcomeLabel(logMeta, row.log_new_status);
 
       dateBucket.details.push({
         name: row.name || 'Unknown',
@@ -4561,12 +4591,16 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
         const leadIdArray = Array.from(visitLeadsSet);
         // Fetch ALL distinct visit dates for these leads across history to get correct absolute visit numbers
         const [allVisitDates] = await pool.execute(
-          `SELECT lead_id, DATE(created_at) as visit_date
+          `SELECT lead_id, ${VISIT_DIARY_EFFECTIVE_DATE_SQL_PLAIN} as visit_date
            FROM activity_logs
            WHERE lead_id IN (${leadIdArray.map(() => '?').join(',')})
              AND type = 'status_change'
              AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.statusChannel')) = 'visit_status'
-           GROUP BY lead_id, DATE(created_at)
+             AND (
+               NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitStatus'))), '') IS NULL
+               OR TRIM(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.visitStatus'))) <> 'Assigned'
+             )
+           GROUP BY lead_id, visit_date
            ORDER BY lead_id, visit_date ASC`,
           leadIdArray
         );
@@ -4756,22 +4790,15 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
           }
 
           // 2. Individual Visit History (Visit Diary) - Grouped by Date
-          // Reflect status changes (Visit Outcomes), exclude the initial "Assigned" status
-          if (isVisitUpdate && row.log_new_status !== 'Assigned') {
+          // Visit Diary + lead-detail visit_status changes; one visit per lead per calendar day
+          if (isVisitUpdate && isVisitDiaryCountableOutcome(logMeta, row.log_new_status)) {
             let userUpdates = visitDiaryUpdatesMap.get(userKey);
             if (!userUpdates) {
               userUpdates = new Map();
               visitDiaryUpdatesMap.set(userKey, userUpdates);
             }
 
-            // Use the PRO-selected visit date (stored in metadata) when available.
-            // This ensures past-date entries appear under the correct diary date, not
-            // the server's creation timestamp (which is always "today").
-            const rawDateKey = logMeta?.visitDate ||
-              (row.log_created_at instanceof Date
-                ? row.log_created_at.toISOString().slice(0, 10)
-                : String(row.log_created_at || '').slice(0, 10));
-            const dateKey = typeof rawDateKey === 'string' ? rawDateKey.slice(0, 10) : '';
+            const dateKey = visitDiaryEffectiveDateYmd(logMeta, row.log_created_at);
             
             if (dateKey && dateKey !== 'null') {
               let dateBucket = userUpdates.get(dateKey);
@@ -4784,9 +4811,7 @@ WHEN TRIM(u.role_name) = 'PRO' THEN
                 userUpdates.set(dateKey, dateBucket);
               }
 
-              // Prioritize the point-in-time visit status stored in metadata, fallback to log_new_status
-              const statusToDisplay = logMeta?.visitStatus || row.log_new_status || 'Assigned';
-              dateBucket.statusCounts[statusToDisplay] = (dateBucket.statusCounts[statusToDisplay] || 0) + 1;
+              const statusToDisplay = visitDiaryOutcomeLabel(logMeta, row.log_new_status);
               
               dateBucket.details.push({
                 name: row.name || 'Unknown',
