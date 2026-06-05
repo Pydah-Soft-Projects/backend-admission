@@ -3,8 +3,12 @@ import { resolveLeadStatus } from '../utils/leadChannelStatus.util.js';
 import { sendVisitorCode } from '../services/bulkSms.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
+function generateNewVisitorCodeValue() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
 /**
- * Generate a new visitor code for a lead.
+ * Generate or resend the visitor code for a lead (one permanent code per lead).
  * POST /api/visitors/generate
  */
 export const generateVisitorCode = async (req, res) => {
@@ -15,17 +19,21 @@ export const generateVisitorCode = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Lead ID is required' });
   }
 
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours expiry
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours validity window
 
   try {
     const pool = getPool();
     
-    // Fetch lead details and counselor info
+    // Fetch lead + both assignees (counsellor on assigned_to, PRO on assigned_to_pro)
     const [leadRows] = await pool.execute(`
-      SELECT l.name, l.phone, u.name as counselor_name
+      SELECT
+        l.name,
+        l.phone,
+        uc.name AS counsellor_name,
+        up.name AS pro_name
       FROM leads l
-      LEFT JOIN users u ON l.assigned_to = u.id
+      LEFT JOIN users uc ON l.assigned_to = uc.id
+      LEFT JOIN users up ON l.assigned_to_pro = up.id
       WHERE l.id = ?
     `, [leadId]);
 
@@ -34,19 +42,57 @@ export const generateVisitorCode = async (req, res) => {
     }
 
     const lead = leadRows[0];
-    const counselorName = lead.counselor_name || req.user.name || 'Admissions Team';
+    const senderRole = String(req.user.roleName || '').trim();
+    /** SMS template slot — use the staff member who sent the code, not always counsellor. */
+    const counselorName = (() => {
+      if (senderRole === 'PRO') {
+        return lead.pro_name || req.user.name || 'Admissions Team';
+      }
+      if (senderRole === 'Student Counselor') {
+        return lead.counsellor_name || req.user.name || 'Admissions Team';
+      }
+      return lead.counsellor_name || lead.pro_name || req.user.name || 'Admissions Team';
+    })();
 
-    // Invalidate existing active codes for this lead
-    await pool.execute(
-      'UPDATE visitor_codes SET status = "expired" WHERE lead_id = ? AND status = "active"',
+    const [existingRows] = await pool.execute(
+      `SELECT id, code, status
+       FROM visitor_codes
+       WHERE lead_id = ?
+       ORDER BY created_at ASC
+       LIMIT 1`,
       [leadId]
     );
 
-    // Save new code
-    await pool.execute(
-      'INSERT INTO visitor_codes (lead_id, created_by, code, expires_at) VALUES (?, ?, ?, ?)',
-      [leadId, createdBy, code, expiresAt]
-    );
+    let code;
+    let resent = false;
+
+    if (existingRows.length > 0) {
+      const canonical = existingRows[0];
+      code = String(canonical.code);
+      resent = true;
+
+      // Keep one code per lead; refresh validity unless already consumed at campus.
+      if (canonical.status !== 'used') {
+        await pool.execute(
+          `UPDATE visitor_codes
+           SET status = 'active', expires_at = ?, created_by = ?
+           WHERE id = ?`,
+          [expiresAt, createdBy, canonical.id]
+        );
+      }
+
+      // Retire duplicate rows from older behaviour (new code each send).
+      await pool.execute(
+        `UPDATE visitor_codes SET status = 'expired' WHERE lead_id = ? AND id != ?`,
+        [leadId, canonical.id]
+      );
+    } else {
+      code = generateNewVisitorCodeValue();
+      await pool.execute(
+        'INSERT INTO visitor_codes (lead_id, created_by, code, expires_at) VALUES (?, ?, ?, ?)',
+        [leadId, createdBy, code, expiresAt]
+      );
+    }
 
     // Send SMS to the lead
     // Template: Visitor Code Dear {#var#}, Your Visitor Code for admission is {#var#}. Your Counsellor is {#var#}. Please use this code during your campus visit - Pydah Group
@@ -88,7 +134,9 @@ export const generateVisitorCode = async (req, res) => {
 
         // Log to activity_logs
         const activityLogId = uuidv4();
-        const comment = `SMS "Visitor Code" sent to ${lead.phone}`;
+        const comment = resent
+          ? `SMS "Visitor Code" resent to ${lead.phone}`
+          : `SMS "Visitor Code" sent to ${lead.phone}`;
         await pool.execute(
           `INSERT INTO activity_logs (id, lead_id, type, comment, performed_by, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`,
           [
@@ -100,7 +148,8 @@ export const generateVisitorCode = async (req, res) => {
             JSON.stringify({
               communicationType: 'sms',
               templateName: 'Visitor Code',
-              visitorCode: code
+              visitorCode: code,
+              resent,
             })
           ]
         );
@@ -111,12 +160,16 @@ export const generateVisitorCode = async (req, res) => {
       console.error('[VISITOR CODE] Exception during SMS sending:', smsError.message);
     }
 
-    console.log(`[VISITOR CODE] Generated code for lead ${leadId} by user ${createdBy}`);
+    console.log(
+      `[VISITOR CODE] ${resent ? 'Resent' : 'Generated'} code ${code} for lead ${leadId} by user ${createdBy}`
+    );
 
-    res.status(201).json({
+    res.status(resent ? 200 : 201).json({
       success: true,
-      data: { expiresAt },
-      message: 'Visitor code generated and sent to lead successfully',
+      data: { code, expiresAt, resent },
+      message: resent
+        ? 'Visitor code resent to lead successfully'
+        : 'Visitor code generated and sent to lead successfully',
     });
   } catch (error) {
     console.error('Error generating visitor code:', error);
