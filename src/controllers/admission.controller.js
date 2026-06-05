@@ -1165,62 +1165,49 @@ const leadDataStubFromListRow = (row) => {
   return parseListRowLeadDataRaw(row);
 };
 
-const formatAdmissionListItem = (row) => {
+const isQuotaLikeLeadSource = (value) => {
+  const s = String(value ?? '').trim().toLowerCase();
+  if (!s) return false;
+  return (
+    s === 'conv' ||
+    s === 'convenor' ||
+    s === 'convener' ||
+    s === 'cq' ||
+    s === 'mq' ||
+    s === 'management' ||
+    s === 'mang' ||
+    s.includes('management quota') ||
+    s.includes('convenor quota') ||
+    s.includes('spot') ||
+    s === 'lateral entry' ||
+    s.includes('lateral')
+  );
+};
+
+/** Resolved lead source for list rows and source-wise pivot (matches admissions UI). */
+const normalizeAdmissionLeadSource = (row) => {
   const leadDataRaw = leadDataStubFromListRow(row);
-  const parseLeadDynamicFields = (raw) => {
-    if (!raw) return {};
-    if (typeof raw === 'string') {
-      try {
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === 'object' ? parsed : {};
-      } catch {
-        return {};
-      }
-    }
-    return raw && typeof raw === 'object' ? raw : {};
-  };
+  const raw = String(row.lead_source ?? '').trim();
+  if (raw && !isQuotaLikeLeadSource(raw)) return raw;
 
-  const normalizeLeadSource = (candidate, leadData) => {
-    const raw = String(candidate ?? '').trim();
-    const isQuotaLike = (value) => {
-      const s = String(value ?? '').trim().toLowerCase();
-      if (!s) return false;
-      return (
-        s === 'conv' ||
-        s === 'convenor' ||
-        s === 'convener' ||
-        s === 'cq' ||
-        s === 'mq' ||
-        s === 'management' ||
-        s === 'mang' ||
-        s.includes('management quota') ||
-        s.includes('convenor quota') ||
-        s.includes('spot') ||
-        s === 'lateral entry' ||
-        s.includes('lateral')
-      );
-    };
+  const fromLeadData = String(
+    leadDataRaw?.source ?? leadDataRaw?.utmSource ?? leadDataRaw?.leadSource ?? ''
+  ).trim();
+  if (fromLeadData && !isQuotaLikeLeadSource(fromLeadData)) return fromLeadData;
 
-    if (raw && !isQuotaLike(raw)) return raw;
+  const uploadBatchId = String(row.upload_batch_id ?? '').trim();
+  if (uploadBatchId) return 'Bulk Upload';
 
-    const fromLeadData = String(
-      leadData?.source ?? leadData?.utmSource ?? leadData?.leadSource ?? ''
-    ).trim();
-    if (fromLeadData && !isQuotaLike(fromLeadData)) return fromLeadData;
+  const dynamicFields = parseLeadDynamicFieldsColumn(row.lead_dynamic_fields);
+  const createdFrom = String(dynamicFields?.createdFrom ?? '').trim();
+  if (createdFrom === 'send_joining_form' || createdFrom === 'joining_form_link') {
+    return 'Joining Form Link';
+  }
 
-    // Derive fallback labels like joining flow does.
-    const uploadBatchId = String(row.upload_batch_id ?? '').trim();
-    if (uploadBatchId) return 'Bulk Upload';
+  return 'Manual Form';
+};
 
-    const dynamicFields = parseLeadDynamicFields(row.lead_dynamic_fields);
-    const createdFrom = String(dynamicFields?.createdFrom ?? '').trim();
-    if (createdFrom === 'send_joining_form' || createdFrom === 'joining_form_link') {
-      return 'Joining Form Link';
-    }
-
-    // Manual entry (leads/add UI sets source to "Manual Form"; if cleared, infer it).
-    return 'Manual Form';
-  };
+const formatAdmissionListItem = (row) => {
   const effectiveIds = effectiveAdmissionCourseBranchIds(row);
   const courseLabel = resolveBtechCourseDisplayName(
     row.course || '',
@@ -1249,6 +1236,14 @@ const formatAdmissionListItem = (row) => {
     isEws: row.reservation_is_ews === 1 || row.reservation_is_ews === true,
     other: row.reservation_other ? (typeof row.reservation_other === 'string' ? JSON.parse(row.reservation_other) : row.reservation_other) : [],
   },
+  qualifications: {
+    merit:
+      row.qualification_merit === 1 || row.qualification_merit === true
+        ? true
+        : row.qualification_merit === 0 || row.qualification_merit === false
+          ? false
+          : null,
+  },
   paymentSummary: {
     totalPaid: Number(row.payment_total_paid) || 0,
   },
@@ -1269,7 +1264,7 @@ const formatAdmissionListItem = (row) => {
     bankPassbook: row.document_bank_passbook,
     rationCard: row.document_ration_card,
   },
-  leadSource: normalizeLeadSource(row.lead_source, leadDataRaw),
+  leadSource: normalizeAdmissionLeadSource(row),
   referenceName: parseReferenceNameFromRow(row),
   updatedAt: row.updated_at,
   createdAt: row.created_at,
@@ -1475,6 +1470,7 @@ export const listAdmissions = async (req, res) => {
                 a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
                 a.student_name, a.student_phone, a.created_at, a.updated_at,
                 a.reservation_general, a.reservation_is_ews, a.reservation_other, a.payment_total_paid,
+                a.qualification_merit,
                 a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
                 a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
                 a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
@@ -3031,6 +3027,75 @@ export const getAdmissionStatsByReference = async (req, res) => {
   } catch (error) {
     console.error('Error getting admission reference stats:', error);
     return errorResponse(res, error.message || 'Failed to get admission reference stats', 500);
+  }
+};
+
+/**
+ * @desc    Admissions counts by lead source × course
+ * @route   GET /api/admissions/stats/by-source
+ */
+export const getAdmissionStatsBySource = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { conditions, params } = await buildAdmissionPivotFilters(req.query);
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const courses = await getAdmissionReportCourses(pool, whereClause, params);
+
+    const pivotFrom = `FROM admissions a ${SQL_ADMISSION_PIVOT_JOINS}`;
+    const [rows] = await pool.execute(
+      `SELECT
+         l.source AS lead_source,
+         JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.source')) AS lead_data_source,
+         JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.utmSource')) AS lead_data_utm_source,
+         JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.leadSource')) AS lead_data_lead_source,
+         l.upload_batch_id AS upload_batch_id,
+         l.dynamic_fields AS lead_dynamic_fields,
+         ${SQL_A_EFF_COURSE_ID} AS courseId,
+         ${SQL_A_BTECH_LATERAL_TRACK} AS lateralTrack
+       ${pivotFrom}
+       ${whereClause}`,
+      params
+    );
+
+    const bySource = new Map();
+    for (const row of rows) {
+      const sourceName = normalizeAdmissionLeadSource(row);
+      const sourceKey = sourceName.toLowerCase();
+      if (!bySource.has(sourceKey)) {
+        bySource.set(sourceKey, { displayName: sourceName, counts: {} });
+      }
+      const bucket = bySource.get(sourceKey);
+      const ck = admissionPivotCountKey(row.courseId, row.lateralTrack);
+      bucket.counts[ck] = (bucket.counts[ck] || 0) + 1;
+    }
+
+    const pivotRows = [...bySource.entries()]
+      .sort((a, b) => String(a[1].displayName).localeCompare(String(b[1].displayName)))
+      .map(([sourceKey, bucket]) => {
+        const countsRaw = bucket.counts || {};
+        const counts = {};
+        for (const c of courses) {
+          counts[admissionPivotColumnKey(c)] = sumCountsForCourseColumn(countsRaw, c);
+        }
+        const total = Object.values(countsRaw).reduce((sum, n) => sum + (Number(n) || 0), 0);
+        return {
+          sourceKey,
+          name: bucket.displayName,
+          counts,
+          total,
+        };
+      });
+
+    return successResponse(
+      res,
+      { courses, rows: pivotRows },
+      'Admission source stats retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error getting admission source stats:', error);
+    return errorResponse(res, error.message || 'Failed to get admission source stats', 500);
   }
 };
 

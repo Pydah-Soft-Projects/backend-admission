@@ -16,6 +16,7 @@ import {
   patchAdmissionReferenceById,
   getAdmissionStats,
   getAdmissionStatsByReference,
+  getAdmissionStatsBySource,
   getAdmissionStatsByDate,
   listDistinctReferenceNames,
   upsertAdmissionBranchIntake,
@@ -29,6 +30,7 @@ router.use(protect);
 
 router.get('/reference-names', listDistinctReferenceNames);
 router.get('/stats/by-reference', getAdmissionStatsByReference);
+router.get('/stats/by-source', getAdmissionStatsBySource);
 router.get('/stats/by-date', getAdmissionStatsByDate);
 router.get('/stats', getAdmissionStats);
 router.put('/branch-intake', isSuperAdmin, upsertAdmissionBranchIntake);
