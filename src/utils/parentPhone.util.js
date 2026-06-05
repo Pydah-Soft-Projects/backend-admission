@@ -42,3 +42,58 @@ export const suggestPreferredMobileDigits = (studentPhone, fatherPhone, motherPh
   if (student.length === 10) return student;
   return '';
 };
+
+/**
+ * Father/mother mobiles for post-approval SMS: distinct 10-digit numbers,
+ * excluding the student/preferred contact line (avoids duplicate sends).
+ */
+export const collectParentSmsRecipients = ({
+  studentContactPhone,
+  fatherPhone,
+  motherPhone,
+}) => {
+  const studentLine = normalizeMobileDigits(studentContactPhone);
+  const seen = new Set();
+  const out = [];
+
+  for (const raw of [fatherPhone, motherPhone]) {
+    const digits = normalizeMobileDigits(raw);
+    if (digits.length !== 10) continue;
+    if (studentLine.length === 10 && digits === studentLine) continue;
+    if (seen.has(digits)) continue;
+    seen.add(digits);
+    out.push(digits);
+  }
+
+  return out;
+};
+
+/** @deprecated Use collectParentSmsRecipients */
+export const collectParentPortalSmsRecipients = collectParentSmsRecipients;
+
+/**
+ * Student/preferred line plus parent lines — for admission confirmation SMS on approval.
+ */
+export const collectAdmissionConfirmationSmsRecipients = ({
+  studentContactPhone,
+  fatherPhone,
+  motherPhone,
+}) => {
+  const seen = new Set();
+  const out = [];
+  const add = (raw) => {
+    const digits = normalizeMobileDigits(raw);
+    if (digits.length !== 10 || seen.has(digits)) return;
+    seen.add(digits);
+    out.push(digits);
+  };
+  add(studentContactPhone);
+  for (const digits of collectParentSmsRecipients({
+    studentContactPhone,
+    fatherPhone,
+    motherPhone,
+  })) {
+    add(digits);
+  }
+  return out;
+};

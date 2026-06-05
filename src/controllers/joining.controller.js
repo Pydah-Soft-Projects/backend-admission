@@ -24,6 +24,8 @@ import {
   readReference1FromDynamicFields,
 } from '../utils/joiningReference.util.js';
 import {
+  collectAdmissionConfirmationSmsRecipients,
+  collectParentSmsRecipients,
   reconcileFatherPhoneFromLead,
   suggestPreferredMobileDigits,
 } from '../utils/parentPhone.util.js';
@@ -2945,43 +2947,97 @@ export const approveJoining = async (req, res) => {
 
     await connection.commit();
 
-    // Fire-and-forget SMS to the student. Runs strictly after commit so gateway
-    // failures never roll back the admission.
-    {
+    // Fire-and-forget SMS after commit — gateway failures must not roll back admission.
+    // Student welcome must complete before credentials so messages arrive in that order.
+    void (async () => {
       const studentPhone =
         resolveContactMobileNumber(formattedJoining?.studentInfo) ||
         normalizeMobileDigits(lead?.phone) ||
         '';
       const studentName =
         formattedJoining?.studentInfo?.name || lead?.name || 'Student';
-      if (studentPhone && admissionNumber) {
-        smsService
-          .sendAdmissionConfirmation(studentPhone, studentName, admissionNumber)
-          .catch((err) =>
-            console.error('Admission confirmation SMS dispatch failed:', err?.message || err)
-          );
+      const fatherPhone = formattedJoining?.parents?.father?.phone;
+      const motherPhone = formattedJoining?.parents?.mother?.phone;
 
-        if (
-          secondarySyncResult?.credentialsCreated &&
-          secondarySyncResult?.plainPassword
-        ) {
-          smsService
-            .sendStudentAccountCreated(
-              studentPhone,
-              studentName,
-              admissionNumber,
-              secondarySyncResult.plainPassword
-            )
-            .catch((err) =>
-              console.error('Student account SMS dispatch failed:', err?.message || err)
-            );
-        }
-      } else {
+      if (!admissionNumber) {
         console.warn(
-          `Admission SMS skipped — missing ${!studentPhone ? 'studentPhone' : 'admissionNumber'} for joining ${joining.id}.`
+          `Admission SMS skipped — missing admissionNumber for joining ${joining.id}.`
+        );
+        return;
+      }
+
+      const confirmationPhones = collectAdmissionConfirmationSmsRecipients({
+        studentContactPhone: studentPhone,
+        fatherPhone,
+        motherPhone,
+      });
+      if (confirmationPhones.length === 0) {
+        console.warn(
+          `Admission confirmation SMS skipped — no valid contact numbers for joining ${joining.id}.`
         );
       }
-    }
+
+      if (studentPhone) {
+        try {
+          await smsService.sendAdmissionConfirmation(
+            studentPhone,
+            studentName,
+            admissionNumber
+          );
+        } catch (err) {
+          console.error(
+            `Admission confirmation SMS dispatch failed (${studentPhone}):`,
+            err?.message || err
+          );
+        }
+      }
+
+      if (
+        studentPhone &&
+        secondarySyncResult?.credentialsCreated &&
+        secondarySyncResult?.plainPassword
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        try {
+          await smsService.sendStudentAccountCreated(
+            studentPhone,
+            studentName,
+            admissionNumber,
+            secondarySyncResult.plainPassword
+          );
+        } catch (err) {
+          console.error('Student account SMS dispatch failed:', err?.message || err);
+        }
+      }
+
+      for (const phone of confirmationPhones) {
+        if (phone === studentPhone) continue;
+        try {
+          await smsService.sendAdmissionConfirmation(phone, studentName, admissionNumber);
+        } catch (err) {
+          console.error(
+            `Admission confirmation SMS dispatch failed (${phone}):`,
+            err?.message || err
+          );
+        }
+      }
+
+      const parentPhones = collectParentSmsRecipients({
+        studentContactPhone: studentPhone,
+        fatherPhone,
+        motherPhone,
+      });
+      for (const parentPhone of parentPhones) {
+        try {
+          await smsService.sendParentPortalProgress(parentPhone);
+        } catch (err) {
+          console.error(
+            `Parent portal SMS dispatch failed (${parentPhone}):`,
+            err?.message || err
+          );
+        }
+      }
+    })();
 
     // Record activity after commit so activity_logs lock contention
     // never delays or interferes with core approval/admission writes.

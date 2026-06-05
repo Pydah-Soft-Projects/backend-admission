@@ -16,6 +16,16 @@ export const STUDENT_PORTAL_LOGIN_URL =
 const STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID = '1707176525577028276';
 
 /**
+ * DLT template id for parent portal SMS (code-only; not in message_templates).
+ * Set PARENT_PORTAL_SMS_DLT_TEMPLATE_ID in .env after TRAI approval, or replace below.
+ */
+const PARENT_PORTAL_SMS_DLT_TEMPLATE_ID =
+  process.env.PARENT_PORTAL_SMS_DLT_TEMPLATE_ID?.trim() || '';
+
+/** Fixed parent SMS body — must match the approved DLT template exactly (no variables). */
+const PARENT_PORTAL_SMS_MESSAGE = `Dear parent , To track your child progress please login to our college portal ${STUDENT_PORTAL_LOGIN_URL}`;
+
+/**
  * Look up a DLT template id by its `message_templates.name`. Results are cached
  * in-memory for `TEMPLATE_LOOKUP_TTL_MS` so a high-traffic endpoint doesn't hit
  * the DB on every send. Single source of truth = the row inserted by the
@@ -158,6 +168,70 @@ const smsService = {
       };
     } catch (error) {
       console.error('Failed to send admission confirmation SMS:', error.message || error);
+      return { success: false, error: error.message || 'sms_send_failed' };
+    }
+  },
+
+  /**
+   * Send parent portal SMS after joining approval (father/mother lines).
+   * Template is fixed in code only (no message_templates row).
+   *
+   * DLT body (no variables):
+   *   Dear parent , To track your child progress please login to our college portal sdms.pydah.edu.in
+   *
+   * Configure PARENT_PORTAL_SMS_DLT_TEMPLATE_ID in .env once TRAI approves the template.
+   */
+  sendParentPortalProgress: async (mobileNumber) => {
+    if (!BULK_SMS_API_KEY) {
+      console.warn('BULK_SMS_API_KEY is not set. Parent portal SMS skipped (Dev Mode).');
+      return { success: true, message: 'SMS simulation successful (Dev Mode)' };
+    }
+
+    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+    if (cleanNumber.length !== 10) {
+      console.warn(`Parent portal SMS skipped — invalid mobile "${mobileNumber}".`);
+      return { success: false, error: 'invalid_mobile_number' };
+    }
+
+    const templateId = PARENT_PORTAL_SMS_DLT_TEMPLATE_ID;
+    if (!templateId) {
+      console.warn(
+        'Parent portal SMS skipped — PARENT_PORTAL_SMS_DLT_TEMPLATE_ID is not set (add to .env after DLT approval).'
+      );
+      return { success: false, error: 'dlt_template_id_not_configured' };
+    }
+
+    try {
+      const result = await sendSmsThroughBulkSmsApps({
+        numbers: [cleanNumber],
+        message: PARENT_PORTAL_SMS_MESSAGE,
+        tempid: templateId,
+      });
+
+      const responsePreview = String(result.responseText || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+
+      if (result.success) {
+        console.log(
+          `Parent portal SMS sent to ${cleanNumber} (dlt ${templateId}, messageIds=[${result.messageIds.join(',')}]).`
+        );
+        return {
+          success: true,
+          data: { messageIds: result.messageIds, responseText: result.responseText },
+        };
+      }
+
+      console.error(
+        `Parent portal SMS rejected by gateway (mobile=${cleanNumber}, dlt=${templateId}). Gateway response: ${responsePreview}`
+      );
+      return {
+        success: false,
+        error: 'gateway_rejected',
+        gatewayMessage: responsePreview,
+      };
+    } catch (error) {
+      console.error('Failed to send parent portal SMS:', error.message || error);
       return { success: false, error: error.message || 'sms_send_failed' };
     }
   },
