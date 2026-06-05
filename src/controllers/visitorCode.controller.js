@@ -24,11 +24,16 @@ export const generateVisitorCode = async (req, res) => {
   try {
     const pool = getPool();
     
-    // Fetch lead details and counselor info
+    // Fetch lead + both assignees (counsellor on assigned_to, PRO on assigned_to_pro)
     const [leadRows] = await pool.execute(`
-      SELECT l.name, l.phone, u.name as counselor_name
+      SELECT
+        l.name,
+        l.phone,
+        uc.name AS counsellor_name,
+        up.name AS pro_name
       FROM leads l
-      LEFT JOIN users u ON l.assigned_to = u.id
+      LEFT JOIN users uc ON l.assigned_to = uc.id
+      LEFT JOIN users up ON l.assigned_to_pro = up.id
       WHERE l.id = ?
     `, [leadId]);
 
@@ -37,7 +42,17 @@ export const generateVisitorCode = async (req, res) => {
     }
 
     const lead = leadRows[0];
-    const counselorName = lead.counselor_name || req.user.name || 'Admissions Team';
+    const senderRole = String(req.user.roleName || '').trim();
+    /** SMS template slot — use the staff member who sent the code, not always counsellor. */
+    const counselorName = (() => {
+      if (senderRole === 'PRO') {
+        return lead.pro_name || req.user.name || 'Admissions Team';
+      }
+      if (senderRole === 'Student Counselor') {
+        return lead.counsellor_name || req.user.name || 'Admissions Team';
+      }
+      return lead.counsellor_name || lead.pro_name || req.user.name || 'Admissions Team';
+    })();
 
     const [existingRows] = await pool.execute(
       `SELECT id, code, status
