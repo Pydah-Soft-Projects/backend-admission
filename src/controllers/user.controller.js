@@ -161,6 +161,7 @@ const sanitizePermissions = (permissions = {}) => {
     if (key === 'joining' && access && permission === 'write') {
       entry.editReference = Boolean(value.editReference);
       entry.editAdmission = Boolean(value.editAdmission);
+      entry.approveFeeRequest = Boolean(value.approveFeeRequest);
     }
     sanitized[key] = entry;
   });

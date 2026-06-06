@@ -6,6 +6,8 @@ import connectSQLDB from './config-sql/database.js';
 import connectSecondaryDB from './config-sql/database-secondary.js';
 import { warmupHrmsMongo } from './config-mongo/hrms.js';
 import { warmupFeeManagementMongo } from './config-mongo/feeManagement.js';
+import { warmupTransportMongo } from './config-mongo/transport.js';
+import { warmupHostelMongo } from './config-mongo/hostel.js';
 import { initLeadReclaimer } from './services/leadReclaimer.service.js';
 import { resumeRunningSmsBulkJobsOnStartup } from './services/smsBulkJob.service.js';
 import authRoutes from './routes/auth.routes.js';
@@ -29,6 +31,9 @@ import locationsRoutes from './routes/locations.routes.js';
 import visitorRoutes from './routes/visitor.routes.js';
 import leadGroupUpdateRoutes from './routes/leadGroupUpdate.routes.js';
 import feeStructureRoutes from './routes/feeStructure.routes.js';
+import transportRoutes from './routes/transport.routes.js';
+import hostelRoutes from './routes/hostel.routes.js';
+import feeRequestRoutes from './routes/feeRequest.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -69,6 +74,14 @@ warmupHrmsMongo().catch((err) => {
 // Fee-Management Mongo: warm connection so first /api/fee-structures call is fast
 warmupFeeManagementMongo().catch((err) => {
   console.error('Fee-Management MongoDB warmup failed (non-fatal):', err?.message || err);
+});
+
+warmupTransportMongo().catch((err) => {
+  console.error('Transport MongoDB warmup failed (non-fatal):', err?.message || err);
+});
+
+warmupHostelMongo().catch((err) => {
+  console.error('Hostel MongoDB warmup failed (non-fatal):', err?.message || err);
 });
 
 const app = express();
@@ -154,6 +167,9 @@ app.use('/api/master-data', masterDataRoutes);
 app.use('/api/locations', locationsRoutes);
 app.use('/api/visitors', visitorRoutes);
 app.use('/api/fee-structures', feeStructureRoutes);
+app.use('/api/transport', transportRoutes);
+app.use('/api/hostel', hostelRoutes);
+app.use('/api/fee-requests', feeRequestRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

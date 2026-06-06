@@ -24,6 +24,13 @@ import {
   readReference1FromDynamicFields,
 } from '../utils/joiningReference.util.js';
 import {
+  SELF_REGISTRATION_ROUTE_KEY,
+  SELF_REGISTRATION_SOURCE,
+  SQL_JOINING_IS_SELF_REGISTRATION,
+  createSelfRegistrationLeadAndJoining,
+  isSelfRegistrationLead,
+} from '../utils/joiningSelfRegistration.util.js';
+import {
   collectAdmissionConfirmationSmsRecipients,
   collectParentSmsRecipients,
   reconcileFatherPhoneFromLead,
@@ -96,6 +103,51 @@ const formatStudentFeeDetailsForClient = (raw) => {
   return s || { lines: [] };
 };
 
+const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationExtras) => {
+  const transportDetails =
+    registrationExtras?.transport_details &&
+    typeof registrationExtras.transport_details === 'object'
+      ? registrationExtras.transport_details
+      : null;
+
+  return {
+    course: joiningRow?.course || '',
+    branch: joiningRow?.branch || '',
+    quota: joiningRow?.quota || '',
+    batch:
+      studentFeeDetails?.batch != null && String(studentFeeDetails.batch).trim() !== ''
+        ? String(studentFeeDetails.batch).trim()
+        : '',
+    admissionNumber: joiningRow?.admission_number || '',
+    studentName: joiningRow?.student_name || '',
+    studentPhone: joiningRow?.student_phone || '',
+    studentGender: joiningRow?.student_gender || '',
+    fatherPhone: joiningRow?.father_phone || '',
+    transportDetails,
+  };
+};
+
+const runJoiningFeePortalSync = async ({
+  pool,
+  joiningId,
+  leadId,
+  studentFeeDetails,
+  registrationExtras,
+}) => {
+  const [rows] = await pool.execute(
+    `SELECT course, branch, quota, admission_number, student_name, student_phone, student_gender, father_phone
+     FROM joinings WHERE id = ? LIMIT 1`,
+    [joiningId]
+  );
+  const joiningRow = rows[0] || {};
+  await syncJoiningStudentFeeDetailsToFeeMongo({
+    joiningId,
+    leadId,
+    studentFeeDetails,
+    joiningContext: buildJoiningFeeSyncContext(joiningRow, studentFeeDetails, registrationExtras),
+  });
+};
+
 /** Managed course/branch IDs may come from the student DB; FK columns on joinings/admissions point at primary `courses` / `branches`. */
 const resolvePrimaryCourseBranchFkIds = async (pool, courseId, branchId) => {
   let fkCourseId = null;
@@ -164,6 +216,7 @@ const formatLead = (leadData) => {
     gender: leadData.gender || 'Not Specified',
     quota: leadData.quota || 'Not Applicable',
     leadStatus: leadData.lead_status || 'New',
+    source: leadData.source || undefined,
     admissionNumber: leadData.admission_number,
     academicYear: leadData.academic_year != null ? Number(leadData.academic_year) : undefined,
     studentGroup: leadData.student_group || '',
@@ -400,13 +453,19 @@ const ensureLeadForApprovedJoining = async ({
     }
   }
 
+  const leadSource =
+    String(joiningLeadData?.source ?? '').trim() ||
+    (String(dynamicFields?.createdFrom ?? '').trim() === 'self_registration'
+      ? SELF_REGISTRATION_SOURCE
+      : '');
+
   const newLeadId = uuidv4();
   await connection.execute(
     `INSERT INTO leads (
       id, enquiry_number, name, phone, email, father_name, mother_name, father_phone,
       village, district, mandal, state, gender, quota, course_interested, dynamic_fields,
-      lead_status, admission_number, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      lead_status, admission_number, source, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
     [
       newLeadId,
       enquiryNumber || null,
@@ -426,6 +485,7 @@ const ensureLeadForApprovedJoining = async ({
       JSON.stringify(dynamicFields),
       'Admitted',
       admissionNumber,
+      leadSource || null,
     ]
   );
 
@@ -744,6 +804,8 @@ export const listJoinings = async (req, res) => {
       search = '',
       leadStatus,
       requireEnquiry,
+      source: sourceParam,
+      excludeSource: excludeSourceParam,
     } = req.query;
 
     const pool = getPool();
@@ -802,6 +864,18 @@ export const listJoinings = async (req, res) => {
         (l.id IS NOT NULL AND TRIM(COALESCE(l.enquiry_number, '')) <> '')
         OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.enquiryNumber')), '')) <> ''
       )`);
+    }
+
+    const sourceFilter = String(sourceParam ?? '').trim();
+    if (sourceFilter) {
+      conditions.push(SQL_JOINING_IS_SELF_REGISTRATION);
+      params.push(sourceFilter, sourceFilter);
+    }
+
+    const excludeSource = String(excludeSourceParam ?? '').trim();
+    if (excludeSource) {
+      conditions.push(`NOT ${SQL_JOINING_IS_SELF_REGISTRATION}`);
+      params.push(excludeSource, excludeSource);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1012,8 +1086,13 @@ export const getJoining = async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    // Handle new joining form without lead - return empty structure, don't create yet
-    if (leadId === 'new' || !leadId || leadId === 'undefined') {
+    // Handle new / self-registration template — return empty structure; created on first public save.
+    if (
+      leadId === 'new' ||
+      leadId === SELF_REGISTRATION_ROUTE_KEY ||
+      !leadId ||
+      leadId === 'undefined'
+    ) {
       // Return empty joining structure - will be created on save/submit
       const emptyJoining = {
         _id: null,
@@ -1192,7 +1271,7 @@ export const getJoining = async (req, res) => {
       });
     }
 
-    if (joiningDoc && lead) {
+    if (joiningDoc && lead && !isSelfRegistrationLead(lead)) {
       await backfillJoiningReferenceFromLead(pool, joiningDoc, lead);
       const reference1 = await resolveReference1ForLead(pool, lead);
       if (reference1 && !readReference1FromDynamicFields(lead.dynamicFields)) {
@@ -1527,8 +1606,12 @@ export const saveJoiningDraft = async (req, res) => {
     const payload = normalizeJoiningPayload(req.body || {});
     const pool = getPool();
 
-    // Handle new joining form without lead
-    const isNewJoining = leadId === 'new' || !leadId || leadId === 'undefined';
+    // Handle new / self-registration template without an existing joining row
+    const isNewJoining =
+      leadId === 'new' ||
+      leadId === SELF_REGISTRATION_ROUTE_KEY ||
+      !leadId ||
+      leadId === 'undefined';
     let lead = null;
     let joiningId = null;
 
@@ -1659,6 +1742,11 @@ export const saveJoiningDraft = async (req, res) => {
         } else {
           return errorResponse(res, 'Joining form not found', 404);
         }
+      } else if (leadId === SELF_REGISTRATION_ROUTE_KEY) {
+        const created = await createSelfRegistrationLeadAndJoining(pool, payload, req.user?.id);
+        joiningIdToUse = created.joiningId;
+        isNewRecord = true;
+        lead = await ensureLeadExists(created.leadId);
       } else {
         return errorResponse(
           res,
@@ -1945,7 +2033,7 @@ export const saveJoiningDraft = async (req, res) => {
       };
     }
 
-    if (payload.reference1 !== undefined) {
+    if (payload.reference1 !== undefined && !(lead && isSelfRegistrationLead(lead))) {
       const ref = String(payload.reference1 ?? '').trim();
       finalPayload.leadData = {
         ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
@@ -1963,6 +2051,9 @@ export const saveJoiningDraft = async (req, res) => {
           [ref, lead.id]
         );
       }
+    } else if (lead && isSelfRegistrationLead(lead) && finalPayload.leadData && typeof finalPayload.leadData === 'object') {
+      delete finalPayload.leadData.reference1;
+      finalPayload.leadData.source = SELF_REGISTRATION_SOURCE;
     }
 
     const regExtrasForParentPhotos =
@@ -2133,10 +2224,17 @@ export const saveJoiningDraft = async (req, res) => {
       Object.prototype.hasOwnProperty.call(finalPayload.leadData, '_joiningStudentFeeDetails')
         ? finalPayload.leadData._joiningStudentFeeDetails
         : null;
-    await syncJoiningStudentFeeDetailsToFeeMongo({
+    const registrationExtrasForSync =
+      finalPayload.leadData?._joiningRegistrationExtras &&
+      typeof finalPayload.leadData._joiningRegistrationExtras === 'object'
+        ? finalPayload.leadData._joiningRegistrationExtras
+        : {};
+    await runJoiningFeePortalSync({
+      pool,
       joiningId: joiningIdToUse,
       leadId: resolvedLeadIdForFeeMirror,
       studentFeeDetails: sanitizeStudentFeeDetailsForDb(rawStudentFeeFromLeadData),
+      registrationExtras: registrationExtrasForSync,
     });
 
     if (payload.reference1 !== undefined) {
@@ -2239,6 +2337,11 @@ export const patchJoiningStepTwo = async (req, res) => {
         : {};
     const hasStudentFees = Object.prototype.hasOwnProperty.call(body, 'studentFeeDetails');
 
+    const hasTransportPatch =
+      patchReg.transport_details &&
+      typeof patchReg.transport_details === 'object' &&
+      Object.keys(patchReg.transport_details).length > 0;
+
     let ld =
       typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {};
     if (!ld || typeof ld !== 'object') ld = {};
@@ -2275,11 +2378,18 @@ export const patchJoiningStepTwo = async (req, res) => {
         ? String(joining.lead_id).trim()
         : null;
 
-    if (hasStudentFees) {
-      await syncJoiningStudentFeeDetailsToFeeMongo({
+    if (hasStudentFees || hasTransportPatch) {
+      const feesForSync =
+        rawFees ||
+        (nextLd._joiningStudentFeeDetails
+          ? sanitizeStudentFeeDetailsForDb(nextLd._joiningStudentFeeDetails)
+          : null);
+      await runJoiningFeePortalSync({
+        pool,
         joiningId: joining.id,
         leadId: resolvedLeadIdForFeeMirror,
-        studentFeeDetails: rawFees,
+        studentFeeDetails: feesForSync,
+        registrationExtras: mergedExtras,
       });
     }
 
@@ -3082,6 +3192,7 @@ export const approveJoining = async (req, res) => {
       {
         joining: finalJoining,
         admissionNumber,
+        admissionId,
       },
       'Joining form approved',
       200

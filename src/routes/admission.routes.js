@@ -19,6 +19,9 @@ import {
   getAdmissionStatsBySource,
   getAdmissionStatsByDate,
   listDistinctReferenceNames,
+  getDistinctReferenceNameUsage,
+  renameDistinctReferenceName,
+  hideDistinctReferenceName,
   upsertAdmissionBranchIntake,
   exportAdmissions,
   sendAdmissionConfirmationSmsById,
@@ -29,6 +32,9 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/reference-names', listDistinctReferenceNames);
+router.get('/reference-names/usage', getDistinctReferenceNameUsage);
+router.patch('/reference-names/rename', requireJoiningEditReference, renameDistinctReferenceName);
+router.post('/reference-names/hide', requireJoiningEditReference, hideDistinctReferenceName);
 router.get('/stats/by-reference', getAdmissionStatsByReference);
 router.get('/stats/by-source', getAdmissionStatsBySource);
 router.get('/stats/by-date', getAdmissionStatsByDate);

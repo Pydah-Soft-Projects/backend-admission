@@ -24,6 +24,10 @@ import { resolveSecondaryManagedIds } from '../data/admissionsCourseBranchMap202
 import {
   readReference1FromDynamicFields,
   resolveAdmissionReference1,
+  renameReferenceNameGlobally,
+  hideReferenceNameFromPicker,
+  clearReferenceNameGlobally,
+  getReferenceNameUsage,
 } from '../utils/joiningReference.util.js';
 
 const normCourseBranchLabel = (value) =>
@@ -1200,6 +1204,9 @@ const normalizeAdmissionLeadSource = (row) => {
 
   const dynamicFields = parseLeadDynamicFieldsColumn(row.lead_dynamic_fields);
   const createdFrom = String(dynamicFields?.createdFrom ?? '').trim();
+  if (createdFrom === 'self_registration') {
+    return 'Self Registration';
+  }
   if (createdFrom === 'send_joining_form' || createdFrom === 'joining_form_link') {
     return 'Joining Form Link';
   }
@@ -2924,6 +2931,23 @@ export const listDistinctReferenceNames = async (req, res) => {
     const sqlLeadDynamic = `COALESCE(CASE WHEN JSON_VALID(l.dynamic_fields) THEN l.dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT())`;
     const sqlLeadRef1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${sqlLeadDynamic}, '$.reference1'))), '')`;
 
+    let hiddenKeys = [];
+    try {
+      const [hiddenRows] = await pool.execute(
+        'SELECT name_normalized FROM reference_picker_hidden'
+      );
+      hiddenKeys = hiddenRows
+        .map((r) => String(r.name_normalized ?? '').trim())
+        .filter(Boolean);
+    } catch {
+      /* reference_picker_hidden table may not exist until migration runs */
+    }
+
+    const hiddenClause =
+      hiddenKeys.length > 0
+        ? ` AND LOWER(TRIM(name)) NOT IN (${hiddenKeys.map(() => '?').join(', ')})`
+        : '';
+
     const [rows] = await pool.execute(
       `SELECT DISTINCT TRIM(name) AS name FROM (
          SELECT ${SQL_A_REFERENCE1} AS name FROM admissions a
@@ -2938,9 +2962,10 @@ export const listDistinctReferenceNames = async (req, res) => {
          SELECT ${sqlLeadRef1} AS name FROM leads l
          WHERE ${sqlLeadRef1} IS NOT NULL
        ) refs
-       WHERE name IS NOT NULL AND name != ''
+       WHERE name IS NOT NULL AND name != ''${hiddenClause}
        ORDER BY name ASC
-       LIMIT 500`
+       LIMIT 500`,
+      hiddenKeys
     );
 
     const names = rows
@@ -2951,6 +2976,102 @@ export const listDistinctReferenceNames = async (req, res) => {
   } catch (error) {
     console.error('Error listing distinct reference names:', error);
     return errorResponse(res, error.message || 'Failed to list reference names', 500);
+  }
+};
+
+/**
+ * @desc    Usage stats + sample admissions for a reference name (manage dialog)
+ * @route   GET /api/admissions/reference-names/usage
+ */
+export const getDistinctReferenceNameUsage = async (req, res) => {
+  try {
+    const name = String(req.query?.name ?? '').trim();
+    if (!name) {
+      return errorResponse(res, 'name query parameter is required', 400);
+    }
+    const pool = getPool();
+    const usage = await getReferenceNameUsage(pool, name);
+    return successResponse(res, usage, 'Reference usage retrieved successfully', 200);
+  } catch (error) {
+    console.error('Error fetching reference name usage:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to fetch reference usage',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * @desc    Rename a saved reference everywhere it appears (admissions, joinings, leads)
+ * @route   PATCH /api/admissions/reference-names/rename
+ */
+export const renameDistinctReferenceName = async (req, res) => {
+  try {
+    const oldName = String(req.body?.oldName ?? req.body?.name ?? '').trim();
+    const newName = String(req.body?.newName ?? '').trim();
+    if (!oldName) {
+      return errorResponse(res, 'oldName is required', 400);
+    }
+    if (!newName) {
+      return errorResponse(res, 'newName is required', 400);
+    }
+
+    const pool = getPool();
+    const result = await renameReferenceNameGlobally(pool, oldName, newName);
+
+    return successResponse(
+      res,
+      { oldName, newName, ...result },
+      result.renamed === false
+        ? 'Reference name unchanged'
+        : 'Reference renamed on all matching records',
+      200
+    );
+  } catch (error) {
+    console.error('Error renaming reference name:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to rename reference',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * @desc    Hide a reference name from the picker (does not clear existing admissions)
+ * @route   POST /api/admissions/reference-names/hide
+ */
+export const hideDistinctReferenceName = async (req, res) => {
+  try {
+    const name = String(req.body?.name ?? '').trim();
+    if (!name) {
+      return errorResponse(res, 'name is required', 400);
+    }
+    const clearRecords = Boolean(req.body?.clearRecords);
+
+    const pool = getPool();
+    let clearResult = null;
+    if (clearRecords) {
+      clearResult = await clearReferenceNameGlobally(pool, name);
+    }
+    const result = await hideReferenceNameFromPicker(pool, name, req.user?.id);
+
+    return successResponse(
+      res,
+      { ...result, clearRecords, ...(clearResult || {}) },
+      clearRecords
+        ? 'Reference removed from list and cleared on matching records'
+        : 'Reference removed from picker list',
+      200
+    );
+  } catch (error) {
+    console.error('Error hiding reference name:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to remove reference from list',
+      error.statusCode || 500
+    );
   }
 };
 

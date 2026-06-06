@@ -384,6 +384,18 @@ CREATE TABLE IF NOT EXISTS joining_public_edit_tokens (
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Permanent campus self-registration QR (one row; plain token for admin QR display)
+CREATE TABLE IF NOT EXISTS joining_self_registration_link (
+    id CHAR(36) PRIMARY KEY,
+    token_plain VARCHAR(128) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    public_edit_token_id CHAR(36) NULL,
+    created_by CHAR(36) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_self_reg_token_hash (token_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ============================================
 -- 7. JOINING RELATIVES TABLE
 -- ============================================

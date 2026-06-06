@@ -13,6 +13,8 @@ import {
 } from './joining.controller.js';
 import { listRegistrationForms, getRegistrationForm } from './registrationForm.controller.js';
 import { listCourseProgramLevels, listStudentQuotas } from './secondaryJoiningContext.controller.js';
+import { SELF_REGISTRATION_ROUTE_KEY } from '../utils/joiningSelfRegistration.util.js';
+import { ensureSelfRegistrationPublicLink } from '../services/joiningSelfRegistrationLink.service.js';
 
 const PUBLIC_EDIT_TTL_MS = 5 * 60 * 1000;
 /** CRM source for staff "Add Joining Form" pipeline (not quota — do not confuse with leads.quota). */
@@ -91,8 +93,11 @@ async function resolvePublicTokenRow(plainToken) {
   const pool = getPool();
   const tokenHash = createHash('sha256').update(plainToken, 'utf8').digest('hex');
   const [rows] = await pool.execute(
-    'SELECT * FROM joining_public_edit_tokens WHERE token_hash = ? AND expires_at > UTC_TIMESTAMP() LIMIT 1',
-    [tokenHash]
+    `SELECT * FROM joining_public_edit_tokens
+     WHERE token_hash = ?
+       AND (expires_at > UTC_TIMESTAMP() OR route_key = ?)
+     LIMIT 1`,
+    [tokenHash, SELF_REGISTRATION_ROUTE_KEY]
   );
   return rows.length ? rows[0] : null;
 }
@@ -107,11 +112,11 @@ async function assertDraftJoiningForRouteKey(routeKey) {
   return joining;
 }
 
-async function createPublicEditTokenForRouteKey(pool, routeKey, userId) {
+async function createPublicEditTokenForRouteKey(pool, routeKey, userId, ttlMs = PUBLIC_EDIT_TTL_MS) {
   const rawToken = randomBytes(16).toString('base64url');
   const tokenHash = createHash('sha256').update(rawToken, 'utf8').digest('hex');
   const id = uuidv4();
-  const expiresAt = new Date(Date.now() + PUBLIC_EDIT_TTL_MS);
+  const expiresAt = new Date(Date.now() + ttlMs);
 
   await pool.execute(
     `INSERT INTO joining_public_edit_tokens (id, token_hash, route_key, expires_at, created_by)
@@ -132,9 +137,75 @@ async function createPublicEditTokenForRouteKey(pool, routeKey, userId) {
     publicUrl,
     token: rawToken,
     expiresAt: expiresAt.toISOString(),
-    ttlSeconds: Math.floor(PUBLIC_EDIT_TTL_MS / 1000),
+    ttlSeconds: Math.floor(ttlMs / 1000),
   };
 }
+
+/**
+ * GET /api/joinings/self-registration-link (authenticated)
+ * Returns the permanent campus QR/link (creates on first access if missing).
+ */
+export const getSelfRegistrationLink = async (req, res) => {
+  try {
+    const link = await ensureSelfRegistrationPublicLink(req.user?.id);
+    const status = link.created ? 201 : 200;
+    return successResponse(
+      res,
+      link,
+      link.created ? 'Self-registration link created' : 'Self-registration link loaded',
+      status
+    );
+  } catch (error) {
+    console.error('getSelfRegistrationLink:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to load self-registration link',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * POST /api/joinings/self-registration-link (authenticated)
+ * Idempotent get-or-create — same permanent link is returned every time.
+ */
+export const createSelfRegistrationLink = async (req, res) => {
+  try {
+    const link = await ensureSelfRegistrationPublicLink(req.user?.id);
+    const status = link.created ? 201 : 200;
+    return successResponse(
+      res,
+      link,
+      link.created ? 'Self-registration link created' : 'Self-registration link ready',
+      status
+    );
+  } catch (error) {
+    console.error('createSelfRegistrationLink:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to prepare self-registration link',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * POST /api/joinings/self-registration-link/regenerate (authenticated)
+ * Rotates the campus QR (invalidates the previous link). Use sparingly.
+ */
+export const regenerateSelfRegistrationLink = async (req, res) => {
+  try {
+    const link = await ensureSelfRegistrationPublicLink(req.user?.id, { forceRegenerate: true });
+    return successResponse(res, link, 'Self-registration link regenerated', 201);
+  } catch (error) {
+    console.error('regenerateSelfRegistrationLink:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to regenerate self-registration link',
+      error.statusCode || 500
+    );
+  }
+};
 
 /**
  * POST /api/joinings/:leadId/public-edit-link (authenticated)
@@ -395,9 +466,9 @@ export const getJoiningPublicBootstrap = async (req, res) => {
 
     let joining = null;
     let lead = null;
-    if (tokenRow.route_key === 'new') {
+    if (tokenRow.route_key === 'new' || tokenRow.route_key === SELF_REGISTRATION_ROUTE_KEY) {
       const body = await captureControllerJson(getJoining, () => ({
-        params: { leadId: 'new' },
+        params: { leadId: tokenRow.route_key },
       }));
       joining = body?.data?.joining || null;
       lead = body?.data?.lead || null;
@@ -463,6 +534,7 @@ export const getJoiningPublicBootstrap = async (req, res) => {
         registrationForms,
         registrationForm,
         certificateGuidance,
+        selfRegistration: tokenRow.route_key === SELF_REGISTRATION_ROUTE_KEY,
       },
       'Public joining workspace loaded',
       200
@@ -491,7 +563,7 @@ export const saveJoiningPublicDraft = async (req, res) => {
       return errorResponse(res, 'Invalid or expired link', 404);
     }
 
-    if (tokenRow.route_key !== 'new') {
+    if (tokenRow.route_key !== 'new' && tokenRow.route_key !== SELF_REGISTRATION_ROUTE_KEY) {
       await assertDraftJoiningForRouteKey(tokenRow.route_key);
     }
 
@@ -527,10 +599,14 @@ export const submitJoiningPublic = async (req, res) => {
     }
 
     const submittedRouteKey =
-      tokenRow.route_key === 'new'
+      tokenRow.route_key === 'new' || tokenRow.route_key === SELF_REGISTRATION_ROUTE_KEY
         ? String((req.body && req.body.routeKey) || '')
         : tokenRow.route_key;
-    if (!submittedRouteKey || submittedRouteKey === 'new') {
+    if (
+      !submittedRouteKey ||
+      submittedRouteKey === 'new' ||
+      submittedRouteKey === SELF_REGISTRATION_ROUTE_KEY
+    ) {
       return errorResponse(res, 'Missing joining identifier for submit', 400);
     }
 

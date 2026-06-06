@@ -1,0 +1,30 @@
+-- Fee revision approval queue (revised fee != catalog fee on Step 4)
+CREATE TABLE IF NOT EXISTS fee_requests (
+  id CHAR(36) PRIMARY KEY,
+  joining_id CHAR(36) NOT NULL,
+  lead_id CHAR(36) NULL,
+  admission_number VARCHAR(100) DEFAULT '',
+  student_name VARCHAR(255) DEFAULT '',
+  course VARCHAR(255) DEFAULT '',
+  branch VARCHAR(255) DEFAULT '',
+  batch VARCHAR(32) DEFAULT '',
+  status VARCHAR(50) NOT NULL DEFAULT 'pending_approval'
+    CHECK (status IN ('pending_approval', 'approved', 'rejected')),
+  request_lines JSON NOT NULL,
+  accommodation_type VARCHAR(20) NULL,
+  transport_details JSON NULL,
+  student_fee_details JSON NULL,
+  submitted_at DATETIME NULL,
+  submitted_by CHAR(36) NULL,
+  approved_at DATETIME NULL,
+  approved_by CHAR(36) NULL,
+  rejected_at DATETIME NULL,
+  rejected_by CHAR(36) NULL,
+  rejection_reason TEXT NULL,
+  reviewer_note TEXT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_fee_requests_status (status),
+  INDEX idx_fee_requests_joining (joining_id),
+  INDEX idx_fee_requests_submitted_at (submitted_at)
+);

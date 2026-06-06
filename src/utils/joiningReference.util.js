@@ -1,3 +1,6 @@
+import { v4 as uuidv4 } from 'uuid';
+import { isSelfRegistrationLead } from './joiningSelfRegistration.util.js';
+
 /**
  * Reference 1 mirrors the staff member who last marked call_status as Confirmed.
  * Stored at lead_data.reference1, dynamic_fields.reference1 (leads), and admission records.
@@ -37,7 +40,8 @@ export async function fetchLastCallStatusConfirmedByUserName(pool, leadId) {
 
 /** Resolve reference1 from stored fields, optional override, or call-status confirmer log. */
 export async function resolveReference1ForLead(pool, leadOrSnapshot, options = {}) {
-  const { confirmerNameOverride = '' } = options;
+  const { confirmerNameOverride = '', skipReferenceResolution = false } = options;
+  if (skipReferenceResolution || isSelfRegistrationLead(leadOrSnapshot)) return '';
   if (!leadOrSnapshot || typeof leadOrSnapshot !== 'object') return '';
 
   const dyn = leadOrSnapshot.dynamicFields ?? leadOrSnapshot.dynamic_fields;
@@ -86,6 +90,11 @@ export async function buildJoiningLeadDataSnapshot(pool, lead, options = {}) {
   delete snapshot._id;
   delete snapshot.id;
   delete snapshot.__v;
+
+  if (options.skipReferenceResolution || isSelfRegistrationLead(snapshot)) {
+    delete snapshot.reference1;
+    return snapshot;
+  }
 
   const reference1 = await resolveReference1ForLead(pool, snapshot, options);
   if (!reference1) return snapshot;
@@ -260,6 +269,7 @@ export async function persistLeadReference1(pool, leadId, reference1, options = 
 /** Backfill joinings.lead_data.reference1 from last call_status Confirmed activity. */
 export async function backfillJoiningReferenceFromLead(pool, joiningRow, lead) {
   if (!joiningRow?.id || !lead) return false;
+  if (isSelfRegistrationLead(lead)) return false;
 
   const leadId = String(lead.id ?? lead._id ?? joiningRow.lead_id ?? '').trim();
   if (!leadId) return false;
@@ -302,4 +312,286 @@ export async function backfillJoiningReferenceFromLead(pool, joiningRow, lead) {
   ]);
   joiningRow.lead_data = JSON.stringify(nextLd);
   return true;
+}
+
+export const normalizeReferenceNameKey = (s) => String(s ?? '').trim().toLowerCase();
+
+const sqlJsonRefEquals = (columnExpr, jsonPath) =>
+  `LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(
+     COALESCE(CASE WHEN JSON_VALID(${columnExpr}) THEN ${columnExpr} ELSE JSON_OBJECT() END, JSON_OBJECT()),
+     '${jsonPath}'
+   )))) = ?`;
+
+/**
+ * Rename a saved reference name everywhere it is stored (admissions, joinings, leads).
+ * Does not change records where the name does not match (case-insensitive trim).
+ */
+export async function renameReferenceNameGlobally(pool, oldName, newName) {
+  const oldTrim = String(oldName ?? '').trim();
+  const newTrim = String(newName ?? '').trim();
+  if (!oldTrim) {
+    const err = new Error('Current reference name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!newTrim) {
+    const err = new Error('New reference name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (normalizeReferenceNameKey(oldTrim) === normalizeReferenceNameKey(newTrim)) {
+    return { admissionsUpdated: 0, joiningsUpdated: 0, leadsUpdated: 0, renamed: false };
+  }
+
+  const matchKey = normalizeReferenceNameKey(oldTrim);
+
+  const [admRef1] = await pool.execute(
+    `UPDATE admissions SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.reference1')}`,
+    [newTrim, matchKey]
+  );
+
+  const [admRefName] = await pool.execute(
+    `UPDATE admissions SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.referenceName', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.referenceName')}`,
+    [newTrim, matchKey]
+  );
+
+  const [joinRef1] = await pool.execute(
+    `UPDATE joinings SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.reference1')}`,
+    [newTrim, matchKey]
+  );
+
+  const [joinRefName] = await pool.execute(
+    `UPDATE joinings SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.referenceName', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.referenceName')}`,
+    [newTrim, matchKey]
+  );
+
+  const [leadResult] = await pool.execute(
+    `UPDATE leads SET
+       dynamic_fields = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(dynamic_fields) THEN dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('dynamic_fields', '$.reference1')}`,
+    [newTrim, matchKey]
+  );
+
+  try {
+    await pool.execute(
+      `UPDATE reference_picker_hidden SET
+         name_normalized = ?,
+         original_name = ?
+       WHERE name_normalized = ?`,
+      [normalizeReferenceNameKey(newTrim), newTrim, matchKey]
+    );
+  } catch {
+    /* table may not exist yet */
+  }
+
+  return {
+    admissionsUpdated: (admRef1.affectedRows ?? 0) + (admRefName.affectedRows ?? 0),
+    joiningsUpdated: (joinRef1.affectedRows ?? 0) + (joinRefName.affectedRows ?? 0),
+    leadsUpdated: leadResult.affectedRows ?? 0,
+    renamed: true,
+  };
+}
+
+/**
+ * Clear reference1 / referenceName everywhere the given name appears.
+ */
+export async function clearReferenceNameGlobally(pool, name) {
+  const trimmed = String(name ?? '').trim();
+  if (!trimmed) {
+    const err = new Error('Reference name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  const matchKey = normalizeReferenceNameKey(trimmed);
+  const empty = '';
+
+  const [admRef1] = await pool.execute(
+    `UPDATE admissions SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.reference1')}`,
+    [empty, matchKey]
+  );
+
+  const [admRefName] = await pool.execute(
+    `UPDATE admissions SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.referenceName', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.referenceName')}`,
+    [empty, matchKey]
+  );
+
+  const [joinRef1] = await pool.execute(
+    `UPDATE joinings SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.reference1')}`,
+    [empty, matchKey]
+  );
+
+  const [joinRefName] = await pool.execute(
+    `UPDATE joinings SET
+       lead_data = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.referenceName', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('lead_data', '$.referenceName')}`,
+    [empty, matchKey]
+  );
+
+  const [leadResult] = await pool.execute(
+    `UPDATE leads SET
+       dynamic_fields = JSON_SET(
+         COALESCE(CASE WHEN JSON_VALID(dynamic_fields) THEN dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT()),
+         '$.reference1', ?
+       ),
+       updated_at = NOW()
+     WHERE ${sqlJsonRefEquals('dynamic_fields', '$.reference1')}`,
+    [empty, matchKey]
+  );
+
+  return {
+    admissionsUpdated: (admRef1.affectedRows ?? 0) + (admRefName.affectedRows ?? 0),
+    joiningsUpdated: (joinRef1.affectedRows ?? 0) + (joinRefName.affectedRows ?? 0),
+    leadsUpdated: leadResult.affectedRows ?? 0,
+  };
+}
+
+const SQL_USAGE_A_LEAD_DATA = `COALESCE(CASE WHEN JSON_VALID(a.lead_data) THEN a.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+const SQL_USAGE_A_REF1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_USAGE_A_LEAD_DATA}, '$.reference1'))), '')`;
+const SQL_USAGE_A_REFNAME = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_USAGE_A_LEAD_DATA}, '$.referenceName'))), '')`;
+const SQL_USAGE_J_LEAD_DATA = `COALESCE(CASE WHEN JSON_VALID(j.lead_data) THEN j.lead_data ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+const SQL_USAGE_J_REF1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_USAGE_J_LEAD_DATA}, '$.reference1'))), '')`;
+const SQL_USAGE_J_REFNAME = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_USAGE_J_LEAD_DATA}, '$.referenceName'))), '')`;
+const SQL_USAGE_L_DYNAMIC = `COALESCE(CASE WHEN JSON_VALID(l.dynamic_fields) THEN l.dynamic_fields ELSE JSON_OBJECT() END, JSON_OBJECT())`;
+const SQL_USAGE_L_REF1 = `NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(${SQL_USAGE_L_DYNAMIC}, '$.reference1'))), '')`;
+const SQL_USAGE_EFFECTIVE_REF = `COALESCE(${SQL_USAGE_A_REF1}, ${SQL_USAGE_A_REFNAME}, ${SQL_USAGE_J_REF1}, ${SQL_USAGE_J_REFNAME}, ${SQL_USAGE_L_REF1})`;
+const SQL_USAGE_REF_MATCH = `LOWER(TRIM(${SQL_USAGE_EFFECTIVE_REF})) = ?`;
+
+/** Admissions / joinings / leads using this reference name (for manage dialog). */
+export async function getReferenceNameUsage(pool, name, { admissionLimit = 50 } = {}) {
+  const trimmed = String(name ?? '').trim();
+  if (!trimmed) {
+    const err = new Error('Reference name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  const matchKey = normalizeReferenceNameKey(trimmed);
+
+  const [countRows] = await pool.execute(
+    `SELECT COUNT(*) AS total
+     FROM admissions a
+     LEFT JOIN joinings j ON j.id = a.joining_id
+     LEFT JOIN leads l ON l.id = a.lead_id
+     WHERE ${SQL_USAGE_REF_MATCH}`,
+    [matchKey]
+  );
+  const admissionsCount = Number(countRows[0]?.total ?? 0);
+
+  const [joinCountRows] = await pool.execute(
+    `SELECT COUNT(*) AS total FROM joinings j
+     WHERE ${sqlJsonRefEquals('lead_data', '$.reference1')} OR ${sqlJsonRefEquals('lead_data', '$.referenceName')}`,
+    [matchKey, matchKey]
+  );
+  const joiningsCount = Number(joinCountRows[0]?.total ?? 0);
+
+  const [leadCountRows] = await pool.execute(
+    `SELECT COUNT(*) AS total FROM leads l WHERE ${sqlJsonRefEquals('dynamic_fields', '$.reference1')}`,
+    [matchKey]
+  );
+  const leadsCount = Number(leadCountRows[0]?.total ?? 0);
+
+  const limit = Math.min(Math.max(Number(admissionLimit) || 50, 1), 100);
+  const [admissionRows] = await pool.execute(
+    `SELECT
+       a.id,
+       a.admission_number AS admissionNumber,
+       COALESCE(NULLIF(TRIM(a.student_name), ''), '—') AS studentName,
+       a.status,
+       COALESCE(NULLIF(TRIM(a.course), ''), '—') AS course,
+       COALESCE(NULLIF(TRIM(a.branch), ''), '—') AS branch
+     FROM admissions a
+     LEFT JOIN joinings j ON j.id = a.joining_id
+     LEFT JOIN leads l ON l.id = a.lead_id
+     WHERE ${SQL_USAGE_REF_MATCH}
+     ORDER BY a.created_at DESC
+     LIMIT ${limit}`,
+    [matchKey]
+  );
+
+  return {
+    name: trimmed,
+    admissionsCount,
+    joiningsCount,
+    leadsCount,
+    admissions: admissionRows.map((row) => ({
+      id: String(row.id ?? ''),
+      admissionNumber: String(row.admissionNumber ?? '').trim() || '—',
+      studentName: String(row.studentName ?? '').trim() || '—',
+      status: String(row.status ?? '').trim() || '—',
+      course: String(row.course ?? '').trim() || '—',
+      branch: String(row.branch ?? '').trim() || '—',
+    })),
+    admissionsTruncated: admissionsCount > admissionRows.length,
+  };
+}
+
+/** Hide a name from the reference picker without clearing stored references on records. */
+export async function hideReferenceNameFromPicker(pool, name, userId = null) {
+  const trimmed = String(name ?? '').trim();
+  if (!trimmed) {
+    const err = new Error('Reference name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  const normalized = normalizeReferenceNameKey(trimmed);
+  const id = uuidv4();
+  await pool.execute(
+    `INSERT INTO reference_picker_hidden (id, name_normalized, original_name, hidden_by)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       original_name = VALUES(original_name),
+       hidden_by = VALUES(hidden_by),
+       hidden_at = NOW()`,
+    [id, normalized, trimmed, userId || null]
+  );
+  return { hidden: true, name: trimmed };
 }

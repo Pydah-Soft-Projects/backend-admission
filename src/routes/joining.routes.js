@@ -15,6 +15,9 @@ import {
 import {
   createJoiningPublicEditLink,
   createJoiningDraftAndPublicLink,
+  createSelfRegistrationLink,
+  getSelfRegistrationLink,
+  regenerateSelfRegistrationLink,
 } from '../controllers/joiningPublic.controller.js';
 
 const router = express.Router();
@@ -23,6 +26,9 @@ router.use(protect);
 
 router.get('/', listJoinings);
 router.post('/send-public-link', createJoiningDraftAndPublicLink);
+router.get('/self-registration-link', getSelfRegistrationLink);
+router.post('/self-registration-link', createSelfRegistrationLink);
+router.post('/self-registration-link/regenerate', regenerateSelfRegistrationLink);
 router.post('/:leadId/public-edit-link', createJoiningPublicEditLink);
 router.get('/:leadId', getJoining);
 router.patch('/:leadId/step-two', requireJoiningEditAdmission, patchJoiningStepTwo);

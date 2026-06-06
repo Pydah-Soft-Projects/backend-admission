@@ -28,6 +28,8 @@ const QUOTA_TO_CATEGORY = {
   mang: 'MANG',
   spot: 'SPOT',
   'spot admission': 'SPOT',
+  'lateral entry': 'CONV',
+  'lateral spot': 'SPOT',
 };
 
 const normalize = (value) =>
