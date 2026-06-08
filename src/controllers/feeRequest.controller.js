@@ -31,7 +31,45 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
   return { ...(batch ? { batch } : {}), lines };
 };
 
-const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationExtras) => {
+const parseLeadData = (raw) => {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) || {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof raw === 'object' ? raw : {};
+};
+
+const resolveJoiningAdmissionNumber = (leadData, registrationExtras) => {
+  const fromLead =
+    leadData?.admissionNumber ||
+    leadData?.admission_number ||
+    leadData?.enquiryNumber ||
+    '';
+  if (String(fromLead).trim()) return String(fromLead).trim();
+
+  const extras =
+    (registrationExtras && typeof registrationExtras === 'object' ? registrationExtras : null) ||
+    (leadData?._joiningRegistrationExtras &&
+    typeof leadData._joiningRegistrationExtras === 'object'
+      ? leadData._joiningRegistrationExtras
+      : null);
+  if (extras) {
+    const n = extras.admission_number || extras.admissionNumber;
+    if (n) return String(n).trim();
+  }
+  return '';
+};
+
+const buildJoiningFeeSyncContext = (
+  joiningRow,
+  studentFeeDetails,
+  registrationExtras,
+  admissionNumber = ''
+) => {
   const transportDetails =
     registrationExtras?.transport_details &&
     typeof registrationExtras.transport_details === 'object'
@@ -45,7 +83,7 @@ const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationE
       studentFeeDetails?.batch != null && String(studentFeeDetails.batch).trim() !== ''
         ? String(studentFeeDetails.batch).trim()
         : '',
-    admissionNumber: joiningRow?.admission_number || '',
+    admissionNumber: admissionNumber || '',
     studentName: joiningRow?.student_name || '',
     studentPhone: joiningRow?.student_phone || '',
     studentGender: joiningRow?.student_gender || '',
@@ -54,16 +92,31 @@ const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationE
   };
 };
 
-const parseLeadData = (raw) => {
-  if (!raw) return {};
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw) || {};
-    } catch {
-      return {};
+const resolveJoiningAdmissionNumberFromDb = async (pool, joining) => {
+  const leadData = parseLeadData(joining.lead_data);
+  let admissionNumber = resolveJoiningAdmissionNumber(leadData);
+
+  if (!admissionNumber && joining.lead_id) {
+    const [leadRows] = await pool.execute(
+      'SELECT admission_number FROM leads WHERE id = ? LIMIT 1',
+      [joining.lead_id]
+    );
+    if (leadRows[0]?.admission_number) {
+      admissionNumber = String(leadRows[0].admission_number).trim();
     }
   }
-  return typeof raw === 'object' ? raw : {};
+
+  if (!admissionNumber) {
+    const [admRows] = await pool.execute(
+      'SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1',
+      [joining.id]
+    );
+    if (admRows[0]?.admission_number) {
+      admissionNumber = String(admRows[0].admission_number).trim();
+    }
+  }
+
+  return admissionNumber;
 };
 
 const formatFeeRequestRow = (row) => ({
@@ -191,7 +244,13 @@ export const submitFeeRequest = async (req, res) => {
       return errorResponse(res, 'Fee requests can only be submitted for approved joinings', 400);
     }
 
-    const syncContext = buildJoiningFeeSyncContext(joining, studentFeeDetails, registrationExtras);
+    const admissionNumber = await resolveJoiningAdmissionNumberFromDb(pool, joining);
+    const syncContext = buildJoiningFeeSyncContext(
+      joining,
+      studentFeeDetails,
+      registrationExtras,
+      admissionNumber
+    );
     const syncResult = await syncJoiningStudentFeeDetailsToFeeMongo({
       joiningId,
       leadId: joining.lead_id,
@@ -221,7 +280,7 @@ export const submitFeeRequest = async (req, res) => {
 
     const payload = {
       lead_id: joining.lead_id || null,
-      admission_number: joining.admission_number || '',
+      admission_number: admissionNumber,
       student_name: joining.student_name || '',
       course: joining.course || '',
       branch: joining.branch || '',

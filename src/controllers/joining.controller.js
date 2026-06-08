@@ -103,7 +103,45 @@ const formatStudentFeeDetailsForClient = (raw) => {
   return s || { lines: [] };
 };
 
-const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationExtras) => {
+const parseJoiningLeadData = (raw) => {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) || {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof raw === 'object' ? raw : {};
+};
+
+const resolveJoiningAdmissionNumber = (leadData, registrationExtras) => {
+  const fromLead =
+    leadData?.admissionNumber ||
+    leadData?.admission_number ||
+    leadData?.enquiryNumber ||
+    '';
+  if (String(fromLead).trim()) return String(fromLead).trim();
+
+  const extras =
+    (registrationExtras && typeof registrationExtras === 'object' ? registrationExtras : null) ||
+    (leadData?._joiningRegistrationExtras &&
+    typeof leadData._joiningRegistrationExtras === 'object'
+      ? leadData._joiningRegistrationExtras
+      : null);
+  if (extras) {
+    const n = extras.admission_number || extras.admissionNumber;
+    if (n) return String(n).trim();
+  }
+  return '';
+};
+
+const buildJoiningFeeSyncContext = (
+  joiningRow,
+  studentFeeDetails,
+  registrationExtras,
+  admissionNumber = ''
+) => {
   const transportDetails =
     registrationExtras?.transport_details &&
     typeof registrationExtras.transport_details === 'object'
@@ -118,7 +156,7 @@ const buildJoiningFeeSyncContext = (joiningRow, studentFeeDetails, registrationE
       studentFeeDetails?.batch != null && String(studentFeeDetails.batch).trim() !== ''
         ? String(studentFeeDetails.batch).trim()
         : '',
-    admissionNumber: joiningRow?.admission_number || '',
+    admissionNumber: admissionNumber || '',
     studentName: joiningRow?.student_name || '',
     studentPhone: joiningRow?.student_phone || '',
     studentGender: joiningRow?.student_gender || '',
@@ -135,16 +173,44 @@ const runJoiningFeePortalSync = async ({
   registrationExtras,
 }) => {
   const [rows] = await pool.execute(
-    `SELECT course, branch, quota, admission_number, student_name, student_phone, student_gender, father_phone
+    `SELECT course, branch, quota, lead_id, lead_data, student_name, student_phone, student_gender, father_phone
      FROM joinings WHERE id = ? LIMIT 1`,
     [joiningId]
   );
   const joiningRow = rows[0] || {};
+  const leadData = parseJoiningLeadData(joiningRow.lead_data);
+  let admissionNumber = resolveJoiningAdmissionNumber(leadData, registrationExtras);
+
+  if (!admissionNumber && joiningRow.lead_id) {
+    const [leadRows] = await pool.execute(
+      'SELECT admission_number FROM leads WHERE id = ? LIMIT 1',
+      [joiningRow.lead_id]
+    );
+    if (leadRows[0]?.admission_number) {
+      admissionNumber = String(leadRows[0].admission_number).trim();
+    }
+  }
+
+  if (!admissionNumber) {
+    const [admRows] = await pool.execute(
+      'SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1',
+      [joiningId]
+    );
+    if (admRows[0]?.admission_number) {
+      admissionNumber = String(admRows[0].admission_number).trim();
+    }
+  }
+
   await syncJoiningStudentFeeDetailsToFeeMongo({
     joiningId,
-    leadId,
+    leadId: leadId || joiningRow.lead_id || null,
     studentFeeDetails,
-    joiningContext: buildJoiningFeeSyncContext(joiningRow, studentFeeDetails, registrationExtras),
+    joiningContext: buildJoiningFeeSyncContext(
+      joiningRow,
+      studentFeeDetails,
+      registrationExtras,
+      admissionNumber
+    ),
   });
 };
 
@@ -659,7 +725,10 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       course: resolveBtechCourseDisplayName(
         joiningData.course || '',
         registrationFormData,
-        joiningData.admission_number
+        resolveJoiningAdmissionNumber(
+          { ...leadDataRaw, _joiningRegistrationExtras: registrationFormData },
+          registrationFormData
+        )
       ),
       branch: joiningData.branch || '',
       quota: joiningData.quota || '',
@@ -2740,14 +2809,22 @@ export const approveJoining = async (req, res) => {
       }
     }
 
+    const joiningLeadData = parseJoiningLeadData(joining.lead_data);
+
     // Generate admission number
-    let admissionNumber = lead?.admissionNumber || joining.admission_number;
+    let admissionNumber = lead?.admissionNumber || resolveJoiningAdmissionNumber(joiningLeadData);
+    if (!admissionNumber) {
+      const [admRows] = await connection.execute(
+        'SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1',
+        [joining.id]
+      );
+      if (admRows[0]?.admission_number) {
+        admissionNumber = String(admRows[0].admission_number).trim();
+      }
+    }
     if (!admissionNumber) {
       admissionNumber = await generateAdmissionNumber(connection);
     }
-
-    const joiningLeadData =
-      typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {};
 
     if (!joining.lead_id) {
       const createdLeadId = await ensureLeadForApprovedJoining({
