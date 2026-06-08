@@ -112,6 +112,6 @@ export const getAdmitCardAssets = async (req, res) => {
     });
   } catch (error) {
     console.error('getAdmitCardAssets error:', error);
-    return errorResponse(res, error.message || 'Failed to load admit card assets', 500);
+    return errorResponse(res, error.message || 'Failed to load acknowledgement card assets', 500);
   }
 };
