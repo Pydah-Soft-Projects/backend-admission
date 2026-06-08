@@ -115,13 +115,24 @@ const parseJoiningLeadData = (raw) => {
   return typeof raw === 'object' ? raw : {};
 };
 
+const isProbablyEnquiryNumber = (value) => {
+  const v = String(value || '').trim();
+  if (!v) return false;
+  return /^ENQ/i.test(v);
+};
+
+const normalizeAdmissionNumberCandidate = (value) => {
+  const v = String(value || '').trim();
+  if (!v) return '';
+  if (isProbablyEnquiryNumber(v)) return '';
+  return v;
+};
+
 const resolveJoiningAdmissionNumber = (leadData, registrationExtras) => {
-  const fromLead =
-    leadData?.admissionNumber ||
-    leadData?.admission_number ||
-    leadData?.enquiryNumber ||
-    '';
-  if (String(fromLead).trim()) return String(fromLead).trim();
+  const fromLead = normalizeAdmissionNumberCandidate(
+    leadData?.admissionNumber || leadData?.admission_number || ''
+  );
+  if (fromLead) return fromLead;
 
   const extras =
     (registrationExtras && typeof registrationExtras === 'object' ? registrationExtras : null) ||
@@ -130,8 +141,8 @@ const resolveJoiningAdmissionNumber = (leadData, registrationExtras) => {
       ? leadData._joiningRegistrationExtras
       : null);
   if (extras) {
-    const n = extras.admission_number || extras.admissionNumber;
-    if (n) return String(n).trim();
+    const n = normalizeAdmissionNumberCandidate(extras.admission_number || extras.admissionNumber);
+    if (n) return n;
   }
   return '';
 };
@@ -187,7 +198,7 @@ const runJoiningFeePortalSync = async ({
       [joiningRow.lead_id]
     );
     if (leadRows[0]?.admission_number) {
-      admissionNumber = String(leadRows[0].admission_number).trim();
+      admissionNumber = normalizeAdmissionNumberCandidate(leadRows[0].admission_number);
     }
   }
 
@@ -197,7 +208,7 @@ const runJoiningFeePortalSync = async ({
       [joiningId]
     );
     if (admRows[0]?.admission_number) {
-      admissionNumber = String(admRows[0].admission_number).trim();
+      admissionNumber = normalizeAdmissionNumberCandidate(admRows[0].admission_number);
     }
   }
 
