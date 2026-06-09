@@ -5,7 +5,7 @@ import {
   listBranches,
   listCourses,
 } from '../controllers/course.controller.js';
-import { getAdmitCardAssets } from '../controllers/admitCard.controller.js';
+import { getAdmitCardAssets, getCourseFeeQrImage } from '../controllers/admitCard.controller.js';
 import {
   listCourseProgramLevels,
   getCertificateGuidanceForLevel,
@@ -25,6 +25,7 @@ router.get('/program-levels', protect, listCourseProgramLevels);
 router.get('/student-quotas', protect, listStudentQuotas);
 router.get('/certificate-guidance', protect, getCertificateGuidanceForLevel);
 router.get('/:courseId/admit-card-assets', protect, getAdmitCardAssets);
+router.get('/:courseId/fee-qr-image', protect, getCourseFeeQrImage);
 router.get('/:courseId', getCourse);
 router.get('/:courseId/branches', listBranches);
 
