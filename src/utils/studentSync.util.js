@@ -415,6 +415,7 @@ const buildStudentDataForSecondaryStorage = (
     comm?.villageOrCity,
     comm?.mandal,
     comm?.district,
+    comm?.state,
     comm?.pinCode,
   ]
     .map((p) => (p == null ? '' : String(p).trim()))
@@ -427,6 +428,24 @@ const buildStudentDataForSecondaryStorage = (
   }
 
   return { payload, studentAddressLine: fullAddressLine };
+};
+
+/** Remove base64 photo blobs from JSON — photos live in dedicated `students` columns. */
+const stripHeavyMediaFromStudentDataPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return payload;
+  const walk = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (typeof val === 'string' && val.startsWith('data:image') && val.length > 256) {
+        delete obj[key];
+      } else if (val && typeof val === 'object') {
+        walk(val);
+      }
+    }
+  };
+  walk(payload);
+  return payload;
 };
 
 const STUDENT_PORTAL_PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -506,17 +525,31 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
 
   try {
     const secondaryPool = getSecondaryPool();
-    const registrationExtras =
-      (admissionData?.registrationFormData &&
-      typeof admissionData.registrationFormData === 'object'
-        ? admissionData.registrationFormData
-        : null) ||
-      (admissionData?.leadData &&
+    const joiningExtras =
+      admissionData?.leadData &&
       typeof admissionData.leadData === 'object' &&
       admissionData.leadData._joiningRegistrationExtras &&
       typeof admissionData.leadData._joiningRegistrationExtras === 'object'
         ? admissionData.leadData._joiningRegistrationExtras
-        : {});
+        : {};
+    const regFormExtras =
+      admissionData?.registrationFormData &&
+      typeof admissionData.registrationFormData === 'object'
+        ? admissionData.registrationFormData
+        : {};
+    const registrationExtras = { ...joiningExtras, ...regFormExtras };
+    for (const key of [
+      'semester',
+      'current_semester',
+      'currentSemester',
+      'semister',
+      'current_year',
+      'currentYear',
+    ]) {
+      if (!String(registrationExtras[key] ?? '').trim() && joiningExtras[key]) {
+        registrationExtras[key] = joiningExtras[key];
+      }
+    }
 
     const toText = (value) => {
       if (value === undefined || value === null) return '';
@@ -552,8 +585,22 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       resolveSecondaryYearOfStudy(registrationExtras) ??
       parseCurrentYear(registrationExtras?.current_year) ??
       parseCurrentYear(registrationExtras?.currentYear);
+    const resolvedSemester = resolveSecondarySemesterForSync(
+      registrationExtras,
+      resolvedAdmissionNumber,
+      courseLabelRaw
+    );
+    if (currentYearFromExtras == null && resolvedSemester) {
+      currentYearFromExtras = resolveSecondaryYearOfStudy({
+        semester: resolvedSemester,
+        current_semester: resolvedSemester,
+      });
+    }
+    const isDiplomaProgram = /^diploma$/i.test(courseLabelNorm);
     if (isDegreeProgram) {
       currentYearFromExtras = currentYearFromExtras ?? 1;
+    } else if (isDiplomaProgram && currentYearFromExtras == null) {
+      currentYearFromExtras = 1;
     } else if (currentYearFromExtras == null && btechLateralForSync) {
       currentYearFromExtras = 2;
     }
@@ -569,11 +616,6 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     let resolvedBatch = isDegreeProgram
       ? deriveAdmissionSeriesYear(resolvedAdmissionNumber) || '2026'
       : resolveSecondaryStudentBatch(registrationExtras, resolvedAdmissionNumber);
-    const resolvedSemester = resolveSecondarySemesterForSync(
-      registrationExtras,
-      resolvedAdmissionNumber,
-      courseLabelRaw
-    );
     const normalizedDob = normalizeDobForSecondary(admissionData?.studentInfo?.dateOfBirth);
     const certificationCompat = deriveCertificationDialogCompat(certificatesStatus, registrationExtras);
 
@@ -674,6 +716,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       }
     }
     studentDataSecondary._crm_secondary_course = resolvedSecondaryCourse;
+    stripHeavyMediaFromStudentDataPayload(studentDataSecondary);
 
     const fatherPhotoExtracted =
       admissionData?.parents?.father?.photo ||

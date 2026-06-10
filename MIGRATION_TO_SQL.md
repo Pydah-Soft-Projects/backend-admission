@@ -403,6 +403,7 @@ CREATE TABLE joining_relatives (
     joining_id UUID NOT NULL REFERENCES joinings(id) ON DELETE CASCADE,
     name VARCHAR(255) DEFAULT '',
     relationship VARCHAR(100) DEFAULT '',
+    phone VARCHAR(20) DEFAULT '',
     door_street VARCHAR(255) DEFAULT '',
     landmark VARCHAR(255) DEFAULT '',
     village_city VARCHAR(255) DEFAULT '',

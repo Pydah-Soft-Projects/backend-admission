@@ -34,8 +34,48 @@ export const resolveHrmsOrgNamesFindById = async (employee, Division, Department
   };
 };
 
+const toMongoObjectIdString = (ref) => {
+  if (ref == null) return '';
+  if (typeof ref === 'object' && ref._id) return String(ref._id);
+  const s = String(ref).trim();
+  return mongoose.Types.ObjectId.isValid(s) ? s : '';
+};
+
+const collectUniqueObjectIdHexStrings = (refs) => {
+  const out = [];
+  const seen = new Set();
+  for (const ref of refs || []) {
+    const hex = toMongoObjectIdString(ref);
+    if (hex && !seen.has(hex)) {
+      seen.add(hex);
+      out.push(hex);
+    }
+  }
+  return out;
+};
+
+const extractHrmsDesignationName = (emp, desigMap) => {
+  const byId = desigMap.get(toMongoObjectIdString(emp?.designation_id));
+  if (byId) return byId;
+  const dynamicFields = emp?.dynamicFields || {};
+  if (typeof dynamicFields.designation_name === 'string' && dynamicFields.designation_name.trim()) {
+    return dynamicFields.designation_name.trim();
+  }
+  const rawDesignation = dynamicFields.designation;
+  if (typeof rawDesignation === 'string' && rawDesignation.trim()) {
+    try {
+      const parsed = JSON.parse(rawDesignation);
+      if (parsed?.name && String(parsed.name).trim()) return String(parsed.name).trim();
+    } catch {
+      // ignore malformed JSON
+    }
+  }
+  return null;
+};
+
 /**
- * Mutates each user row that has `emp_no` and/or `hrms_id` to set `division`, `department`, `group` from HRMS.
+ * Mutates each user row that has `emp_no` and/or `hrms_id` to set `division`, `department`, `group`,
+ * and `designation` (when available) from HRMS.
  * Rows must be plain objects (same shape as `formatUser` output for getUsers, or assignable list rows with emp_no/hrms_id).
  */
 export async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'users') {
@@ -63,6 +103,8 @@ export async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'user
     const Division = hrmsConn.models.divisions || hrmsConn.model('divisions', new hrmsConn.base.Schema({}, { strict: false }));
     const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
     const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
+    const Designation =
+      hrmsConn.models.designations || hrmsConn.model('designations', new hrmsConn.base.Schema({}, { strict: false }));
     const empByMongoId = new Map();
 
     if (empNoStrings.length > 0) {
@@ -96,12 +138,55 @@ export async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'user
     const hrmsEmployees = [...empByMongoId.values()];
 
     if (hrmsEmployees.length > 0) {
+      const desigIdHexes = collectUniqueObjectIdHexStrings(hrmsEmployees.map((e) => e.designation_id));
+      const designations =
+        desigIdHexes.length > 0
+          ? await Designation.find({
+              _id: { $in: desigIdHexes.map((h) => new mongoose.Types.ObjectId(h)) },
+            })
+              .select('name')
+              .lean()
+          : [];
+
+      const desigMap = new Map();
+      for (const doc of designations || []) {
+        if (!doc?._id) continue;
+        const name = doc.name != null && String(doc.name).trim() !== '' ? String(doc.name).trim() : null;
+        if (!name) continue;
+        desigMap.set(doc._id.toString(), name);
+        const alt = toMongoObjectIdString(doc._id);
+        if (alt && alt !== doc._id.toString()) desigMap.set(alt, name);
+      }
+
       const orgRows = await Promise.all(
-        hrmsEmployees.map(async (emp) => ({
-          emp,
-          org: await resolveHrmsOrgNamesFindById(emp, Division, Department, Group),
-        }))
+        hrmsEmployees.map(async (emp) => {
+          const org = await resolveHrmsOrgNamesFindById(emp, Division, Department, Group);
+          const designation = extractHrmsDesignationName(emp, desigMap);
+          return {
+            emp,
+            org: {
+              ...org,
+              designation,
+            },
+          };
+        })
       );
+
+      const needDesFallback = orgRows.filter(
+        ({ emp, org }) => !org.designation && emp.designation_id
+      );
+      const DESIG_FALLBACK_CONC = 10;
+      for (let i = 0; i < needDesFallback.length; i += DESIG_FALLBACK_CONC) {
+        const batch = needDesFallback.slice(i, i + DESIG_FALLBACK_CONC);
+        // eslint-disable-next-line no-await-in-loop
+        const desDocs = await Promise.all(
+          batch.map(({ emp }) => Designation.findById(emp.designation_id).select('name').lean())
+        );
+        batch.forEach(({ org }, j) => {
+          const n = desDocs[j]?.name;
+          if (n != null && String(n).trim() !== '') org.designation = String(n).trim();
+        });
+      }
 
       const hrmsRowByEmployeeId = Object.fromEntries(
         orgRows.map(({ emp, org }) => [emp._id.toString(), org])
@@ -131,6 +216,9 @@ export async function hydrateUserRowsFromHrms(formattedUsers, logContext = 'user
           user.division = hrmsRow.division;
           user.department = hrmsRow.department;
           user.group = hrmsRow.group;
+          if (hrmsRow.designation) {
+            user.designation = hrmsRow.designation;
+          }
         }
       });
     }

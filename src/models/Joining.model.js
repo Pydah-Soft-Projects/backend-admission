@@ -89,6 +89,7 @@ const joiningSchema = new Schema(
     },
     address: {
       communication: {
+        state: { type: String, trim: true, default: '' },
         doorOrStreet: { type: String, trim: true, default: '' },
         landmark: { type: String, trim: true, default: '' },
         villageOrCity: { type: String, trim: true, default: '' },
@@ -101,6 +102,8 @@ const joiningSchema = new Schema(
           {
             name: { type: String, trim: true, default: '' },
             relationship: { type: String, trim: true, default: '' },
+            phone: { type: String, trim: true, default: '' },
+            state: { type: String, trim: true, default: '' },
             doorOrStreet: { type: String, trim: true, default: '' },
             landmark: { type: String, trim: true, default: '' },
             villageOrCity: { type: String, trim: true, default: '' },

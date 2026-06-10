@@ -299,10 +299,18 @@ export const resolveSecondarySemesterForSync = (
       registrationExtras?.semister ??
       ''
   ).trim();
+  if (sem === '1') return '1-1';
   if (sem) return sem;
 
   const baseCourse = normalizeCourseNameForSecondarySync(courseLabel);
   if (/^b\.?\s*sc$/i.test(baseCourse) || /^degree$/i.test(String(courseLabel || '').trim())) {
+    return '1-1';
+  }
+
+  if (
+    /^diploma$/i.test(baseCourse) &&
+    !isLateralRegistrationExtras(registrationExtras, admissionNumber)
+  ) {
     return '1-1';
   }
 

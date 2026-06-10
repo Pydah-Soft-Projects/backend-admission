@@ -16,6 +16,10 @@ import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
 } from '../utils/joiningParentPhotos.util.js';
+import {
+  communicationAddressFromSqlRow,
+  relativeAddressFromSqlRow,
+} from '../utils/joiningAddress.util.js';
 import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
 import {
   buildJoiningLeadDataSnapshot,
@@ -782,24 +786,8 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       other: reservationOther,
     },
     address: {
-      communication: {
-        doorOrStreet: joiningData.address_door_street || '',
-        landmark: joiningData.address_landmark || '',
-        villageOrCity: joiningData.address_village_city || '',
-        mandal: joiningData.address_mandal || '',
-        district: joiningData.address_district || '',
-        pinCode: joiningData.address_pin_code || '',
-      },
-      relatives: relatives.map((rel) => ({
-        name: rel.name || '',
-        relationship: rel.relationship || '',
-        doorOrStreet: rel.door_street || '',
-        landmark: rel.landmark || '',
-        villageOrCity: rel.village_city || '',
-        mandal: rel.mandal || '',
-        district: rel.district || '',
-        pinCode: rel.pin_code || '',
-      })),
+      communication: communicationAddressFromSqlRow(joiningData, registrationFormData),
+      relatives: relatives.map(relativeAddressFromSqlRow),
     },
     qualifications: {
       ssc: joiningData.qualification_ssc === 1 || joiningData.qualification_ssc === true,
@@ -1614,14 +1602,16 @@ const saveJoiningRelatedTables = async (pool, joiningId, payload) => {
     for (const relative of payload.address.relatives) {
       const relativeId = uuidv4();
       await pool.execute(
-        `INSERT INTO joining_relatives (id, joining_id, name, relationship, door_street, landmark,
+        `INSERT INTO joining_relatives (id, joining_id, name, relationship, phone, state, door_street, landmark,
          village_city, mandal, district, pin_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           relativeId,
           joiningId,
           relative.name || '',
           relative.relationship || '',
+          relative.phone || '',
+          relative.state || '',
           relative.doorOrStreet || '',
           relative.landmark || '',
           relative.villageOrCity || '',
@@ -2196,6 +2186,7 @@ export const saveJoiningDraft = async (req, res) => {
         address_mandal = ?,
         address_district = ?,
         address_pin_code = ?,
+        address_state = ?,
         qualification_ssc = ?,
         qualification_inter_diploma = ?,
         qualification_ug = ?,
@@ -2263,6 +2254,7 @@ export const saveJoiningDraft = async (req, res) => {
         address.communication?.mandal || '',
         address.communication?.district || '',
         address.communication?.pinCode || '',
+        address.communication?.state || '',
         qualifications.ssc === true ? 1 : 0,
         qualifications.interOrDiploma === true ? 1 : 0,
         qualifications.ug === true ? 1 : 0,
@@ -2931,7 +2923,7 @@ export const approveJoining = async (req, res) => {
           father_name = ?, father_phone = ?, father_aadhaar_number = ?, father_photo = ?,
           mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?, preferred_mobile_number = ?, mother_photo = ?,
           reservation_general = ?, reservation_other = ?,
-          address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?,
+          address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?, address_state = ?,
           qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_merit = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
           document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?, document_transfer_certificate = ?, document_study_certificate = ?,
           document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?, document_caste_certificate = ?,
@@ -2978,6 +2970,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.address?.communication?.mandal || '',
           formattedJoining.address?.communication?.district || '',
           formattedJoining.address?.communication?.pinCode || '',
+          formattedJoining.address?.communication?.state || '',
           formattedJoining.qualifications?.ssc === true ? 1 : 0,
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0,
           formattedJoining.qualifications?.ug === true ? 1 : 0,
@@ -3014,7 +3007,7 @@ export const approveJoining = async (req, res) => {
           father_name, father_phone, father_aadhaar_number, father_photo,
           mother_name, mother_phone, mother_aadhaar_number, preferred_mobile_number, mother_photo,
           reservation_general, reservation_other,
-          address_door_street, address_landmark, address_village_city, address_mandal, address_district, address_pin_code,
+          address_door_street, address_landmark, address_village_city, address_mandal, address_district, address_pin_code, address_state,
           qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_merit, qualification_mediums, qualification_other_medium_label,
           document_ssc, document_inter, document_ug_pg_cmm, document_transfer_certificate, document_study_certificate,
           document_aadhaar_card, document_photos, document_income_certificate, document_caste_certificate,
@@ -3022,7 +3015,7 @@ export const approveJoining = async (req, res) => {
           document_bank_passbook, document_ration_card,
           reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -3064,7 +3057,8 @@ export const approveJoining = async (req, res) => {
           formattedJoining.address?.communication?.mandal || '', // 30
           formattedJoining.address?.communication?.district || '', // 31
           formattedJoining.address?.communication?.pinCode || '', // 32
-          formattedJoining.qualifications?.ssc === true ? 1 : 0, // 33
+          formattedJoining.address?.communication?.state || '', // 33
+          formattedJoining.qualifications?.ssc === true ? 1 : 0, // 34
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0, // 34
           formattedJoining.qualifications?.ug === true ? 1 : 0, // 35
           qualificationMeritToSql(formattedJoining.qualifications?.merit),

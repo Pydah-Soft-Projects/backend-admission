@@ -29,6 +29,10 @@ import {
   clearReferenceNameGlobally,
   getReferenceNameUsage,
 } from '../utils/joiningReference.util.js';
+import {
+  communicationAddressFromSqlRow,
+  relativeAddressFromSqlRow,
+} from '../utils/joiningAddress.util.js';
 
 const normCourseBranchLabel = (value) =>
   String(value ?? '')
@@ -919,24 +923,8 @@ export const formatAdmission = async (admissionData, pool) => {
       other: reservationOther,
     },
     address: {
-      communication: {
-        doorOrStreet: admissionData.address_door_street || '',
-        landmark: admissionData.address_landmark || '',
-        villageOrCity: admissionData.address_village_city || '',
-        mandal: admissionData.address_mandal || '',
-        district: admissionData.address_district || '',
-        pinCode: admissionData.address_pin_code || '',
-      },
-      relatives: relatives.map((rel) => ({
-        name: rel.name || '',
-        relationship: rel.relationship || '',
-        doorOrStreet: rel.door_street || '',
-        landmark: rel.landmark || '',
-        villageOrCity: rel.village_city || '',
-        mandal: rel.mandal || '',
-        district: rel.district || '',
-        pinCode: rel.pin_code || '',
-      })),
+      communication: communicationAddressFromSqlRow(admissionData, registrationFormData),
+      relatives: relatives.map(relativeAddressFromSqlRow),
     },
     qualifications: {
       ssc: admissionData.qualification_ssc === 1 || admissionData.qualification_ssc === true,
@@ -1291,14 +1279,16 @@ const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
     for (const relative of payload.address.relatives) {
       const relativeId = uuidv4();
       await pool.execute(
-        `INSERT INTO admission_relatives (id, admission_id, name, relationship, door_street, landmark,
+        `INSERT INTO admission_relatives (id, admission_id, name, relationship, phone, state, door_street, landmark,
          village_city, mandal, district, pin_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           relativeId,
           admissionId,
           relative.name || '',
           relative.relationship || '',
+          relative.phone || '',
+          relative.state || '',
           relative.doorOrStreet || '',
           relative.landmark || '',
           relative.villageOrCity || '',
@@ -2039,6 +2029,10 @@ export const updateAdmissionById = async (req, res) => {
         updateFields.push('address_pin_code = ?');
         updateParams.push(comm.pinCode || '');
       }
+      if (comm.state !== undefined) {
+        updateFields.push('address_state = ?');
+        updateParams.push(comm.state || '');
+      }
     }
 
     if (payload.qualifications !== undefined) {
@@ -2306,6 +2300,10 @@ export const updateAdmissionByLead = async (req, res) => {
       if (comm.pinCode !== undefined) {
         updateFields.push('address_pin_code = ?');
         updateParams.push(comm.pinCode || '');
+      }
+      if (comm.state !== undefined) {
+        updateFields.push('address_state = ?');
+        updateParams.push(comm.state || '');
       }
     }
 
@@ -3075,6 +3073,55 @@ export const hideDistinctReferenceName = async (req, res) => {
   }
 };
 
+const normalizeReferenceNameKey = (value) =>
+  String(value ?? '')
+    .trim()
+    .toLowerCase();
+
+/** Match reference display names to portal users; Dept and Designation both come from HRMS. */
+const enrichReferenceStatsRowsWithUserMeta = async (pool, rows) => {
+  if (!rows?.length) return rows;
+
+  const [users] = await pool.execute(
+    `SELECT id, name, emp_no, hrms_id
+     FROM users
+     WHERE is_active = 1`
+  );
+
+  const userRows = (users || []).map((u) => ({
+    id: u.id,
+    name: u.name,
+    emp_no: u.emp_no,
+    hrms_id: u.hrms_id,
+  }));
+
+  await hydrateUserRowsFromHrms(userRows, 'getAdmissionStatsByReference');
+
+  const metaByName = new Map();
+  for (const u of userRows) {
+    const key = normalizeReferenceNameKey(u.name);
+    if (!key || metaByName.has(key)) continue;
+    const department =
+      u.department && String(u.department).trim() && u.department !== '-'
+        ? String(u.department).trim()
+        : null;
+    const designation =
+      u.designation && String(u.designation).trim() ? String(u.designation).trim() : null;
+    if (!department && !designation) continue;
+    metaByName.set(key, { department, designation });
+  }
+
+  return rows.map((row) => {
+    const key = normalizeReferenceNameKey(row.name);
+    const meta = key ? metaByName.get(key) : null;
+    return {
+      ...row,
+      department: meta?.department ?? null,
+      designation: meta?.designation ?? null,
+    };
+  });
+};
+
 /**
  * @desc    Admissions counts by student Reference 1 (lead_data.reference1) × course
  * @route   GET /api/admissions/stats/by-reference
@@ -3139,9 +3186,11 @@ export const getAdmissionStatsByReference = async (req, res) => {
         };
       });
 
+    const enrichedRows = await enrichReferenceStatsRowsWithUserMeta(pool, rows);
+
     return successResponse(
       res,
-      { courses, rows },
+      { courses, rows: enrichedRows },
       'Admission reference stats retrieved successfully',
       200
     );

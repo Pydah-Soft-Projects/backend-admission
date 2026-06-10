@@ -26,6 +26,8 @@
     "migrate:qualification-merit": "node src/scripts/ensureQualificationMeritColumns.js",
     "migrate:admission-confirmation-sms-template": "node src/scripts-sql/migrateAdmissionConfirmationSmsTemplate.js",
     "migrate:parent-portrait-columns": "node src/scripts-sql/runParentPortraitColumnsMigration.js",
+    "migrate:relative-phone": "node src/scripts-sql/runRelativePhoneMigration.js",
+    "migrate:joining-address": "node src/scripts-sql/runJoiningAddressMigrations.js",
     "db:sync-managed-ids-verify-secondary": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js",
     "db:sync-managed-ids-verify-secondary:dry": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js --dry-run",
     "db:secondary-strip-workflow-student-data": "node src/scripts/runSecondaryStudentDataWorkflowCleanup.js",
