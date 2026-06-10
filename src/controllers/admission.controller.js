@@ -31,6 +31,7 @@ import {
 } from '../utils/joiningReference.util.js';
 import {
   communicationAddressFromSqlRow,
+  normalizeCommunicationAddress,
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 
@@ -2004,32 +2005,32 @@ export const updateAdmissionById = async (req, res) => {
     }
 
     if (payload.address?.communication !== undefined) {
-      const comm = payload.address.communication;
-      if (comm.doorOrStreet !== undefined) {
+      const comm = normalizeCommunicationAddress(payload.address.communication);
+      if (payload.address.communication.doorOrStreet !== undefined) {
         updateFields.push('address_door_street = ?');
         updateParams.push(comm.doorOrStreet || '');
       }
-      if (comm.landmark !== undefined) {
+      if (payload.address.communication.landmark !== undefined) {
         updateFields.push('address_landmark = ?');
         updateParams.push(comm.landmark || '');
       }
-      if (comm.villageOrCity !== undefined) {
+      if (payload.address.communication.villageOrCity !== undefined) {
         updateFields.push('address_village_city = ?');
         updateParams.push(comm.villageOrCity || '');
       }
-      if (comm.mandal !== undefined) {
+      if (payload.address.communication.mandal !== undefined) {
         updateFields.push('address_mandal = ?');
         updateParams.push(comm.mandal || '');
       }
-      if (comm.district !== undefined) {
+      if (payload.address.communication.district !== undefined) {
         updateFields.push('address_district = ?');
         updateParams.push(comm.district || '');
       }
-      if (comm.pinCode !== undefined) {
+      if (payload.address.communication.pinCode !== undefined) {
         updateFields.push('address_pin_code = ?');
         updateParams.push(comm.pinCode || '');
       }
-      if (comm.state !== undefined) {
+      if (payload.address.communication.state !== undefined) {
         updateFields.push('address_state = ?');
         updateParams.push(comm.state || '');
       }
@@ -2276,32 +2277,32 @@ export const updateAdmissionByLead = async (req, res) => {
     }
 
     if (payload.address?.communication !== undefined) {
-      const comm = payload.address.communication;
-      if (comm.doorOrStreet !== undefined) {
+      const comm = normalizeCommunicationAddress(payload.address.communication);
+      if (payload.address.communication.doorOrStreet !== undefined) {
         updateFields.push('address_door_street = ?');
         updateParams.push(comm.doorOrStreet || '');
       }
-      if (comm.landmark !== undefined) {
+      if (payload.address.communication.landmark !== undefined) {
         updateFields.push('address_landmark = ?');
         updateParams.push(comm.landmark || '');
       }
-      if (comm.villageOrCity !== undefined) {
+      if (payload.address.communication.villageOrCity !== undefined) {
         updateFields.push('address_village_city = ?');
         updateParams.push(comm.villageOrCity || '');
       }
-      if (comm.mandal !== undefined) {
+      if (payload.address.communication.mandal !== undefined) {
         updateFields.push('address_mandal = ?');
         updateParams.push(comm.mandal || '');
       }
-      if (comm.district !== undefined) {
+      if (payload.address.communication.district !== undefined) {
         updateFields.push('address_district = ?');
         updateParams.push(comm.district || '');
       }
-      if (comm.pinCode !== undefined) {
+      if (payload.address.communication.pinCode !== undefined) {
         updateFields.push('address_pin_code = ?');
         updateParams.push(comm.pinCode || '');
       }
-      if (comm.state !== undefined) {
+      if (payload.address.communication.state !== undefined) {
         updateFields.push('address_state = ?');
         updateParams.push(comm.state || '');
       }

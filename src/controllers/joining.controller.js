@@ -18,6 +18,7 @@ import {
 } from '../utils/joiningParentPhotos.util.js';
 import {
   communicationAddressFromSqlRow,
+  normalizeCommunicationAddress,
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
@@ -502,15 +503,15 @@ const ensureLeadForApprovedJoining = async ({
   const village =
     formattedJoining?.address?.communication?.villageOrCity ||
     joiningLeadData?.village ||
-    'Not Provided';
+    '';
   const district =
     formattedJoining?.address?.communication?.district ||
     joiningLeadData?.district ||
-    'Not Provided';
+    '';
   const mandal =
     formattedJoining?.address?.communication?.mandal ||
     joiningLeadData?.mandal ||
-    'Not Provided';
+    '';
   const quota = formattedJoining?.courseInfo?.quota || joiningLeadData?.quota || 'Not Applicable';
   const courseInterested =
     formattedJoining?.courseInfo?.course || joiningLeadData?.courseInterested || '';
@@ -1927,7 +1928,11 @@ export const saveJoiningDraft = async (req, res) => {
     const parents = payload.parents || {};
     const courseInfo = payload.courseInfo || {};
     const reservation = payload.reservation || { general: DEFAULT_GENERAL_RESERVATION, other: [] };
-    const address = payload.address || {};
+    const address = {
+      ...(payload.address || {}),
+      communication: normalizeCommunicationAddress(payload.address?.communication),
+      relatives: Array.isArray(payload.address?.relatives) ? payload.address.relatives : [],
+    };
     const qualifications = payload.qualifications || {};
     const documents = payload.documents || {};
 

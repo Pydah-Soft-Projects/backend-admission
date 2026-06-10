@@ -66,9 +66,9 @@ export async function createSelfRegistrationLeadAndJoining(pool, payload, userId
   const courseInterested = String(courseInfo.course ?? '').trim();
   const branch = String(courseInfo.branch ?? '').trim();
   const quota = String(courseInfo.quota ?? '').trim() || 'Not Applicable';
-  const village = String(comm.villageOrCity ?? '').trim() || 'Not Provided';
-  const district = String(comm.district ?? '').trim() || 'Not Provided';
-  const mandal = String(comm.mandal ?? '').trim() || 'Not Provided';
+  const village = String(comm.villageOrCity ?? '').trim();
+  const district = String(comm.district ?? '').trim();
+  const mandal = String(comm.mandal ?? '').trim();
   const state = String(comm.state ?? '').trim();
 
   const leadDataSnapshot = {
