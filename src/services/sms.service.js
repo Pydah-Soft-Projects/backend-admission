@@ -17,13 +17,14 @@ const STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID = '1707176525577028276';
 
 /**
  * DLT template id for parent portal SMS (code-only; not in message_templates).
- * Set PARENT_PORTAL_SMS_DLT_TEMPLATE_ID in .env after TRAI approval, or replace below.
+ * Template: Dear parent , To track your child progress please login to our college portal {#var#} - Pydah Group
+ * Override via PARENT_PORTAL_SMS_DLT_TEMPLATE_ID in .env if needed.
  */
 const PARENT_PORTAL_SMS_DLT_TEMPLATE_ID =
-  process.env.PARENT_PORTAL_SMS_DLT_TEMPLATE_ID?.trim() || '';
+  process.env.PARENT_PORTAL_SMS_DLT_TEMPLATE_ID?.trim() || '1707178073635639145';
 
-/** Fixed parent SMS body — must match the approved DLT template exactly (no variables). */
-const PARENT_PORTAL_SMS_MESSAGE = `Dear parent , To track your child progress please login to our college portal ${STUDENT_PORTAL_LOGIN_URL}`;
+/** Parent SMS body — {#var#} = portal login URL; must match the approved DLT template exactly. */
+const PARENT_PORTAL_SMS_MESSAGE = `Dear parent , To track your child progress please login to our college portal ${STUDENT_PORTAL_LOGIN_URL} - Pydah Group`;
 
 /**
  * Look up a DLT template id by its `message_templates.name`. Results are cached
@@ -176,10 +177,10 @@ const smsService = {
    * Send parent portal SMS after joining approval (father/mother lines).
    * Template is fixed in code only (no message_templates row).
    *
-   * DLT body (no variables):
-   *   Dear parent , To track your child progress please login to our college portal sdms.pydah.edu.in
+   * DLT template id 1707178073635639145:
+   *   Dear parent , To track your child progress please login to our college portal {#var#} - Pydah Group
    *
-   * Configure PARENT_PORTAL_SMS_DLT_TEMPLATE_ID in .env once TRAI approves the template.
+   * Variable: portal login URL (STUDENT_PORTAL_LOGIN_URL / sdms.pydah.edu.in).
    */
   sendParentPortalProgress: async (mobileNumber) => {
     if (!BULK_SMS_API_KEY) {
@@ -194,13 +195,6 @@ const smsService = {
     }
 
     const templateId = PARENT_PORTAL_SMS_DLT_TEMPLATE_ID;
-    if (!templateId) {
-      console.warn(
-        'Parent portal SMS skipped — PARENT_PORTAL_SMS_DLT_TEMPLATE_ID is not set (add to .env after DLT approval).'
-      );
-      return { success: false, error: 'dlt_template_id_not_configured' };
-    }
-
     try {
       const result = await sendSmsThroughBulkSmsApps({
         numbers: [cleanNumber],
