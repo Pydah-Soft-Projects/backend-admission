@@ -246,10 +246,18 @@ const sanitizePermissions = (permissions = {}) => {
       access,
       permission,
     };
-    if (key === 'joining' && access && permission === 'write') {
-      entry.editReference = Boolean(value.editReference);
-      entry.editAdmission = Boolean(value.editAdmission);
-      entry.approveFeeRequest = Boolean(value.approveFeeRequest);
+    if (key === 'joining' && access) {
+      entry.admissionTabAbstract = Boolean(value.admissionTabAbstract);
+      entry.admissionTabDetailed = Boolean(value.admissionTabDetailed);
+      entry.admissionTabStudentInfo = Boolean(value.admissionTabStudentInfo);
+      entry.admissionTabReference = Boolean(value.admissionTabReference);
+      entry.admissionTabSource = Boolean(value.admissionTabSource);
+      entry.admissionTabDateWise = Boolean(value.admissionTabDateWise);
+      if (permission === 'write') {
+        entry.editReference = false;
+        entry.editAdmission = Boolean(value.editAdmission);
+        entry.approveFeeRequest = Boolean(value.approveFeeRequest);
+      }
     }
     sanitized[key] = entry;
   });
