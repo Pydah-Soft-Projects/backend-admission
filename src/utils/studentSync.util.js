@@ -11,6 +11,7 @@ import {
   resolveSecondarySemesterForSync,
   resolveSecondaryYearOfStudy,
 } from './lateralBatch.util.js';
+import { classifyAdmissionQuotaCategory } from './quotaClassification.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -297,40 +298,8 @@ const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
     registrationExtras?.admission_quota ??
     registrationExtras?.quota_type ??
     '';
-  const q = String(raw).trim().toUpperCase();
-
-  // Lateral quota variants map to underlying seat type (matches admissions stats SQL).
-  if (q.includes('LATERAL') && q.includes('ENTRY')) return 'CONV';
-  if (q.includes('LATERAL') && (q.includes('SPOT') || q.includes('MANG'))) return 'MANG';
-
-  if (
-    q === 'MANG' ||
-    q === 'MANAGEMENT' ||
-    q.includes('MANAGEMENT') ||
-    (q.includes('MANG') && !q.includes('CONV'))
-  ) {
-    return 'MANG';
-  }
-  if (
-    q === 'CONV' ||
-    q === 'CONVENOR' ||
-    q === 'CONVENER' ||
-    q.includes('CONVENOR') ||
-    q.includes('CONVENER') ||
-    (q.includes('CONV') && !q.includes('MANG'))
-  ) {
-    return 'CONV';
-  }
-  if (
-    q === 'SPOT' ||
-    q === 'SPOT ADMISSION' ||
-    (q.includes('SPOT') &&
-      !q.includes('LATERAL') &&
-      !q.includes('MANG') &&
-      !q.includes('CONV'))
-  ) {
-    return 'SPOT';
-  }
+  const category = classifyAdmissionQuotaCategory(raw);
+  if (category) return category;
 
   const fallback = String(registrationExtras?.data_collection_type ?? '').trim().toUpperCase();
   if (fallback === 'MANG' || fallback === 'MANAGEMENT') return 'MANG';

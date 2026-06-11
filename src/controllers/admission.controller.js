@@ -34,6 +34,11 @@ import {
   normalizeCommunicationAddress,
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
+import {
+  SQL_IS_CONV_QUOTA,
+  SQL_IS_MANG_QUOTA,
+  SQL_IS_SPOT_QUOTA,
+} from '../utils/quotaClassification.util.js';
 
 const normCourseBranchLabel = (value) =>
   String(value ?? '')
@@ -113,37 +118,8 @@ const getAdmissionCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
   return count;
 };
 
-/** Convenor quota (CQ / CONV) — matches admissions.quota and lead source labels. */
-const SQL_IS_CONV_QUOTA = `(
-  UPPER(TRIM(COALESCE(quota, ''))) IN ('CONV', 'CONVENOR', 'CONVENER')
-  OR UPPER(TRIM(COALESCE(quota, ''))) LIKE '%CONV%'
-  OR (
-    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%LATERAL%ENTRY%'
-    OR UPPER(TRIM(COALESCE(quota, ''))) = 'LATERAL ENTRY'
-  )
-)`;
-/** Management quota (MQ / MANG). */
-const SQL_IS_MANG_QUOTA = `(
-  UPPER(TRIM(COALESCE(quota, ''))) IN ('MANG', 'MANAGEMENT')
-  OR (UPPER(TRIM(COALESCE(quota, ''))) LIKE '%MANG%' AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%CONV%')
-  OR (
-    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%LATERAL%SPOT%'
-    OR UPPER(TRIM(COALESCE(quota, ''))) = 'LATERAL SPOT'
-  )
-)`;
 const SQL_IS_ACTIVE_ADMISSION = `status != '${ADMISSION_CANCELLED_STATUS}'`;
 const SQL_IS_CANCELLED_ADMISSION = `status = '${ADMISSION_CANCELLED_STATUS}'`;
-/** Spot quota (excludes lateral-spot, which is counted under management). */
-const SQL_IS_SPOT_QUOTA = `(
-  UPPER(TRIM(COALESCE(quota, ''))) IN ('SPOT')
-  OR UPPER(TRIM(COALESCE(quota, ''))) = 'SPOT ADMISSION'
-  OR (
-    UPPER(TRIM(COALESCE(quota, ''))) LIKE '%SPOT%'
-    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%LATERAL%'
-    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%MANG%'
-    AND UPPER(TRIM(COALESCE(quota, ''))) NOT LIKE '%CONV%'
-  )
-)`;
 /** Qualification Merit Yes/No from joining form (`qualification_merit`: 1 = Yes, 0 = No). */
 const SQL_IS_MERIT_YES = 'qualification_merit = 1';
 const SQL_IS_MERIT_NO = 'qualification_merit = 0';

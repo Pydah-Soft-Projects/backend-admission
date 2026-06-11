@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+import { classifyAdmissionQuotaCategory } from '../utils/quotaClassification.util.js';
 
 dotenv.config();
 
@@ -38,12 +39,7 @@ const normalizeVerifiedState = (value) => {
   return null;
 };
 
-const normalizeStudTypeFromQuota = (quotaValue) => {
-  const q = String(quotaValue ?? '').trim().toUpperCase();
-  if (q === 'MANG' || q === 'MANAGEMENT') return 'MANG';
-  if (q === 'CONV' || q === 'CONVENOR' || q === 'CONVENER') return 'CONV';
-  return null;
-};
+const normalizeStudTypeFromQuota = (quotaValue) => classifyAdmissionQuotaCategory(quotaValue);
 
 async function main() {
   const primary = await mysql.createConnection({
