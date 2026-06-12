@@ -15,6 +15,7 @@ import {
 import {
   createJoiningPublicEditLink,
   createJoiningDraftAndPublicLink,
+  checkExistingLeadByPhones,
   createSelfRegistrationLink,
   getSelfRegistrationLink,
   regenerateSelfRegistrationLink,
@@ -25,6 +26,7 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/', listJoinings);
+router.get('/check-existing-lead', checkExistingLeadByPhones);
 router.post('/send-public-link', createJoiningDraftAndPublicLink);
 router.get('/self-registration-link', getSelfRegistrationLink);
 router.post('/self-registration-link', createSelfRegistrationLink);

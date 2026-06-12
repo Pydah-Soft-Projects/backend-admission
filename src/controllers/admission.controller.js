@@ -39,6 +39,11 @@ import {
   SQL_IS_MANG_QUOTA,
   SQL_IS_SPOT_QUOTA,
 } from '../utils/quotaClassification.util.js';
+import {
+  isDirectReference,
+  JOINING_FORM_DIRECT_SOURCE,
+  JOINING_FORM_DEFAULT_SOURCE,
+} from '../utils/joiningFormSource.util.js';
 
 const normCourseBranchLabel = (value) =>
   String(value ?? '')
@@ -1153,27 +1158,74 @@ const isQuotaLikeLeadSource = (value) => {
   );
 };
 
-/** Resolved lead source for list rows and source-wise pivot (matches admissions UI). */
-const normalizeAdmissionLeadSource = (row) => {
+/** Stored lead.source / pipeline values that all roll up to Joining Form (desk + SMS token link). */
+const JOINING_FORM_SOURCE_ALIASES = new Set([
+  'direct admission',
+  'joining form',
+  'joining form (existing lead)',
+  'joining form link',
+]);
+
+/** createdFrom markers for staff desk and token-based public joining (same source bucket). */
+const JOINING_FORM_CREATED_FROM = new Set([
+  'add_joining_form',
+  'send_joining_form',
+  'joining_form_link',
+]);
+
+const readCreatedFromFromRow = (row) => {
+  const dynamicFields = parseLeadDynamicFieldsColumn(row.lead_dynamic_fields);
+  const fromLead = String(dynamicFields?.createdFrom ?? '').trim();
+  if (fromLead) return fromLead;
+
+  const leadDataRaw = leadDataStubFromListRow(row);
+  return String(leadDataRaw?.createdFrom ?? '').trim();
+};
+
+const resolveStoredLeadSourceLabel = (row) => {
   const leadDataRaw = leadDataStubFromListRow(row);
   const raw = String(row.lead_source ?? '').trim();
-  if (raw && !isQuotaLikeLeadSource(raw)) return raw;
-
+  if (raw && !isQuotaLikeLeadSource(raw)) {
+    return raw;
+  }
   const fromLeadData = String(
     leadDataRaw?.source ?? leadDataRaw?.utmSource ?? leadDataRaw?.leadSource ?? ''
   ).trim();
-  if (fromLeadData && !isQuotaLikeLeadSource(fromLeadData)) return fromLeadData;
+  if (fromLeadData && !isQuotaLikeLeadSource(fromLeadData)) {
+    return fromLeadData;
+  }
+  return '';
+};
 
-  const uploadBatchId = String(row.upload_batch_id ?? '').trim();
-  if (uploadBatchId) return 'Bulk Upload';
+/** Resolved lead source for list rows and source-wise pivot (matches admissions UI). */
+const normalizeAdmissionLeadSource = (row) => {
+  const reference1 =
+    String(row.effective_reference1 ?? '').trim() || parseReferenceNameFromRow(row);
 
-  const dynamicFields = parseLeadDynamicFieldsColumn(row.lead_dynamic_fields);
-  const createdFrom = String(dynamicFields?.createdFrom ?? '').trim();
+  if (isDirectReference(reference1)) {
+    return JOINING_FORM_DIRECT_SOURCE;
+  }
+
+  const createdFrom = readCreatedFromFromRow(row);
   if (createdFrom === 'self_registration') {
     return 'Self Registration';
   }
-  if (createdFrom === 'send_joining_form' || createdFrom === 'joining_form_link') {
-    return 'Joining Form Link';
+  if (JOINING_FORM_CREATED_FROM.has(createdFrom)) {
+    return JOINING_FORM_DEFAULT_SOURCE;
+  }
+
+  const storedSource = resolveStoredLeadSourceLabel(row);
+  if (storedSource) {
+    const lower = storedSource.toLowerCase();
+    if (lower === JOINING_FORM_DIRECT_SOURCE.toLowerCase() || JOINING_FORM_SOURCE_ALIASES.has(lower)) {
+      return JOINING_FORM_DEFAULT_SOURCE;
+    }
+    return storedSource;
+  }
+
+  const uploadBatchId = String(row.upload_batch_id ?? '').trim();
+  if (uploadBatchId) {
+    return 'Bulk Upload';
   }
 
   return 'Manual Form';
@@ -3198,6 +3250,9 @@ export const getAdmissionStatsBySource = async (req, res) => {
          JSON_UNQUOTE(JSON_EXTRACT(${SQL_A_LEAD_DATA_JSON}, '$.leadSource')) AS lead_data_lead_source,
          l.upload_batch_id AS upload_batch_id,
          l.dynamic_fields AS lead_dynamic_fields,
+         a.lead_data AS lead_data,
+         j.lead_data AS joining_lead_data,
+         ${SQL_A_EFFECTIVE_REFERENCE1} AS effective_reference1,
          ${SQL_A_EFF_COURSE_ID} AS courseId,
          ${SQL_A_BTECH_LATERAL_TRACK} AS lateralTrack
        ${pivotFrom}

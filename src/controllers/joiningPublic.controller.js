@@ -15,10 +15,10 @@ import { listRegistrationForms, getRegistrationForm } from './registrationForm.c
 import { listCourseProgramLevels, listStudentQuotas } from './secondaryJoiningContext.controller.js';
 import { SELF_REGISTRATION_ROUTE_KEY } from '../utils/joiningSelfRegistration.util.js';
 import { ensureSelfRegistrationPublicLink } from '../services/joiningSelfRegistrationLink.service.js';
+import { findLeadByMobileNumbers } from '../utils/leadPhoneLookup.util.js';
+import { resolveJoiningFormLeadSource } from '../utils/joiningFormSource.util.js';
 
 const PUBLIC_EDIT_TTL_MS = 5 * 60 * 1000;
-/** CRM source for staff "Add Joining Form" pipeline (not quota — do not confuse with leads.quota). */
-const ADD_JOINING_FORM_SOURCE = 'Direct Admission';
 const sanitizeString = (value) => (typeof value === 'string' ? value.trim() : '');
 const sanitizePhone = (value) => sanitizeString(value).replace(/\D/g, '').slice(-10);
 
@@ -281,6 +281,37 @@ export const createJoiningPublicEditLink = async (req, res) => {
 };
 
 /**
+ * GET /api/joinings/check-existing-lead?studentPhone=&fatherPhone=
+ * Fast lookup used by Add Joining Form while mobile numbers are entered.
+ */
+export const checkExistingLeadByPhones = async (req, res) => {
+  try {
+    const studentPhone = sanitizePhone(req.query?.studentPhone);
+    const fatherPhone = sanitizePhone(req.query?.fatherPhone ?? req.query?.parentPhone);
+    const reference1 = sanitizeString(req.query?.reference1);
+    if (studentPhone.length !== 10 && fatherPhone.length !== 10) {
+      return successResponse(res, { exists: false }, 'Enter at least one 10-digit mobile number');
+    }
+    const pool = getPool();
+    const lead = await findLeadByMobileNumbers(pool, studentPhone, fatherPhone);
+    const exists = Boolean(lead);
+    const source = resolveJoiningFormLeadSource({ reference1 });
+    return successResponse(res, {
+      exists,
+      source,
+      lead: exists ? lead : null,
+    });
+  } catch (error) {
+    console.error('checkExistingLeadByPhones:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to check existing lead',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
  * POST /api/joinings/send-public-link
  * Creates a lightweight lead + joining draft, then returns a public joining link for SMS.
  */
@@ -297,8 +328,6 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
     const branchId = sanitizeString(req.body?.branchId);
     const branch = sanitizeString(req.body?.branch);
     const quota = sanitizeString(req.body?.quota);
-    const source =
-      sanitizeString(req.body?.source) || ADD_JOINING_FORM_SOURCE;
     const programLevel = sanitizeString(req.body?.programLevel);
     const reference1 = sanitizeString(req.body?.reference1);
 
@@ -311,6 +340,11 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
     }
     if (!courseInterested) return errorResponse(res, 'Interested course is required', 400);
     if (!quota) return errorResponse(res, 'Quota is required', 400);
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const source = resolveJoiningFormLeadSource({ reference1 });
 
     const enquiryNumber = await generateEnquiryNumber();
     const leadId = uuidv4();
@@ -341,9 +375,6 @@ export const createJoiningDraftAndPublicLink = async (req, res) => {
       createdFrom: 'add_joining_form',
       ...(reference1 ? { reference1 } : {}),
     };
-
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
 
     await connection.execute(
       `INSERT INTO leads (

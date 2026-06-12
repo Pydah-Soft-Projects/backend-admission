@@ -5,6 +5,7 @@ import {
   requireJoiningEditAdmission,
   requireJoiningEditReference,
 } from '../middleware/auth.middleware.js';
+import { searchHrmsEmployees } from '../controllers/user.controller.js';
 import {
   listAdmissions,
   getAdmissionById,
@@ -31,6 +32,7 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get('/hrms-employees/search', searchHrmsEmployees);
 router.get('/reference-names', listDistinctReferenceNames);
 router.get('/reference-names/usage', getDistinctReferenceNameUsage);
 router.patch('/reference-names/rename', requireJoiningEditReference, renameDistinctReferenceName);

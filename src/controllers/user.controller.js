@@ -757,9 +757,9 @@ export const updateUser = async (req, res) => {
 // @access  Private (Super Admin)
 export const searchHrmsEmployees = async (req, res) => {
   try {
-    const { name } = req.query;
+    const term = String(req.query.q ?? req.query.name ?? '').trim();
 
-    if (!name || name.length < 2) {
+    if (!term || term.length < 2) {
       return successResponse(res, [], 'Please provide at least 2 characters for search');
     }
 
@@ -771,9 +771,14 @@ export const searchHrmsEmployees = async (req, res) => {
     const Department = hrmsConn.models.departments || hrmsConn.model('departments', new hrmsConn.base.Schema({}, { strict: false }));
     const Group = hrmsConn.models.employeegroups || hrmsConn.model('employeegroups', new hrmsConn.base.Schema({}, { strict: false }));
 
-    // Search by employee_name (case-insensitive partial match)
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Search by employee name or employee id (emp_no), case-insensitive partial match
     const employees = await Employee.find({
-      employee_name: { $regex: name, $options: 'i' }
+      $or: [
+        { employee_name: { $regex: escaped, $options: 'i' } },
+        { $expr: { $regexMatch: { input: { $toString: '$emp_no' }, regex: escaped, options: 'i' } } },
+      ],
     }).limit(20).select('_id emp_no employee_name email phone_number division_id department_id employee_group_id');
 
     // Collect IDs for bulk resolution

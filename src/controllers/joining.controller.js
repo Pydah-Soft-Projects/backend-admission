@@ -35,6 +35,7 @@ import {
   createSelfRegistrationLeadAndJoining,
   isSelfRegistrationLead,
 } from '../utils/joiningSelfRegistration.util.js';
+import { resolveJoiningFormLeadSource } from '../utils/joiningFormSource.util.js';
 import {
   collectAdmissionConfirmationSmsRecipients,
   collectParentSmsRecipients,
@@ -2114,6 +2115,17 @@ export const saveJoiningDraft = async (req, res) => {
         ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
         reference1: ref,
       };
+      const createdFrom = String(lead?.dynamicFields?.createdFrom ?? '').trim();
+      if (createdFrom === 'add_joining_form') {
+        const resolvedSource = resolveJoiningFormLeadSource({ reference1: ref });
+        finalPayload.leadData.source = resolvedSource;
+        if (lead?.id) {
+          await pool.execute(
+            `UPDATE leads SET source = ?, updated_at = NOW() WHERE id = ?`,
+            [resolvedSource, lead.id]
+          );
+        }
+      }
       if (lead?.id) {
         await pool.execute(
           `UPDATE leads SET
