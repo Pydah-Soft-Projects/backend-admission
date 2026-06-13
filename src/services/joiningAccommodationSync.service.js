@@ -1,6 +1,11 @@
 import mongoose from 'mongoose';
 import { connectTransport } from '../config-mongo/transport.js';
 import { connectHostel } from '../config-mongo/hostel.js';
+import {
+  previewJoiningTransportRequestSync,
+  syncJoiningBusToTransportRequestMysql,
+} from './joiningTransportRequestSync.service.js';
+import { resolveTransportAcademicYear } from '../utils/transportApplicationNumber.util.js';
 
 const { Types: { ObjectId } } = mongoose;
 
@@ -44,6 +49,11 @@ export async function syncJoiningBusToTransportMongo({ joiningId, leadId, joinin
   const actualFare = busLine?.actualAmount ?? Number(transport.stageFare) ?? 0;
   const revisedFare = busLine?.revisedAmount ?? actualFare;
 
+  const transportSessionYear = resolveTransportAcademicYear(
+    transport,
+    joiningContext?.intakeBatch || joiningContext?.batch || ''
+  );
+
   const doc = {
     joiningId,
     leadId: leadId || null,
@@ -53,10 +63,15 @@ export async function syncJoiningBusToTransportMongo({ joiningId, leadId, joinin
     routeName: transport.routeName || '',
     stageId: transport.stageId,
     stageName: transport.stageName || '',
+    academicYear: transportSessionYear,
+    busId:
+      transport.busId || transport.busNumber || transport.bus_id || null,
+    busNumber:
+      transport.busNumber || transport.busId || transport.bus_id || null,
     actualFare,
     revisedFare,
     isRevised: revisedFare !== actualFare,
-    batch: joiningContext.batch || '',
+    batch: joiningContext.intakeBatch || joiningContext.batch || '',
     feeHeadCode: 'TRN01',
     feeHeadName: 'Bus Fee',
     source: 'admissions_crm',
@@ -97,6 +112,11 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
   const gender =
     genderRaw.startsWith('f') ? 'Female' : genderRaw.startsWith('m') ? 'Male' : joiningContext.studentGender || '';
 
+  const transportSessionYear = resolveTransportAcademicYear(
+    transport,
+    joiningContext?.intakeBatch || joiningContext?.batch || ''
+  );
+
   const baseDoc = {
     name: joiningContext.studentName || '',
     admissionNumber: admissionNumber || undefined,
@@ -109,8 +129,8 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     category: transport.categoryName || '',
     studentPhone: joiningContext.studentPhone || '',
     parentPhone: joiningContext.fatherPhone || '',
-    batch: joiningContext.batch || '',
-    academicYear: transport.academicYear || '',
+    batch: joiningContext.intakeBatch || joiningContext.batch || '',
+    academicYear: transportSessionYear,
     hostel: refMatch(transport.hostelId),
     hostelCategory: refMatch(transport.categoryId),
     room: transport.roomId ? refMatch(transport.roomId) : undefined,
@@ -139,8 +159,14 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
 
 /** Dry-run: document that would be upserted into Transport `studentfees`. */
 export function previewJoiningBusSync({ joiningId, leadId, joiningContext, portalLines }) {
+  const transportRequestPreview = previewJoiningTransportRequestSync({ joiningContext });
   const uri = process.env.TRANSPORT_MONGO_URI?.trim();
-  if (!uri) return { skipped: true, reason: 'TRANSPORT_MONGO_URI not set' };
+  if (!uri) {
+    return {
+      ...transportRequestPreview,
+      legacyStudentFees: { skipped: true, reason: 'TRANSPORT_MONGO_URI not set' },
+    };
+  }
 
   const transport = joiningContext?.transportDetails;
   if (!transport || transport.accommodationType !== 'bus') {
@@ -156,8 +182,14 @@ export function previewJoiningBusSync({ joiningId, leadId, joiningContext, porta
   const actualFare = busLine?.actualAmount ?? Number(transport.stageFare) ?? 0;
   const revisedFare = busLine?.revisedAmount ?? actualFare;
 
+  const transportSessionYear = resolveTransportAcademicYear(
+    transport,
+    joiningContext?.intakeBatch || joiningContext?.batch || ''
+  );
+
   return {
     skipped: false,
+    transportRequest: transportRequestPreview,
     collection: 'studentfees',
     database: 'transport',
     operation: 'replaceOne',
@@ -171,10 +203,11 @@ export function previewJoiningBusSync({ joiningId, leadId, joiningContext, porta
       routeName: transport.routeName || '',
       stageId: transport.stageId,
       stageName: transport.stageName || '',
+      academicYear: transportSessionYear,
       actualFare,
       revisedFare,
       isRevised: revisedFare !== actualFare,
-      batch: joiningContext.batch || '',
+      batch: joiningContext.intakeBatch || joiningContext.batch || '',
       feeHeadCode: 'TRN01',
       feeHeadName: 'Bus Fee',
       source: 'admissions_crm',
@@ -254,6 +287,7 @@ export async function syncJoiningAccommodationToExternalDbs({
 
   try {
     if (accommodationType === 'bus') {
+      await syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext });
       await syncJoiningBusToTransportMongo({
         joiningId,
         leadId,

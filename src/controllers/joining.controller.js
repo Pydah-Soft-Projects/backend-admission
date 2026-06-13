@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
+import { normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 import {
   formatAdmission,
   persistAdmissionReference1,
@@ -178,8 +179,39 @@ const buildJoiningFeeSyncContext = (
     studentPhone: joiningRow?.student_phone || '',
     studentGender: joiningRow?.student_gender || '',
     fatherPhone: joiningRow?.father_phone || '',
+    managedCourseId:
+      joiningRow?.managed_course_id ??
+      registrationExtras?.managed_course_id ??
+      registrationExtras?.managedCourseId ??
+      null,
+    collegeId:
+      registrationExtras?.college_id ??
+      registrationExtras?.collegeId ??
+      registrationExtras?.school_or_college_id ??
+      registrationExtras?.schoolOrCollegeId ??
+      null,
     transportDetails,
+    programTotalYears: resolveProgramTotalYearsFromExtras(registrationExtras),
+    intakeBatch: resolveIntakeBatchFromExtras(registrationExtras, studentFeeDetails),
   };
+};
+
+const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails) => {
+  const fromFees = normalizeCalendarAcademicYear(studentFeeDetails?.batch ?? '');
+  if (fromFees) return fromFees;
+  return normalizeCalendarAcademicYear(
+    registrationExtras?.academic_year ?? registrationExtras?.academicYear ?? ''
+  );
+};
+
+const resolveProgramTotalYearsFromExtras = (registrationExtras) => {
+  const raw =
+    registrationExtras?.program_total_years ??
+    registrationExtras?.programTotalYears ??
+    null;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return Math.min(8, Math.trunc(n));
+  return 4;
 };
 
 const runJoiningFeePortalSync = async ({
@@ -190,7 +222,7 @@ const runJoiningFeePortalSync = async ({
   registrationExtras,
 }) => {
   const [rows] = await pool.execute(
-    `SELECT course, branch, quota, lead_id, lead_data, student_name, student_phone, student_gender, father_phone
+    `SELECT course, branch, quota, lead_id, lead_data, student_name, student_phone, student_gender, father_phone, managed_course_id
      FROM joinings WHERE id = ? LIMIT 1`,
     [joiningId]
   );

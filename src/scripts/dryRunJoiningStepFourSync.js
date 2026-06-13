@@ -15,6 +15,7 @@ import dns from 'dns';
 import dotenv from 'dotenv';
 import { getPool, closeDB } from '../config-sql/database.js';
 import { buildJoiningStepFourSyncPlan } from '../services/joiningStudentFeeMongoSync.service.js';
+import { normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 
 dns.setDefaultResultOrder('ipv4first');
 dotenv.config();
@@ -88,7 +89,38 @@ const buildJoiningFeeSyncContext = (joiningRow, leadData, studentFeeDetails, reg
     studentGender: joiningRow?.student_gender || '',
     fatherPhone: joiningRow?.father_phone || '',
     transportDetails,
+    programTotalYears: resolveProgramTotalYearsFromExtras(registrationExtras),
+    intakeBatch: resolveIntakeBatchFromExtras(registrationExtras, studentFeeDetails),
+    managedCourseId:
+      joiningRow?.managed_course_id ??
+      registrationExtras?.managed_course_id ??
+      registrationExtras?.managedCourseId ??
+      null,
+    collegeId:
+      registrationExtras?.college_id ??
+      registrationExtras?.collegeId ??
+      registrationExtras?.school_or_college_id ??
+      registrationExtras?.schoolOrCollegeId ??
+      null,
   };
+};
+
+const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails) => {
+  const fromFees = normalizeCalendarAcademicYear(studentFeeDetails?.batch ?? '');
+  if (fromFees) return fromFees;
+  return normalizeCalendarAcademicYear(
+    registrationExtras?.academic_year ?? registrationExtras?.academicYear ?? ''
+  );
+};
+
+const resolveProgramTotalYearsFromExtras = (registrationExtras) => {
+  const raw =
+    registrationExtras?.program_total_years ??
+    registrationExtras?.programTotalYears ??
+    null;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return Math.min(8, Math.trunc(n));
+  return 4;
 };
 
 const loadJoining = async (pool, args) => {
@@ -223,7 +255,8 @@ const runDryRunForJoining = async (joining, { verbose = false } = {}) => {
       revisedLineCount: plan.revisedLineCount,
     },
     targets: [
-      summarizeTarget('Fee Management Mongo', plan.feePortal),
+      summarizeTarget('Fee Management Mongo (CRM mirror)', plan.feePortal),
+      summarizeTarget('Fee Management Mongo (studentfees ledger)', plan.studentFees),
       summarizeTarget('Transport Mongo', plan.transport),
       summarizeTarget('Hostel HMS Mongo', plan.hostel),
     ],

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+import { resolveTransportAcademicYear, resolveFeeCatalogBatchYear, normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 import {
   previewJoiningBusSync,
   previewJoiningHostelSync,
@@ -9,6 +10,7 @@ import {
 const { Types: { ObjectId } } = mongoose;
 
 export const JOINING_STUDENT_FEE_MONGO_COLLECTION = 'crm_joining_student_fee_details';
+export const FEE_PORTAL_STUDENT_FEES_COLLECTION = 'studentfees';
 
 const BUS_FEE_STRUCTURE_ID_PREFIX = 'joining-bus-fee-year-';
 const HOSTEL_FEE_STRUCTURE_ID_PREFIX = 'joining-hostel-fee-year-';
@@ -23,6 +25,58 @@ const HOSTEL_FEE_HEAD = {
   id: '6996e24d2e1678e398839196',
   code: 'HST01',
   name: 'Hostel Fee',
+};
+
+const TUI_FEE_HEAD_ID = '6996e24c2e1678e398839187';
+
+const DEFAULT_PROGRAM_YEARS = 4;
+
+const mapFeeHeadDoc = (head, fallback) => {
+  if (!head || typeof head !== 'object') return fallback;
+  return {
+    id: String(head._id || head.id || fallback.id),
+    code: String(head.code || fallback.code),
+    name: String(head.name || fallback.name),
+  };
+};
+
+/** Resolve TRN01 / HST01 from Fee Management `feeheads` (falls back to constants). */
+const loadAccommodationFeeHeads = async (db) => {
+  try {
+    const heads = await db
+      .collection('feeheads')
+      .find({ code: { $in: ['TRN01', 'HST01'] } })
+      .toArray();
+    const byCode = new Map(
+      heads.map((head) => [String(head.code || '').trim().toUpperCase(), head])
+    );
+    return {
+      bus: mapFeeHeadDoc(byCode.get('TRN01'), BUS_FEE_HEAD),
+      hostel: mapFeeHeadDoc(byCode.get('HST01'), HOSTEL_FEE_HEAD),
+    };
+  } catch (err) {
+    console.warn(
+      '[joiningStudentFeeMongoSync] Could not load accommodation fee heads:',
+      err?.message || err
+    );
+    return { bus: BUS_FEE_HEAD, hostel: HOSTEL_FEE_HEAD };
+  }
+};
+
+const resolveAccommodationStudentYears = (overrideMap, programTotalYears = DEFAULT_PROGRAM_YEARS) => {
+  const busYears = [...overrideMap.keys()]
+    .filter(isBusStructureId)
+    .map((id) => Number(String(id).replace(BUS_FEE_STRUCTURE_ID_PREFIX, '')))
+    .filter((y) => y > 0);
+  const hostelYears = [...overrideMap.keys()]
+    .filter(isHostelStructureId)
+    .map((id) => Number(String(id).replace(HOSTEL_FEE_STRUCTURE_ID_PREFIX, '')))
+    .filter((y) => y > 0);
+  const fromOverrides = [...new Set([...busYears, ...hostelYears])].sort((a, b) => a - b);
+  if (fromOverrides.length > 0) return fromOverrides;
+
+  const total = Math.max(1, Math.min(8, Math.trunc(Number(programTotalYears)) || DEFAULT_PROGRAM_YEARS));
+  return Array.from({ length: total }, (_, index) => index + 1);
 };
 
 const QUOTA_TO_CATEGORY = {
@@ -70,23 +124,21 @@ const getHostelFeeForYear = (transport, studentYear) => {
   return 0;
 };
 
-const buildAccommodationCatalogRows = (transportDetails, overrideMap) => {
+const buildAccommodationCatalogRows = (transportDetails, overrideMap, feeHeads, programTotalYears) => {
   if (!transportDetails || typeof transportDetails !== 'object') return [];
 
-  if (transportDetails.accommodationType === 'bus' && transportDetails.routeId && transportDetails.stageId) {
-    const overrideIds = [...overrideMap.keys()].filter(isBusStructureId);
-    const years = overrideIds.length
-      ? overrideIds.map((id) => Number(String(id).replace(BUS_FEE_STRUCTURE_ID_PREFIX, ''))).filter((y) => y > 0)
-      : [1];
+  const busHead = feeHeads?.bus || BUS_FEE_HEAD;
+  const hostelHead = feeHeads?.hostel || HOSTEL_FEE_HEAD;
 
-    const uniqueYears = [...new Set(years.length ? years : [1])].sort((a, b) => a - b);
+  if (transportDetails.accommodationType === 'bus' && transportDetails.routeId && transportDetails.stageId) {
+    const uniqueYears = resolveAccommodationStudentYears(overrideMap, programTotalYears);
     return uniqueYears.map((studentYear) => ({
       _id: `${BUS_FEE_STRUCTURE_ID_PREFIX}${studentYear}`,
       studentYear,
       amount: Number(transportDetails.stageFare) || 0,
-      feeHead: BUS_FEE_HEAD.id,
-      feeHeadCode: BUS_FEE_HEAD.code,
-      feeHeadName: BUS_FEE_HEAD.name,
+      feeHead: busHead.id,
+      feeHeadCode: busHead.code,
+      feeHeadName: busHead.name,
       accommodationType: 'bus',
     }));
   }
@@ -97,20 +149,29 @@ const buildAccommodationCatalogRows = (transportDetails, overrideMap) => {
     transportDetails.categoryId
   ) {
     const overrideIds = [...overrideMap.keys()].filter(isHostelStructureId);
-    const years = overrideIds.length
-      ? overrideIds
-          .map((id) => Number(String(id).replace(HOSTEL_FEE_STRUCTURE_ID_PREFIX, '')))
-          .filter((y) => y > 0)
-      : (transportDetails.hostelFeesByYear || []).map((row) => Number(row.studentYear)).filter((y) => y > 0);
+    const yearsFromOverrides = overrideIds
+      .map((id) => Number(String(id).replace(HOSTEL_FEE_STRUCTURE_ID_PREFIX, '')))
+      .filter((y) => y > 0);
+    const yearsFromTransport = (transportDetails.hostelFeesByYear || [])
+      .map((row) => Number(row.studentYear))
+      .filter((y) => y > 0);
+    const uniqueYears = [
+      ...new Set(
+        yearsFromOverrides.length
+          ? yearsFromOverrides
+          : yearsFromTransport.length
+            ? yearsFromTransport
+            : resolveAccommodationStudentYears(overrideMap, programTotalYears)
+      ),
+    ].sort((a, b) => a - b);
 
-    const uniqueYears = [...new Set(years.length ? years : [1])].sort((a, b) => a - b);
     return uniqueYears.map((studentYear) => ({
       _id: `${HOSTEL_FEE_STRUCTURE_ID_PREFIX}${studentYear}`,
       studentYear,
       amount: getHostelFeeForYear(transportDetails, studentYear),
-      feeHead: HOSTEL_FEE_HEAD.id,
-      feeHeadCode: HOSTEL_FEE_HEAD.code,
-      feeHeadName: HOSTEL_FEE_HEAD.name,
+      feeHead: hostelHead.id,
+      feeHeadCode: hostelHead.code,
+      feeHeadName: hostelHead.name,
       accommodationType: 'hostel',
     }));
   }
@@ -209,6 +270,243 @@ const loadCatalogFeeStructures = async (db, { course, branch, quota, batch }) =>
   };
 };
 
+/** Fee portal ledger uses numeric admission numbers (e.g. 20260272), not enquiry ids. */
+const isFeePortalAdmissionNumber = (value) => /^\d{8}$/.test(String(value || '').trim());
+
+const feeHeadFilterValue = (feeHeadId) => {
+  const raw = String(feeHeadId || '').trim();
+  if (!raw) return null;
+  try {
+    return new ObjectId(raw);
+  } catch {
+    return raw;
+  }
+};
+
+const SESSION_ACADEMIC_YEAR_REGEX = /^\d{4}-\d{4}$/;
+
+const normalizeStudentFeeAmount = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+
+/** Remove bad rows from earlier CRM pushes that crash the fee portal UI. */
+async function cleanupStaleCrmStudentFeeRows(coll, admissionNumber) {
+  const tuitionHead = feeHeadFilterValue(TUI_FEE_HEAD_ID);
+  const transportHead = feeHeadFilterValue(BUS_FEE_HEAD.id);
+  const hostelHead = feeHeadFilterValue(HOSTEL_FEE_HEAD.id);
+
+  if (tuitionHead) {
+    await coll.deleteMany({
+      studentId: admissionNumber,
+      feeHead: tuitionHead,
+      academicYear: { $regex: SESSION_ACADEMIC_YEAR_REGEX },
+    });
+  }
+
+  for (const head of [transportHead, hostelHead].filter(Boolean)) {
+    await coll.deleteMany({
+      studentId: admissionNumber,
+      feeHead: head,
+      studentYear: { $gt: 1 },
+    });
+  }
+}
+
+/** Match existing fee-portal rows (Transport/Hostel use short remarks in the unique key). */
+const studentFeeRemarksForPortalLine = (line) => {
+  const code = String(line?.feeHeadCode || '').trim().toUpperCase();
+  if (code === 'TRN01') return 'Transport';
+  if (code === 'HST01') return 'Hostel';
+  return typeof line?.remarks === 'string' ? line.remarks.trim() : '';
+};
+
+const buildStudentFeeUpsertDocs = ({
+  portalLines,
+  joiningContext,
+  transportDetails,
+  batch,
+  resolvedBatch,
+  catalogRows,
+}) => {
+  const admissionNumber = String(joiningContext?.admissionNumber || '').trim();
+  const requestedIntakeBatch = normalizeCalendarAcademicYear(
+    batch || joiningContext?.intakeBatch || ''
+  );
+  const catalogBatchYear =
+    normalizeCalendarAcademicYear(resolvedBatch || '') || requestedIntakeBatch;
+  const tuitionBatchYear = catalogBatchYear || requestedIntakeBatch;
+  const transportSessionYear = resolveTransportAcademicYear(
+    transportDetails,
+    requestedIntakeBatch || batch || joiningContext?.batch || ''
+  );
+  if (!isFeePortalAdmissionNumber(admissionNumber) || !portalLines?.length) {
+    return [];
+  }
+  if (!tuitionBatchYear && !transportSessionYear) {
+    return [];
+  }
+
+  const semesterByStructureId = new Map();
+  for (const row of catalogRows || []) {
+    semesterByStructureId.set(
+      String(row._id),
+      row.semester != null && Number.isFinite(Number(row.semester)) ? Number(row.semester) : null
+    );
+  }
+
+  const now = new Date();
+  return portalLines
+    .filter((line) => line?.feeHeadId)
+    .map((line) => {
+      const structureId = String(line.structureId || '');
+      const studentYear = Number(line.studentYear) > 0 ? Number(line.studentYear) : 1;
+      const isAccommodation =
+        line.accommodationType === 'bus' ||
+        line.accommodationType === 'hostel' ||
+        isBusStructureId(structureId) ||
+        isHostelStructureId(structureId);
+      if (isAccommodation && studentYear > 1) {
+        return null;
+      }
+      const academicYear = isAccommodation ? transportSessionYear : tuitionBatchYear;
+      if (!academicYear) return null;
+
+      const semesterRaw = semesterByStructureId.get(structureId);
+      const semester =
+        semesterRaw != null && Number.isFinite(Number(semesterRaw)) && Number(semesterRaw) > 0
+          ? Number(semesterRaw)
+          : isAccommodation
+            ? 1
+            : null;
+      const remarks = studentFeeRemarksForPortalLine(line);
+      const feeHead = feeHeadFilterValue(line.feeHeadId);
+      if (!feeHead) return null;
+
+      return {
+        filter: {
+          studentId: admissionNumber,
+          feeHead,
+          academicYear,
+          studentYear,
+          semester,
+          remarks,
+        },
+        update: {
+          studentId: admissionNumber,
+          studentName: String(joiningContext?.studentName || '').trim(),
+          feeHead,
+          college: 'Default',
+          course: String(joiningContext?.course || '').trim(),
+          branch: String(joiningContext?.branch || '').trim(),
+          academicYear,
+          studentYear,
+          semester,
+          amount: normalizeStudentFeeAmount(line.revisedAmount),
+          remarks,
+          updatedAt: now,
+        },
+      };
+    })
+    .filter(Boolean);
+};
+
+/** Dry-run: rows that would be upserted into Fee Management `studentfees`. */
+export function previewJoiningStudentFeesSync({
+  portalLines,
+  joiningContext,
+  transportDetails,
+  batch,
+  resolvedBatch,
+  catalogRows,
+}) {
+  const admissionNumber = String(joiningContext?.admissionNumber || '').trim();
+  if (!isFeePortalAdmissionNumber(admissionNumber)) {
+    return {
+      skipped: true,
+      reason: 'Numeric admission number required (studentfees uses studentId=admission number)',
+      admissionNumber,
+    };
+  }
+
+  const docs = buildStudentFeeUpsertDocs({
+    portalLines,
+    joiningContext,
+    transportDetails,
+    batch,
+    resolvedBatch,
+    catalogRows,
+  });
+  if (docs.length === 0) {
+    return {
+      skipped: true,
+      reason: 'No portal fee lines to upsert into studentfees',
+      admissionNumber,
+    };
+  }
+
+  const requestedIntakeBatch = normalizeCalendarAcademicYear(
+    batch || joiningContext?.intakeBatch || ''
+  );
+  const transportSessionYear = resolveTransportAcademicYear(
+    transportDetails,
+    requestedIntakeBatch || batch || joiningContext?.batch || ''
+  );
+
+  return {
+    skipped: false,
+    database: 'fee_management',
+    collection: FEE_PORTAL_STUDENT_FEES_COLLECTION,
+    operation: 'upsertMany',
+    admissionNumber,
+    intakeBatchYear: requestedIntakeBatch,
+    catalogBatchYear: normalizeCalendarAcademicYear(resolvedBatch || '') || requestedIntakeBatch,
+    transportSessionYear,
+    rowCount: docs.length,
+    sampleRows: docs.slice(0, 4).map((row) => row.update),
+  };
+}
+
+/**
+ * Upsert resolved portal lines into the live Fee Management `studentfees` ledger.
+ * This is what the fee portal UI uses (distinct from the CRM mirror collection).
+ */
+export async function syncPortalLinesToStudentFees(db, params) {
+  const preview = previewJoiningStudentFeesSync(params);
+  if (preview.skipped) return preview;
+
+  const admissionNumber = String(params.joiningContext?.admissionNumber || '').trim();
+  const coll = db.collection(FEE_PORTAL_STUDENT_FEES_COLLECTION);
+  await cleanupStaleCrmStudentFeeRows(coll, admissionNumber);
+
+  const docs = buildStudentFeeUpsertDocs(params);
+  let upserted = 0;
+  let modified = 0;
+
+  for (const row of docs) {
+    const result = await coll.updateOne(
+      row.filter,
+      {
+        $set: row.update,
+        $setOnInsert: { createdAt: row.update.updatedAt },
+      },
+      { upsert: true }
+    );
+    upserted += result.upsertedCount || 0;
+    modified += result.modifiedCount || 0;
+  }
+
+  return {
+    skipped: false,
+    admissionNumber: preview.admissionNumber,
+    intakeBatchYear: preview.intakeBatchYear,
+    transportSessionYear: preview.transportSessionYear,
+    rowCount: docs.length,
+    upserted,
+    modified,
+  };
+}
+
 const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => {
   const overrideMap = new Map();
   for (const line of studentFeeDetails?.lines || []) {
@@ -304,11 +602,20 @@ export async function buildJoiningStepFourSyncPlan({
 
   const accommodationRows = buildAccommodationCatalogRows(
     joiningContext?.transportDetails,
-    overrideMap
+    overrideMap,
+    await loadAccommodationFeeHeads(db),
+    joiningContext?.programTotalYears
   );
 
   const portalLines = buildPortalLines(catalogRows, accommodationRows, studentFeeDetails);
   const revisedLineCount = portalLines.filter((line) => line.isRevised).length;
+  const intakeBatchYear = normalizeCalendarAcademicYear(
+    batch || joiningContext?.intakeBatch || ''
+  );
+  const transportSessionYear = resolveTransportAcademicYear(
+    transportDetails,
+    intakeBatchYear || batch || ''
+  );
 
   const feePortalDoc =
     portalLines.length === 0 && !resolvedBatch && !accommodationType
@@ -335,6 +642,8 @@ export async function buildJoiningStepFourSyncPlan({
             quota: joiningContext?.quota || '',
             batch: resolvedBatch,
             requestedBatch: batch,
+            intakeBatch: intakeBatchYear || null,
+            transportAcademicYear: transportSessionYear || null,
             batchMatchMode: catalogResult.catalogLookup.batchMatchMode,
             accommodationType,
             transportDetails,
@@ -364,6 +673,14 @@ export async function buildJoiningStepFourSyncPlan({
     revisedLineCount,
     lines: portalLines,
     feePortal: feePortalDoc,
+    studentFees: previewJoiningStudentFeesSync({
+      portalLines,
+      joiningContext,
+      transportDetails,
+      batch,
+      resolvedBatch,
+      catalogRows,
+    }),
     transport: previewJoiningBusSync({ joiningId, leadId, joiningContext, portalLines }),
     hostel: previewJoiningHostelSync({ joiningId, leadId, joiningContext, portalLines }),
   };
@@ -407,6 +724,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
   }
 
   let portalLines = [];
+  let studentFeesResult = { skipped: true, reason: 'Fee sync not attempted' };
 
   try {
     const conn = await connectFeeManagement();
@@ -421,9 +739,12 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     const catalogRows = catalogResult.rows;
     const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
 
+    const accommodationFeeHeads = await loadAccommodationFeeHeads(db);
     const accommodationRows = buildAccommodationCatalogRows(
       joiningContext?.transportDetails,
-      overrideMap
+      overrideMap,
+      accommodationFeeHeads,
+      joiningContext?.programTotalYears
     );
 
     portalLines = buildPortalLines(catalogRows, accommodationRows, studentFeeDetails);
@@ -431,6 +752,14 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     const coll = conn.db.collection(JOINING_STUDENT_FEE_MONGO_COLLECTION);
     const transportDetails = joiningContext?.transportDetails || null;
     const accommodationType = transportDetails?.accommodationType || null;
+    const intakeBatchYear = resolveFeeCatalogBatchYear(
+      batch || joiningContext?.intakeBatch || '',
+      resolvedBatch
+    );
+    const transportSessionYear = resolveTransportAcademicYear(
+      transportDetails,
+      intakeBatchYear || batch || ''
+    );
 
     if (portalLines.length === 0 && !resolvedBatch && !accommodationType) {
       await coll.deleteOne({ joiningId });
@@ -447,6 +776,8 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
           quota: joiningContext?.quota || '',
           batch: resolvedBatch,
           requestedBatch: batch,
+          intakeBatch: intakeBatchYear || null,
+          transportAcademicYear: transportSessionYear || null,
           batchMatchMode: catalogResult.catalogLookup.batchMatchMode,
           accommodationType,
           transportDetails,
@@ -458,6 +789,15 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
         { upsert: true }
       );
     }
+
+    studentFeesResult = await syncPortalLinesToStudentFees(db, {
+      portalLines,
+      joiningContext,
+      transportDetails,
+      batch,
+      resolvedBatch,
+      catalogRows,
+    });
   } catch (err) {
     console.error(
       '[joiningStudentFeeMongoSync] Fee Mongo mirror failed (SQL save still succeeded):',
@@ -472,5 +812,5 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     portalLines,
   });
 
-  return { lines: portalLines };
+  return { lines: portalLines, studentFees: studentFeesResult };
 }
