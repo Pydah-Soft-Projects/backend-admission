@@ -3,6 +3,7 @@ import {
   connectHostel,
   getHostelConnection,
 } from '../config-mongo/hostel.js';
+import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 
 const { Types: { ObjectId } } = mongoose;
@@ -56,7 +57,74 @@ const formatFeeDoc = (doc) => ({
   description: doc.description || '',
 });
 
-const findHostelFeeDocs = async (db, { hostelId, categoryId, academicYear, course }) => {
+const sumHmsFeePortalAmount = (doc) => {
+  const termTotal =
+    (Number(doc.term1Fee) || 0) +
+    (Number(doc.term2Fee) || 0) +
+    (Number(doc.term3Fee) || 0);
+  const additional = doc.additionalFees;
+  let additionalTotal = 0;
+  if (additional && typeof additional === 'object' && !Array.isArray(additional)) {
+    for (const value of Object.values(additional)) {
+      additionalTotal += Number(value) || 0;
+    }
+  }
+  const total = termTotal + additionalTotal;
+  return Number.isFinite(total) && total > 0 ? total : null;
+};
+
+const formatHmsFeePortalDoc = (doc) => {
+  const course =
+    doc.course && typeof doc.course === 'object'
+      ? String(doc.course)
+      : String(doc.course || '').trim();
+  return {
+    _id: String(doc._id),
+    amount: sumHmsFeePortalAmount(doc),
+    course,
+    academicYear: doc.academicYear || '',
+    studentYear: doc.year !== undefined && doc.year !== null ? Number(doc.year) : null,
+    description: 'HMS fee structure config',
+  };
+};
+
+const loadHostelCategoryName = async (db, categoryId) => {
+  const category = await db.collection('hostelcategories').findOne({
+    _id: toObjectIdOrString(categoryId),
+  });
+  return String(category?.name || '').trim();
+};
+
+const buildHmsCourseMatchers = async (db, course) => {
+  const raw = String(course || '').trim();
+  if (!raw) return [];
+
+  const labels = new Set([raw]);
+  const mapped = mapCourseLabel(raw);
+  if (mapped) labels.add(mapped);
+
+  const matchers = [...labels].map((label) => new RegExp(`^${escapeRegex(label)}$`, 'i'));
+
+  const courseDocs = await db
+    .collection('courses')
+    .find({
+      $or: [...labels].flatMap((label) => [
+        { name: new RegExp(`^${escapeRegex(label)}$`, 'i') },
+        { courseName: new RegExp(`^${escapeRegex(label)}$`, 'i') },
+        { title: new RegExp(`^${escapeRegex(label)}$`, 'i') },
+      ]),
+    })
+    .project({ _id: 1 })
+    .toArray();
+
+  for (const courseDoc of courseDocs) {
+    matchers.push(courseDoc._id);
+  }
+
+  return matchers;
+};
+
+const findLegacyHostelFeeDocs = async (db, { hostelId, categoryId, academicYear, course }) => {
   const baseQuery = {
     hostel: refMatch(hostelId),
     category: refMatch(categoryId),
@@ -114,6 +182,58 @@ const findHostelFeeDocs = async (db, { hostelId, categoryId, academicYear, cours
   return { docs: [], resolvedAcademicYear: normalizedYear, matchedBy: 'none' };
 };
 
+/** HMS portal fee config (`feestructures` collection). */
+const findHmsFeePortalDocs = async (db, { categoryId, academicYear, course }) => {
+  const normalizedYear = normalizeAcademicYear(academicYear);
+  if (!normalizedYear || !categoryId) {
+    return { docs: [], resolvedAcademicYear: normalizedYear, matchedBy: 'none' };
+  }
+
+  const categoryName = await loadHostelCategoryName(db, categoryId);
+  if (!categoryName) {
+    return { docs: [], resolvedAcademicYear: normalizedYear, matchedBy: 'none' };
+  }
+
+  const courseMatchers = await buildHmsCourseMatchers(db, course);
+  const query = {
+    academicYear: normalizedYear,
+    category: categoryName,
+    isActive: { $ne: false },
+  };
+
+  if (courseMatchers.length > 0) {
+    query.course = { $in: courseMatchers };
+  }
+
+  const portalDocs = await db.collection('feestructures').find(query).toArray();
+  if (portalDocs.length === 0) {
+    return { docs: [], resolvedAcademicYear: normalizedYear, matchedBy: 'none' };
+  }
+
+  return {
+    docs: portalDocs.map((doc) => ({
+      ...formatHmsFeePortalDoc(doc),
+      _source: 'feestructures',
+    })),
+    resolvedAcademicYear: normalizedYear,
+    matchedBy: 'feestructures',
+  };
+};
+
+const findHostelFeeDocs = async (db, params) => {
+  const legacy = await findLegacyHostelFeeDocs(db, params);
+  if (legacy.docs.length > 0) return legacy;
+
+  const portal = await findHmsFeePortalDocs(db, params);
+  if (portal.docs.length > 0) return portal;
+
+  return {
+    docs: [],
+    resolvedAcademicYear: normalizeAcademicYear(params.academicYear),
+    matchedBy: 'none',
+  };
+};
+
 const deriveHostelType = (name) => {
   const normalized = String(name || '').trim().toLowerCase();
   if (normalized.includes('girl')) return 'girls';
@@ -127,11 +247,12 @@ const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g
 export const listHostelAcademicYears = async (_req, res) => {
   try {
     const db = (await getActiveConnection()).db;
-    const [fromFees, fromCalendar] = await Promise.all([
+    const [fromLegacyFees, fromPortalFees, fromCalendar] = await Promise.all([
       db.collection('hostelfeestructures').distinct('academicYear'),
+      db.collection('feestructures').distinct('academicYear'),
       db.collection('academiccalendars').distinct('academicYear'),
     ]);
-    const feeYears = [...new Set(fromFees.filter(Boolean))]
+    const feeYears = [...new Set([...fromLegacyFees, ...fromPortalFees].filter(Boolean))]
       .map((year) => String(year).trim())
       .filter(Boolean)
       .sort(compareAcademicYearsDesc);
@@ -209,28 +330,110 @@ export const listHostelCategories = async (req, res) => {
   }
 };
 
-const loadRoomOccupancyMap = async (db, roomIds) => {
-  if (!roomIds.length) return new Map();
+const ACTIVE_OCCUPANCY_STATUSES = new Set([
+  'Active',
+  'active',
+  'ACTIVE',
+  'Extended',
+  'extended',
+  'EXTENDED',
+]);
+
+const WITHDRAWN_OCCUPANCY_STATUSES = new Set([
+  'Withdrawn',
+  'withdrawn',
+  'WITHDRAWN',
+]);
+
+const ACTIVE_HOSTEL_USER_STATUSES = ['Active', 'active', 'ACTIVE'];
+
+const isActiveOccupancyHistoryRow = (row) => {
+  const status = String(row?.status || '').trim();
+  if (!status || WITHDRAWN_OCCUPANCY_STATUSES.has(status)) return false;
+  if (!ACTIVE_OCCUPANCY_STATUSES.has(status)) return false;
+  return row.allocatedTo == null;
+};
+
+const buildRoomRefMatch = (roomIds) => {
   const objectIds = roomIds.map((id) => toObjectId(id)).filter(Boolean);
   const idStrings = roomIds.map((id) => String(id));
-  const rows = await db
-    .collection('users')
-    .aggregate([
-      {
-        $match: {
-          role: 'student',
-          hostelStatus: { $in: ['Active', 'active', 'ACTIVE'] },
-          room: { $in: [...objectIds, ...idStrings] },
-        },
-      },
-      { $group: { _id: '$room', occupiedBeds: { $sum: 1 } } },
-    ])
+  return { $in: [...objectIds, ...idStrings] };
+};
+
+const emptyOccupancyCounts = () => ({
+  studentCount: 0,
+  staffCount: 0,
+  totalOccupancy: 0,
+  source: 'none',
+});
+
+/**
+ * Academic-year scoped occupancy aligned with Hostel CMS:
+ * - Primary: roomoccupancyhistories for the requested YYYY-YYYY session
+ * - Fallback: active users in that room/year only when no history exists for that room/year
+ */
+const loadAcademicYearRoomOccupancyMap = async (db, { roomIds, academicYear }) => {
+  const map = new Map();
+  for (const roomId of roomIds) {
+    map.set(String(roomId), emptyOccupancyCounts());
+  }
+  if (!roomIds.length) return map;
+
+  const normalizedYear = normalizeAcademicYear(academicYear);
+  if (!normalizedYear) return map;
+
+  const roomMatch = buildRoomRefMatch(roomIds);
+  const historyRows = await db
+    .collection('roomoccupancyhistories')
+    .find({
+      academicYear: normalizedYear,
+      room: roomMatch,
+      status: { $nin: [...WITHDRAWN_OCCUPANCY_STATUSES] },
+    })
     .toArray();
 
-  const map = new Map();
-  for (const row of rows) {
-    map.set(String(row._id), Number(row.occupiedBeds) || 0);
+  const roomsWithHistory = new Set(historyRows.map((row) => String(row.room)));
+
+  for (const row of historyRows) {
+    if (!isActiveOccupancyHistoryRow(row)) continue;
+    const roomKey = String(row.room);
+    const current = map.get(roomKey) || emptyOccupancyCounts();
+    current.studentCount += 1;
+    current.totalOccupancy = current.studentCount + current.staffCount;
+    current.source = 'history';
+    map.set(roomKey, current);
   }
+
+  const roomsNeedingUserFallback = roomIds
+    .map((id) => String(id))
+    .filter((roomId) => !roomsWithHistory.has(roomId));
+
+  if (roomsNeedingUserFallback.length === 0) return map;
+
+  const fallbackUsers = await db
+    .collection('users')
+    .find({
+      room: buildRoomRefMatch(roomsNeedingUserFallback),
+      academicYear: normalizedYear,
+      hostelStatus: { $in: ACTIVE_HOSTEL_USER_STATUSES },
+    })
+    .project({ room: 1, role: 1 })
+    .toArray();
+
+  for (const user of fallbackUsers) {
+    const roomKey = String(user.room);
+    const current = map.get(roomKey) || emptyOccupancyCounts();
+    const role = String(user.role || 'student').trim().toLowerCase();
+    if (role === 'student') {
+      current.studentCount += 1;
+    } else {
+      current.staffCount += 1;
+    }
+    current.totalOccupancy = current.studentCount + current.staffCount;
+    current.source = 'users';
+    map.set(roomKey, current);
+  }
+
   return map;
 };
 
@@ -326,6 +529,13 @@ export const listHostelRooms = async (req, res) => {
     if (!hostelId || !categoryId) {
       return errorResponse(res, 'hostelId and categoryId are required', 400);
     }
+    if (!academicYear) {
+      return errorResponse(
+        res,
+        'academicYear is required (YYYY-YYYY, e.g. 2026-2027) for year-scoped room availability',
+        400
+      );
+    }
 
     const db = (await getActiveConnection()).db;
     const rooms = await db
@@ -338,30 +548,31 @@ export const listHostelRooms = async (req, res) => {
       .sort({ roomNumber: 1 })
       .toArray();
 
-    const occupancyMap = await loadRoomOccupancyMap(
-      db,
-      rooms.map((room) => String(room._id))
-    );
+    const occupancyMap = await loadAcademicYearRoomOccupancyMap(db, {
+      roomIds: rooms.map((room) => String(room._id)),
+      academicYear,
+    });
 
-    const feeResult = academicYear
-      ? await resolveHostelFeesByYear(db, {
-          hostelId,
-          categoryId,
-          academicYear,
-          course,
-          totalYears,
-        })
-      : { yearlyFees: [], flatFee: null, resolvedAcademicYear: '', matchedBy: 'none' };
+    const feeResult = await resolveHostelFeesByYear(db, {
+      hostelId,
+      categoryId,
+      academicYear,
+      course,
+      totalYears,
+    });
 
     const formattedRooms = rooms.map((room) => {
       const bedCount = Number(room.bedCount) || 0;
-      const occupiedBeds = occupancyMap.get(String(room._id)) || 0;
-      const availableBeds = Math.max(bedCount - occupiedBeds, 0);
+      const occupancy = occupancyMap.get(String(room._id)) || emptyOccupancyCounts();
+      const totalOccupancy = occupancy.totalOccupancy;
+      const availableBeds = Math.max(bedCount - totalOccupancy, 0);
       return {
         _id: String(room._id),
         roomNumber: room.roomNumber || '',
         bedCount,
-        occupiedBeds,
+        studentCount: occupancy.studentCount,
+        occupiedBeds: totalOccupancy,
+        totalOccupancy,
         availableBeds,
         isAvailable: availableBeds > 0,
         hostelId: String(room.hostel),
@@ -376,6 +587,7 @@ export const listHostelRooms = async (req, res) => {
         fee: feeResult.yearlyFees[0] || feeResult.flatFee,
         resolvedAcademicYear: feeResult.resolvedAcademicYear || academicYear,
         feeMatchedBy: feeResult.matchedBy || 'none',
+        academicYear,
         total: formattedRooms.length,
         availableCount: formattedRooms.filter((room) => room.isAvailable).length,
       },

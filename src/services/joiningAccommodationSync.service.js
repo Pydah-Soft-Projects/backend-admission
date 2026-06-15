@@ -6,6 +6,14 @@ import {
   syncJoiningBusToTransportRequestMysql,
 } from './joiningTransportRequestSync.service.js';
 import { resolveTransportAcademicYear } from '../utils/transportApplicationNumber.util.js';
+import { assignHostelStudentId } from '../utils/hostelStudentId.util.js';
+import {
+  normalizeBrokenHostelRefField,
+  resolveHmsTermFees,
+  resolveNextBedAndLocker,
+  toStoredHostelRefId,
+  upsertHostelRoomOccupancyHistory,
+} from '../utils/hostelHmsSync.util.js';
 
 const { Types: { ObjectId } } = mongoose;
 
@@ -117,9 +125,42 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     joiningContext?.intakeBatch || joiningContext?.batch || ''
   );
 
+  const existing = await users.findOne(lookupKey);
+
+  const hostelIdAssignment = await assignHostelStudentId(db, {
+    hostelObjectId: transport.hostelId,
+    academicYear: transportSessionYear,
+    gender,
+    existingHostelId: existing?.hostelId,
+  });
+
+  const studentYear = Math.max(1, Number(joiningContext.yearOfStudy || joiningContext.currentYear || 1));
+  const termFees = await resolveHmsTermFees(db, {
+    academicYear: transportSessionYear,
+    course: joiningContext.course || '',
+    categoryName: transport.categoryName || '',
+    studentYear,
+  });
+
+  let bedNumber = existing?.bedNumber || '';
+  let lockerNumber = existing?.lockerNumber || '';
+  const roomObjectId = toStoredHostelRefId(transport.roomId);
+  if (transport.roomId && transport.roomNumber && (!bedNumber || !lockerNumber)) {
+    const roomDoc = await db.collection('rooms').findOne({ _id: roomObjectId });
+    const bedLocker = await resolveNextBedAndLocker(db, {
+      roomId: transport.roomId,
+      roomNumber: transport.roomNumber,
+      academicYear: transportSessionYear,
+      bedCount: roomDoc?.bedCount,
+    });
+    bedNumber = bedLocker.bedNumber || bedNumber;
+    lockerNumber = bedLocker.lockerNumber || lockerNumber;
+  }
+
   const baseDoc = {
     name: joiningContext.studentName || '',
     admissionNumber: admissionNumber || undefined,
+    rollNumber: joiningContext.rollNumber || existing?.rollNumber || undefined,
     joiningId,
     leadId: leadId || null,
     role: 'student',
@@ -131,30 +172,56 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     parentPhone: joiningContext.fatherPhone || '',
     batch: joiningContext.intakeBatch || joiningContext.batch || '',
     academicYear: transportSessionYear,
-    hostel: refMatch(transport.hostelId),
-    hostelCategory: refMatch(transport.categoryId),
-    room: transport.roomId ? refMatch(transport.roomId) : undefined,
+    hostel: toStoredHostelRefId(transport.hostelId),
+    hostelCategory: toStoredHostelRefId(transport.categoryId),
+    room: roomObjectId,
     roomNumber: transport.roomNumber || '',
+    bedNumber: bedNumber || undefined,
+    lockerNumber: lockerNumber || undefined,
+    hostelId: hostelIdAssignment.hostelId,
     hostelStatus: 'Active',
+    applicationStatus: 'Active',
     graduationStatus: 'Enrolled',
     actualHostelFee: actualFee,
     revisedHostelFee: revisedFee,
     isHostelFeeRevised: revisedFee !== actualFee,
+    ...(termFees || {}),
     source: 'admissions_crm',
     syncedAt: new Date(),
     updatedAt: new Date(),
   };
 
-  const existing = await users.findOne(lookupKey);
+  let userId = existing?._id;
+
   if (existing) {
     await users.updateOne({ _id: existing._id }, { $set: baseDoc });
-    return;
+  } else {
+    const insertResult = await users.insertOne({
+      ...baseDoc,
+      createdAt: new Date(),
+    });
+    userId = insertResult.insertedId;
   }
 
-  await users.insertOne({
-    ...baseDoc,
-    createdAt: new Date(),
-  });
+  if (transport.roomId && userId) {
+    await upsertHostelRoomOccupancyHistory(db, {
+      studentUserId: userId,
+      studentName: joiningContext.studentName || '',
+      rollNumber: joiningContext.rollNumber || '',
+      course: joiningContext.course || '',
+      branch: joiningContext.branch || '',
+      yearOfStudy: studentYear,
+      academicYear: transportSessionYear,
+      hostelId: transport.hostelId,
+      categoryId: transport.categoryId,
+      roomId: transport.roomId,
+      roomNumber: transport.roomNumber || '',
+      bedNumber,
+      lockerNumber,
+    });
+  }
+
+  return hostelIdAssignment;
 }
 
 /** Dry-run: document that would be upserted into Transport `studentfees`. */
@@ -239,6 +306,10 @@ export function previewJoiningHostelSync({ joiningId, leadId, joiningContext, po
     genderRaw.startsWith('f') ? 'Female' : genderRaw.startsWith('m') ? 'Male' : joiningContext.studentGender || '';
 
   const admissionNumber = String(joiningContext.admissionNumber || '').trim();
+  const transportSessionYear = resolveTransportAcademicYear(
+    transport,
+    joiningContext?.intakeBatch || joiningContext?.batch || ''
+  );
 
   return {
     skipped: false,
@@ -259,11 +330,12 @@ export function previewJoiningHostelSync({ joiningId, leadId, joiningContext, po
       studentPhone: joiningContext.studentPhone || '',
       parentPhone: joiningContext.fatherPhone || '',
       batch: joiningContext.batch || '',
-      academicYear: transport.academicYear || '',
+      academicYear: transportSessionYear,
       hostel: transport.hostelId,
       hostelCategory: transport.categoryId,
       room: transport.roomId || undefined,
       roomNumber: transport.roomNumber || '',
+      hostelId: '(assigned on save — BH26/GH26 + 3-digit serial per AY)',
       hostelStatus: 'Active',
       graduationStatus: 'Enrolled',
       actualHostelFee: actualFee,
