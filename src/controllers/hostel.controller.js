@@ -84,10 +84,14 @@ const findHostelFeeDocs = async (db, { hostelId, categoryId, academicYear, cours
   if (normalizedYear) {
     attempts.push(queryWithFilters(normalizedYear, null));
   }
-  if (courseRegex) {
-    attempts.push(queryWithFilters(null, courseRegex));
+  // When a session year is requested (e.g. 2026-2027 from Step 1), do not fall back to
+  // fee rows from other academic years — that surfaces stale test amounts (e.g. ₹10).
+  if (!normalizedYear) {
+    if (courseRegex) {
+      attempts.push(queryWithFilters(null, courseRegex));
+    }
+    attempts.push(baseQuery);
   }
-  attempts.push(baseQuery);
 
   for (const query of attempts) {
     const docs = await db.collection('hostelfeestructures').find(query).toArray();
