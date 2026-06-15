@@ -17,6 +17,7 @@ import {
   patchAdmissionReferenceById,
   getAdmissionStats,
   getAdmissionStatsByReference,
+  getAdmissionStatsByReferenceAdmissions,
   getAdmissionStatsBySource,
   getAdmissionStatsByDate,
   listDistinctReferenceNames,
@@ -37,6 +38,7 @@ router.get('/reference-names', listDistinctReferenceNames);
 router.get('/reference-names/usage', getDistinctReferenceNameUsage);
 router.patch('/reference-names/rename', requireJoiningEditReference, renameDistinctReferenceName);
 router.post('/reference-names/hide', requireJoiningEditReference, hideDistinctReferenceName);
+router.get('/stats/by-reference/admissions', getAdmissionStatsByReferenceAdmissions);
 router.get('/stats/by-reference', getAdmissionStatsByReference);
 router.get('/stats/by-source', getAdmissionStatsBySource);
 router.get('/stats/by-date', getAdmissionStatsByDate);

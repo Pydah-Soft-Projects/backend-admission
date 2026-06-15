@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
-import { resolveTransportAcademicYear, resolveFeeCatalogBatchYear, normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
+import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
+import { deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
+import { resolveTransportAcademicYear, normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 import {
   previewJoiningBusSync,
   previewJoiningHostelSync,
@@ -30,6 +32,28 @@ const HOSTEL_FEE_HEAD = {
 const TUI_FEE_HEAD_ID = '6996e24c2e1678e398839187';
 
 const DEFAULT_PROGRAM_YEARS = 4;
+const DIPLOMA_PROGRAM_YEARS = 3;
+
+/** Fee portal `feestructures` use canonical labels (Polytechnic → Diploma). */
+const resolveFeePortalCourse = (course) => mapCourseLabel(course);
+
+/** Intake calendar year for catalog lookup + tuition `studentfees.academicYear`. */
+const resolveRequestedFeeBatch = ({ batch, intakeBatch, admissionNumber } = {}) => {
+  const fromBatch = normalizeCalendarAcademicYear(batch || '');
+  if (fromBatch) return fromBatch;
+  const fromIntake = normalizeCalendarAcademicYear(intakeBatch || '');
+  if (fromIntake) return fromIntake;
+  return deriveAdmissionSeriesYear(admissionNumber) || '';
+};
+
+const isDiplomaProgram = (course) => /^diploma$/i.test(String(resolveFeePortalCourse(course) || '').trim());
+
+const resolveProgramTotalYearsForFeeSync = (course, programTotalYears) => {
+  if (isDiplomaProgram(course)) return DIPLOMA_PROGRAM_YEARS;
+  const n = Number(programTotalYears);
+  if (Number.isFinite(n) && n > 0) return Math.min(8, Math.trunc(n));
+  return DEFAULT_PROGRAM_YEARS;
+};
 
 const mapFeeHeadDoc = (head, fallback) => {
   if (!head || typeof head !== 'object') return fallback;
@@ -216,13 +240,14 @@ const enrichWithFeeHead = async (db, structures) => {
   });
 };
 
-const loadCatalogFeeStructures = async (db, { course, branch, quota, batch }) => {
+const loadCatalogFeeStructures = async (db, { course, branch, quota, batch, intakeBatch, admissionNumber }) => {
+  const catalogCourse = resolveFeePortalCourse(course);
   const category = mapQuotaToCategory(quota);
-  const requestedBatch = normalize(batch);
+  const requestedBatch = resolveRequestedFeeBatch({ batch, intakeBatch, admissionNumber });
 
   const buildFilter = (batchVal) => {
     const filter = {};
-    if (course) filter.course = exactIRegex(course);
+    if (catalogCourse) filter.course = exactIRegex(catalogCourse);
     if (branch) filter.branch = exactIRegex(branch);
     if (category) filter.category = category;
     if (batchVal) filter.batch = exactIRegex(batchVal);
@@ -259,7 +284,7 @@ const loadCatalogFeeStructures = async (db, { course, branch, quota, batch }) =>
   return {
     rows,
     catalogLookup: {
-      course: normalize(course),
+      course: normalize(catalogCourse || course),
       branch: normalize(branch),
       quota: normalize(quota),
       categoryMapped: category,
@@ -330,12 +355,14 @@ const buildStudentFeeUpsertDocs = ({
   catalogRows,
 }) => {
   const admissionNumber = String(joiningContext?.admissionNumber || '').trim();
-  const requestedIntakeBatch = normalizeCalendarAcademicYear(
-    batch || joiningContext?.intakeBatch || ''
-  );
-  const catalogBatchYear =
-    normalizeCalendarAcademicYear(resolvedBatch || '') || requestedIntakeBatch;
-  const tuitionBatchYear = catalogBatchYear || requestedIntakeBatch;
+  const requestedIntakeBatch = resolveRequestedFeeBatch({
+    batch,
+    intakeBatch: joiningContext?.intakeBatch,
+    admissionNumber,
+  });
+  const catalogBatchYear = normalizeCalendarAcademicYear(resolvedBatch || '');
+  // Tuition ledger uses student intake year (e.g. 2026), not prior-year catalog fallback (e.g. 2025).
+  const tuitionBatchYear = requestedIntakeBatch || catalogBatchYear;
   const transportSessionYear = resolveTransportAcademicYear(
     transportDetails,
     requestedIntakeBatch || batch || joiningContext?.batch || ''
@@ -445,9 +472,11 @@ export function previewJoiningStudentFeesSync({
     };
   }
 
-  const requestedIntakeBatch = normalizeCalendarAcademicYear(
-    batch || joiningContext?.intakeBatch || ''
-  );
+  const requestedIntakeBatch = resolveRequestedFeeBatch({
+    batch,
+    intakeBatch: joiningContext?.intakeBatch,
+    admissionNumber,
+  });
   const transportSessionYear = resolveTransportAcademicYear(
     transportDetails,
     requestedIntakeBatch || batch || joiningContext?.batch || ''
@@ -573,6 +602,10 @@ export async function buildJoiningStepFourSyncPlan({
 
   const transportDetails = joiningContext?.transportDetails || null;
   const accommodationType = transportDetails?.accommodationType || null;
+  const programTotalYears = resolveProgramTotalYearsForFeeSync(
+    joiningContext?.course,
+    joiningContext?.programTotalYears
+  );
 
   if (!feeUri) {
     return {
@@ -596,6 +629,8 @@ export async function buildJoiningStepFourSyncPlan({
     branch: joiningContext?.branch || '',
     quota: joiningContext?.quota || '',
     batch: batch || '',
+    intakeBatch: joiningContext?.intakeBatch || '',
+    admissionNumber: joiningContext?.admissionNumber || '',
   });
   const catalogRows = catalogResult.rows;
   const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
@@ -604,14 +639,16 @@ export async function buildJoiningStepFourSyncPlan({
     joiningContext?.transportDetails,
     overrideMap,
     await loadAccommodationFeeHeads(db),
-    joiningContext?.programTotalYears
+    programTotalYears
   );
 
   const portalLines = buildPortalLines(catalogRows, accommodationRows, studentFeeDetails);
   const revisedLineCount = portalLines.filter((line) => line.isRevised).length;
-  const intakeBatchYear = normalizeCalendarAcademicYear(
-    batch || joiningContext?.intakeBatch || ''
-  );
+  const intakeBatchYear = resolveRequestedFeeBatch({
+    batch,
+    intakeBatch: joiningContext?.intakeBatch,
+    admissionNumber: joiningContext?.admissionNumber,
+  });
   const transportSessionYear = resolveTransportAcademicYear(
     transportDetails,
     intakeBatchYear || batch || ''
@@ -735,16 +772,22 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
       branch: joiningContext?.branch || '',
       quota: joiningContext?.quota || '',
       batch: batch || '',
+      intakeBatch: joiningContext?.intakeBatch || '',
+      admissionNumber: joiningContext?.admissionNumber || '',
     });
     const catalogRows = catalogResult.rows;
     const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
 
     const accommodationFeeHeads = await loadAccommodationFeeHeads(db);
+    const programTotalYears = resolveProgramTotalYearsForFeeSync(
+      joiningContext?.course,
+      joiningContext?.programTotalYears
+    );
     const accommodationRows = buildAccommodationCatalogRows(
       joiningContext?.transportDetails,
       overrideMap,
       accommodationFeeHeads,
-      joiningContext?.programTotalYears
+      programTotalYears
     );
 
     portalLines = buildPortalLines(catalogRows, accommodationRows, studentFeeDetails);
@@ -752,10 +795,11 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     const coll = conn.db.collection(JOINING_STUDENT_FEE_MONGO_COLLECTION);
     const transportDetails = joiningContext?.transportDetails || null;
     const accommodationType = transportDetails?.accommodationType || null;
-    const intakeBatchYear = resolveFeeCatalogBatchYear(
-      batch || joiningContext?.intakeBatch || '',
-      resolvedBatch
-    );
+    const intakeBatchYear = resolveRequestedFeeBatch({
+      batch,
+      intakeBatch: joiningContext?.intakeBatch,
+      admissionNumber: joiningContext?.admissionNumber,
+    });
     const transportSessionYear = resolveTransportAcademicYear(
       transportDetails,
       intakeBatchYear || batch || ''

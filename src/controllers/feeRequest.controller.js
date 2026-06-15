@@ -3,6 +3,7 @@ import { getPool } from '../config-sql/database.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
 import { normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
+import { deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
 import {
   canApproveFeeRequest,
   canSubmitFeeRequest,
@@ -114,20 +115,31 @@ const buildJoiningFeeSyncContext = (
       registrationExtras?.schoolOrCollegeId ??
       null,
     transportDetails,
-    programTotalYears: resolveProgramTotalYearsFromExtras(registrationExtras),
-    intakeBatch: resolveIntakeBatchFromExtras(registrationExtras, studentFeeDetails),
+    programTotalYears: resolveProgramTotalYearsFromExtras(
+      registrationExtras,
+      joiningRow?.course || ''
+    ),
+    intakeBatch: resolveIntakeBatchFromExtras(
+      registrationExtras,
+      studentFeeDetails,
+      admissionNumber
+    ),
   };
 };
 
-const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails) => {
+const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails, admissionNumber = '') => {
   const fromFees = normalizeCalendarAcademicYear(studentFeeDetails?.batch ?? '');
   if (fromFees) return fromFees;
-  return normalizeCalendarAcademicYear(
+  const fromExtras = normalizeCalendarAcademicYear(
     registrationExtras?.academic_year ?? registrationExtras?.academicYear ?? ''
   );
+  if (fromExtras) return fromExtras;
+  return deriveAdmissionSeriesYear(admissionNumber) || '';
 };
 
-const resolveProgramTotalYearsFromExtras = (registrationExtras) => {
+const resolveProgramTotalYearsFromExtras = (registrationExtras, course = '') => {
+  const normalizedCourse = String(course || '').trim().toLowerCase();
+  if (normalizedCourse === 'diploma' || normalizedCourse === 'polytechnic') return 3;
   const raw =
     registrationExtras?.program_total_years ??
     registrationExtras?.programTotalYears ??

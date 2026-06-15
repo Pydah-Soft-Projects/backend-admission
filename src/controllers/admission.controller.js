@@ -1,7 +1,7 @@
 import { getPool } from '../config-sql/database.js';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { v4 as uuidv4 } from 'uuid';
-import { hydrateUserRowsFromHrms } from './user.controller.js';
+import { buildHrmsEmployeeMetaByReferenceKeys } from './user.controller.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase, warnIfSecondaryStudentSyncMissed } from '../utils/studentSync.util.js';
@@ -158,8 +158,10 @@ const readIntakeFromMetadata = (metadata, kind) => {
   return null;
 };
 
-const branchIntakeMapKey = (courseId, branchId) =>
-  `${String(courseId ?? '').trim()}::${String(branchId ?? '').trim()}`;
+const normalizeLateralTrack = (value) => (Number(value) === 1 ? 1 : 0);
+
+const branchIntakeMapKey = (courseId, branchId, lateralTrack = 0) =>
+  `${String(courseId ?? '').trim()}::${String(branchId ?? '').trim()}::${normalizeLateralTrack(lateralTrack)}`;
 
 const parseIntakeInput = (value) => {
   if (value === undefined || value === null || value === '') return null;
@@ -177,6 +179,7 @@ const ensureAdmissionBranchIntakeTable = async (pool) => {
       id CHAR(36) PRIMARY KEY,
       course_id VARCHAR(64) NOT NULL DEFAULT '',
       branch_id VARCHAR(64) NOT NULL DEFAULT '',
+      lateral_track TINYINT UNSIGNED NOT NULL DEFAULT 0,
       course_name VARCHAR(255) NOT NULL DEFAULT '',
       branch_name VARCHAR(255) NOT NULL DEFAULT '',
       cq_intake INT UNSIGNED NULL DEFAULT NULL,
@@ -184,14 +187,37 @@ const ensureAdmissionBranchIntakeTable = async (pool) => {
       updated_by CHAR(36) NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_admission_branch_intake_ids (course_id, branch_id)
+      UNIQUE KEY uq_admission_branch_intake_ids (course_id, branch_id, lateral_track)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  try {
+    await pool.execute(`
+      ALTER TABLE admission_branch_intake
+      ADD COLUMN lateral_track TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER branch_id
+    `);
+  } catch (err) {
+    if (!/duplicate column/i.test(String(err?.message || err))) throw err;
+  }
+  try {
+    await pool.execute(
+      'ALTER TABLE admission_branch_intake DROP INDEX uq_admission_branch_intake_ids'
+    );
+  } catch (err) {
+    if (!/check that it exists|can't drop|1091/i.test(String(err?.message || err))) throw err;
+  }
+  try {
+    await pool.execute(`
+      ALTER TABLE admission_branch_intake
+      ADD UNIQUE KEY uq_admission_branch_intake_ids (course_id, branch_id, lateral_track)
+    `);
+  } catch (err) {
+    if (!/duplicate key name|1061/i.test(String(err?.message || err))) throw err;
+  }
   admissionBranchIntakeTableReady = true;
 };
 
 const loadBranchIntakeMap = async () => {
-  const cacheKey = 'admission:branch-intake-map:v1';
+  const cacheKey = 'admission:branch-intake-map:v2';
   const cached = getAdmissionCached(cacheKey);
   if (cached) return cached;
 
@@ -200,10 +226,10 @@ const loadBranchIntakeMap = async () => {
   try {
     await ensureAdmissionBranchIntakeTable(pool);
     const [crmRows] = await pool.execute(
-      'SELECT course_id, branch_id, cq_intake, mq_intake FROM admission_branch_intake'
+      'SELECT course_id, branch_id, lateral_track, cq_intake, mq_intake FROM admission_branch_intake'
     );
     for (const row of crmRows || []) {
-      map.set(branchIntakeMapKey(row.course_id, row.branch_id), {
+      map.set(branchIntakeMapKey(row.course_id, row.branch_id, row.lateral_track), {
         cqIntake: row.cq_intake != null ? Number(row.cq_intake) : null,
         mqIntake: row.mq_intake != null ? Number(row.mq_intake) : null,
       });
@@ -229,9 +255,11 @@ const loadBranchIntakeMap = async () => {
   return map;
 };
 
-const resolveBranchIntakeFromMap = (map, courseId, branchId) => {
-  const byCourseBranch = map.get(branchIntakeMapKey(courseId, branchId));
+const resolveBranchIntakeFromMap = (map, courseId, branchId, lateralTrack = 0) => {
+  const track = normalizeLateralTrack(lateralTrack);
+  const byCourseBranch = map.get(branchIntakeMapKey(courseId, branchId, track));
   if (byCourseBranch) return byCourseBranch;
+  if (track !== 0) return {};
   const branchOnly = map.get(String(branchId ?? '').trim());
   return branchOnly || {};
 };
@@ -538,7 +566,8 @@ const resolveStatsCourseDisplayName = (row, secondaryLabels) => {
   }
   const lateral = Number(row.lateralTrack) === 1;
   if (isBtechCourseName(label)) {
-    return formatBtechCourseDisplayName(label, lateral) || label;
+    const base = label.replace(/\s*\(lateral\)\s*/gi, '').trim() || label;
+    return formatBtechCourseDisplayName(base, lateral) || base;
   }
   return label;
 };
@@ -2579,7 +2608,12 @@ export const getAdmissionStats = async (req, res) => {
             Number(b.lateralTrack) === Number(course.lateralTrack)
         )
         .map((b) => {
-          const intake = resolveBranchIntakeFromMap(branchIntakeMap, b.courseId, b.branchId);
+          const intake = resolveBranchIntakeFromMap(
+            branchIntakeMap,
+            b.courseId,
+            b.branchId,
+            b.lateralTrack
+          );
           const branchName = resolveStatsBranchDisplayName(
             b,
             secondaryLabels,
@@ -2619,6 +2653,7 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
     if (!courseId || !branchId) {
       return errorResponse(res, 'courseId and branchId are required', 400);
     }
+    const lateralTrack = normalizeLateralTrack(req.body?.lateralTrack);
     const cqIntake = parseIntakeInput(req.body?.cqIntake);
     const mqIntake = parseIntakeInput(req.body?.mqIntake);
     if (req.body?.cqIntake != null && req.body?.cqIntake !== '' && cqIntake === null) {
@@ -2632,8 +2667,8 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
     await ensureAdmissionBranchIntakeTable(pool);
     await pool.execute(
       `INSERT INTO admission_branch_intake (
-        id, course_id, branch_id, course_name, branch_name, cq_intake, mq_intake, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, course_id, branch_id, lateral_track, course_name, branch_name, cq_intake, mq_intake, updated_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         course_name = VALUES(course_name),
         branch_name = VALUES(branch_name),
@@ -2644,6 +2679,7 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
         uuidv4(),
         courseId,
         branchId,
+        lateralTrack,
         String(req.body?.courseName ?? '').trim(),
         String(req.body?.branchName ?? '').trim(),
         cqIntake,
@@ -2656,7 +2692,7 @@ export const upsertAdmissionBranchIntake = async (req, res) => {
 
     return successResponse(
       res,
-      { courseId, branchId, cqIntake, mqIntake },
+      { courseId, branchId, lateralTrack, cqIntake, mqIntake },
       'Branch intake saved successfully',
       200
     );
@@ -3107,48 +3143,155 @@ const normalizeReferenceNameKey = (value) =>
     .trim()
     .toLowerCase();
 
-/** Match reference display names to portal users; Dept and Designation both come from HRMS. */
-const enrichReferenceStatsRowsWithUserMeta = async (pool, rows) => {
+/** Match reference display names directly to HRMS employees (read-only Dept / Designation). */
+const enrichReferenceStatsRowsWithUserMeta = async (rows) => {
   if (!rows?.length) return rows;
 
-  const [users] = await pool.execute(
-    `SELECT id, name, emp_no, hrms_id
-     FROM users
-     WHERE is_active = 1`
+  const referenceKeys = rows
+    .map((row) => normalizeReferenceNameKey(row.name))
+    .filter((key) => key && key !== '(not specified)');
+
+  const hrmsMetaByKey = await buildHrmsEmployeeMetaByReferenceKeys(
+    referenceKeys,
+    'getAdmissionStatsByReference'
   );
-
-  const userRows = (users || []).map((u) => ({
-    id: u.id,
-    name: u.name,
-    emp_no: u.emp_no,
-    hrms_id: u.hrms_id,
-  }));
-
-  await hydrateUserRowsFromHrms(userRows, 'getAdmissionStatsByReference');
-
-  const metaByName = new Map();
-  for (const u of userRows) {
-    const key = normalizeReferenceNameKey(u.name);
-    if (!key || metaByName.has(key)) continue;
-    const department =
-      u.department && String(u.department).trim() && u.department !== '-'
-        ? String(u.department).trim()
-        : null;
-    const designation =
-      u.designation && String(u.designation).trim() ? String(u.designation).trim() : null;
-    if (!department && !designation) continue;
-    metaByName.set(key, { department, designation });
-  }
 
   return rows.map((row) => {
     const key = normalizeReferenceNameKey(row.name);
-    const meta = key ? metaByName.get(key) : null;
+    const meta = key ? hrmsMetaByKey.get(key) : null;
     return {
       ...row,
       department: meta?.department ?? null,
       designation: meta?.designation ?? null,
     };
   });
+};
+
+const appendReferencePivotMatchFilter = (conditions, params, { referenceKey, rawName, unspecified }) => {
+  if (unspecified) {
+    conditions.push(`${SQL_A_EFFECTIVE_REFERENCE1} IS NULL`);
+    return;
+  }
+  const key = String(referenceKey ?? '').trim();
+  if (key) {
+    conditions.push(`COALESCE(${SQL_A_EFFECTIVE_REFERENCE1}, '__none__') = ?`);
+    params.push(key);
+    return;
+  }
+  const name = String(rawName ?? '').trim();
+  if (name) {
+    conditions.push(`LOWER(TRIM(${SQL_A_EFFECTIVE_REFERENCE1})) = ?`);
+    params.push(normalizeReferenceNameKey(name));
+  }
+};
+
+/**
+ * @desc    Admissions list for one reference row (same filters as reference stats pivot)
+ * @route   GET /api/admissions/stats/by-reference/admissions
+ */
+export const getAdmissionStatsByReferenceAdmissions = async (req, res) => {
+  try {
+    const referenceKey = String(req.query?.referenceKey ?? '').trim();
+    const rawName = String(req.query?.name ?? '').trim();
+    const unspecified =
+      req.query?.unspecified === '1' ||
+      req.query?.unspecified === 'true' ||
+      rawName === '(Not specified)';
+
+    if (!unspecified && !referenceKey && !rawName) {
+      return errorResponse(res, 'name or referenceKey query parameter is required', 400);
+    }
+
+    const pool = getPool();
+    const { conditions, params } = await buildAdmissionPivotFilters(req.query);
+    appendReferencePivotMatchFilter(conditions, params, { referenceKey, rawName, unspecified });
+
+    const limit = Math.min(Math.max(Number(req.query?.limit) || 500, 1), 500);
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const pivotFrom = `FROM admissions a ${SQL_ADMISSION_PIVOT_JOINS}`;
+
+    const [countRows] = await pool.execute(
+      `SELECT COUNT(*) AS total ${pivotFrom} ${whereClause}`,
+      params
+    );
+    const total = Number(countRows[0]?.total ?? 0);
+
+    // Avoid ORDER BY on joined JSON expressions — RDS sort buffer overflows. Sort in Node instead.
+    let admissions = [];
+    if (total > 0) {
+      const idFetchCap = Math.min(total, 2000);
+      const [idRows] = await pool.execute(
+        `SELECT a.id, a.admission_number
+         ${pivotFrom}
+         ${whereClause}
+         LIMIT ${idFetchCap}`,
+        params
+      );
+
+      const sortedIdRows = [...(idRows || [])]
+        .sort((a, b) =>
+          String(b.admission_number ?? '').localeCompare(String(a.admission_number ?? ''), undefined, {
+            numeric: true,
+          })
+        )
+        .slice(0, limit);
+
+      if (sortedIdRows.length > 0) {
+        const pageIds = sortedIdRows.map((row) => row.id);
+        const orderIndex = new Map(pageIds.map((id, index) => [String(id), index]));
+        const inMarks = pageIds.map(() => '?').join(',');
+
+        const [pageRows] = await pool.execute(
+          `SELECT
+             a.id,
+             a.admission_number AS admissionNumber,
+             COALESCE(NULLIF(TRIM(a.student_name), ''), '—') AS studentName,
+             a.status,
+             ${SQL_A_EFF_COURSE_ID} AS courseId,
+             a.managed_course_id AS managedCourseId,
+             COALESCE(NULLIF(TRIM(a.course), ''), '—') AS course,
+             COALESCE(NULLIF(TRIM(a.branch), ''), '—') AS branch
+           FROM admissions a
+           WHERE a.id IN (${inMarks})`,
+          pageIds
+        );
+
+        admissions = pageRows
+          .sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0))
+          .map((row) => ({
+            id: String(row.id ?? ''),
+            admissionNumber: String(row.admissionNumber ?? '').trim() || '—',
+            studentName: String(row.studentName ?? '').trim() || '—',
+            status: String(row.status ?? '').trim() || '—',
+            courseId:
+              String(row.courseId ?? row.managedCourseId ?? '')
+                .trim() || null,
+            course: String(row.course ?? '').trim() || '—',
+            branch: String(row.branch ?? '').trim() || '—',
+          }));
+      }
+    }
+
+    return successResponse(
+      res,
+      {
+        name: unspecified ? '(Not specified)' : rawName || referenceKey,
+        referenceKey: unspecified ? null : referenceKey || rawName || null,
+        admissions,
+        total,
+        truncated: total > admissions.length,
+      },
+      'Reference admissions retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error fetching reference admissions:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to fetch reference admissions',
+      error.statusCode || 500
+    );
+  }
 };
 
 /**
@@ -3215,7 +3358,7 @@ export const getAdmissionStatsByReference = async (req, res) => {
         };
       });
 
-    const enrichedRows = await enrichReferenceStatsRowsWithUserMeta(pool, rows);
+    const enrichedRows = await enrichReferenceStatsRowsWithUserMeta(rows);
 
     return successResponse(
       res,

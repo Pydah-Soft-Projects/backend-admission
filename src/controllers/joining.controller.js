@@ -12,7 +12,7 @@ import {
   persistAdmissionReference1,
   persistAdmissionCourseBranchUpdate,
 } from './admission.controller.js';
-import { resolveBtechCourseDisplayName } from '../utils/lateralBatch.util.js';
+import { resolveBtechCourseDisplayName, deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
@@ -191,20 +191,31 @@ const buildJoiningFeeSyncContext = (
       registrationExtras?.schoolOrCollegeId ??
       null,
     transportDetails,
-    programTotalYears: resolveProgramTotalYearsFromExtras(registrationExtras),
-    intakeBatch: resolveIntakeBatchFromExtras(registrationExtras, studentFeeDetails),
+    programTotalYears: resolveProgramTotalYearsFromExtras(
+      registrationExtras,
+      joiningRow?.course || ''
+    ),
+    intakeBatch: resolveIntakeBatchFromExtras(
+      registrationExtras,
+      studentFeeDetails,
+      admissionNumber
+    ),
   };
 };
 
-const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails) => {
+const resolveIntakeBatchFromExtras = (registrationExtras, studentFeeDetails, admissionNumber = '') => {
   const fromFees = normalizeCalendarAcademicYear(studentFeeDetails?.batch ?? '');
   if (fromFees) return fromFees;
-  return normalizeCalendarAcademicYear(
+  const fromExtras = normalizeCalendarAcademicYear(
     registrationExtras?.academic_year ?? registrationExtras?.academicYear ?? ''
   );
+  if (fromExtras) return fromExtras;
+  return deriveAdmissionSeriesYear(admissionNumber) || '';
 };
 
-const resolveProgramTotalYearsFromExtras = (registrationExtras) => {
+const resolveProgramTotalYearsFromExtras = (registrationExtras, course = '') => {
+  const normalizedCourse = String(course || '').trim().toLowerCase();
+  if (normalizedCourse === 'diploma' || normalizedCourse === 'polytechnic') return 3;
   const raw =
     registrationExtras?.program_total_years ??
     registrationExtras?.programTotalYears ??
