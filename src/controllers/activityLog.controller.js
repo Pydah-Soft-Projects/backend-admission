@@ -8,6 +8,7 @@ import {
 } from '../utils/leadChannelStatus.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
+import { clearUserAnalyticsCache } from '../utils/userAnalyticsCache.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // Helper function to format activity log data
@@ -268,6 +269,9 @@ export const addActivity = async (req, res) => {
     } : null;
 
     const activityLog = formatActivityLog(activityLogs[0], performedByUser);
+
+    // Clear the user analytics cache so reports/visit diaries reflect this new activity immediately
+    clearUserAnalyticsCache();
 
     return successResponse(res, activityLog, 'Activity logged successfully', 201);
   } catch (error) {
