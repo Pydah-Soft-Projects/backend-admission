@@ -289,6 +289,31 @@ export const resolveSecondaryCourseNameForSync = async (
   return mapped || normalizeCourseNameForSecondarySync(raw) || raw;
 };
 
+/**
+ * Resolves the branch label for secondary `students.branch` using the managed branch ID.
+ * Mirrors resolveSecondaryCourseNameForSync — looks up `course_branches` by id and
+ * returns `code || name`. This ensures diploma (and other) branches are always written
+ * with the catalog label rather than whatever raw string is stored on the admission row.
+ */
+const resolveSecondaryBranchLabelForSync = async (secondaryPool, { managedBranchId, branchLabel }) => {
+  const branchId = Number.parseInt(String(managedBranchId ?? '').trim(), 10);
+  if (Number.isFinite(branchId)) {
+    try {
+      const [rows] = await secondaryPool.execute(
+        'SELECT name, code FROM course_branches WHERE id = ? LIMIT 1',
+        [branchId]
+      );
+      if (rows.length > 0) {
+        const catalogLabel = String(rows[0].code || rows[0].name || '').trim();
+        if (catalogLabel) return catalogLabel;
+      }
+    } catch (err) {
+      console.warn('[secondary-sync] course_branches lookup failed:', err?.message || err);
+    }
+  }
+  return String(branchLabel || '').trim();
+};
+
 export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './lateralBatch.util.js';
 
 const deriveStudTypeFromQuota = (quotaValue, registrationExtras) => {
@@ -565,7 +590,10 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         current_semester: resolvedSemester,
       });
     }
-    const isDiplomaProgram = /^diploma$/i.test(courseLabelNorm);
+    const isDiplomaProgram =
+      /^diploma/i.test(courseLabelNorm) ||
+      /^d\.pharm/i.test(courseLabelNorm) ||
+      /^d\.ed/i.test(courseLabelNorm);
     if (isDegreeProgram) {
       currentYearFromExtras = currentYearFromExtras ?? 1;
     } else if (isDiplomaProgram && currentYearFromExtras == null) {
@@ -638,6 +666,14 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       courseLabel: admissionData?.courseInfo?.course || '',
       registrationExtras,
       admissionNumber: resolvedAdmissionNumber,
+    });
+
+    const resolvedSecondaryBranch = await resolveSecondaryBranchLabelForSync(secondaryPool, {
+      managedBranchId:
+        admissionData?.courseInfo?.branchId ??
+        registrationExtras?.managed_branch_id ??
+        registrationExtras?.managedBranchId,
+      branchLabel: admissionData?.courseInfo?.branch || '',
     });
 
     const { payload: studentDataSecondary, studentAddressLine } = buildStudentDataForSecondaryStorage(
@@ -717,7 +753,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       admissionData.parents?.father?.phone || '',
       extraInfo.email || '',
       resolvedSecondaryCourse,
-      admissionData.courseInfo?.branch || '',
+      resolvedSecondaryBranch,
       admissionData.studentInfo?.gender || '',
       admissionData.address?.communication?.villageOrCity || '',
       admissionData.address?.communication?.mandal || '',
