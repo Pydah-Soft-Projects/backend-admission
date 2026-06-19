@@ -92,6 +92,8 @@ async function resolvePublicTokenRow(plainToken) {
   }
   const pool = getPool();
   const tokenHash = createHash('sha256').update(plainToken, 'utf8').digest('hex');
+
+  // First try to find a valid (non-expired) row.
   const [rows] = await pool.execute(
     `SELECT * FROM joining_public_edit_tokens
      WHERE token_hash = ?
@@ -99,7 +101,27 @@ async function resolvePublicTokenRow(plainToken) {
      LIMIT 1`,
     [tokenHash, SELF_REGISTRATION_ROUTE_KEY]
   );
-  return rows.length ? rows[0] : null;
+  if (rows.length) return rows[0];
+
+  // No valid row — check whether a matching token exists but has expired.
+  // Self-registration tokens use a far-future expiry so they never reach this path.
+  const [expiredRows] = await pool.execute(
+    `SELECT id, route_key, expires_at FROM joining_public_edit_tokens
+     WHERE token_hash = ?
+       AND route_key != ?
+       AND expires_at <= UTC_TIMESTAMP()
+     LIMIT 1`,
+    [tokenHash, SELF_REGISTRATION_ROUTE_KEY]
+  );
+  if (expiredRows.length) {
+    const err = new Error('LINK_EXPIRED');
+    err.statusCode = 410;
+    err.expired = true;
+    err.expiredAt = expiredRows[0].expires_at;
+    throw err;
+  }
+
+  return null;
 }
 
 async function assertDraftJoiningForRouteKey(routeKey) {
