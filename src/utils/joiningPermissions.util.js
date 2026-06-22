@@ -21,14 +21,24 @@ export const canJoiningEditReference = (user) => {
   return user.roleName === 'Super Admin';
 };
 
-export const canJoiningEditAdmission = (user) => {
+export const canJoiningEditAdmission = (user, targetCollegeId = undefined) => {
   if (!user) return false;
   if (user.roleName === 'Super Admin') return true;
   if (user.roleName !== 'Sub Super Admin') return false;
   const entry = getJoiningPermission(user);
   if (!entry?.access || entry.permission !== 'write') return false;
   if (isLegacyJoiningWrite(entry)) return true;
-  return Boolean(entry.editAdmission);
+  if (!entry.editAdmission) return false;
+
+  const allowedColleges = Array.isArray(entry.allowedColleges)
+    ? entry.allowedColleges
+        .filter((id) => typeof id === 'string')
+        .map((id) => id.trim())
+        .filter((id) => id !== '')
+    : [];
+  if (allowedColleges.length === 0) return true;
+  if (targetCollegeId == null) return false;
+  return allowedColleges.includes(String(targetCollegeId).trim());
 };
 
 /** Submit revised fee requests from Step 4 — any joining desk Read & Write user. */

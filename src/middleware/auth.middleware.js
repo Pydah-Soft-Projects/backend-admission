@@ -106,6 +106,91 @@ export const authorize = (...roles) => {
   };
 };
 
+const getCollegeIdFromRegistrationExtras = (extras) => {
+  if (!extras || typeof extras !== 'object') return null;
+  const collegeKeys = ['college_id', 'collegeId', 'school_or_college_id', 'schoolOrCollegeId'];
+  for (const key of collegeKeys) {
+    const value = extras[key];
+    if (value != null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+  return null;
+};
+
+const getCollegeIdFromJoiningRow = (joiningRow) => {
+  if (!joiningRow) return null;
+  let leadData = joiningRow.lead_data;
+  if (typeof leadData === 'string') {
+    try {
+      leadData = JSON.parse(leadData || '{}');
+    } catch {
+      leadData = {};
+    }
+  }
+  if (!leadData || typeof leadData !== 'object') return null;
+  const registrationExtras = leadData._joiningRegistrationExtras;
+  return getCollegeIdFromRegistrationExtras(registrationExtras);
+};
+
+const resolveAdmissionCollegeId = async (pool, admissionRow) => {
+  if (!admissionRow) return null;
+  if (admissionRow.joining_id) {
+    const [joinings] = await pool.execute(
+      'SELECT lead_data FROM joinings WHERE id = ? LIMIT 1',
+      [admissionRow.joining_id]
+    );
+    if (joinings.length > 0) {
+      const collegeId = getCollegeIdFromJoiningRow(joinings[0]);
+      if (collegeId) return collegeId;
+    }
+  }
+
+  const courseId = admissionRow.managed_course_id || admissionRow.course_id;
+  if (!courseId || String(courseId).trim() === '') return null;
+
+  const [courses] = await pool.execute(
+    'SELECT college_id FROM courses WHERE id = ? LIMIT 1',
+    [courseId]
+  );
+  if (!courses.length || courses[0].college_id == null) return null;
+  return String(courses[0].college_id).trim() || null;
+};
+
+const resolveTargetCollegeId = async (req) => {
+  const pool = getPool();
+  if (req.params.admissionId) {
+    const [admissions] = await pool.execute(
+      'SELECT * FROM admissions WHERE id = ? LIMIT 1',
+      [req.params.admissionId]
+    );
+    if (admissions.length > 0) {
+      return resolveAdmissionCollegeId(pool, admissions[0]);
+    }
+  }
+
+  if (req.params.leadId) {
+    const [joinings] = await pool.execute(
+      'SELECT lead_data FROM joinings WHERE id = ? OR lead_id = ? LIMIT 1',
+      [req.params.leadId, req.params.leadId]
+    );
+    if (joinings.length > 0) {
+      const collegeId = getCollegeIdFromJoiningRow(joinings[0]);
+      if (collegeId) return collegeId;
+    }
+
+    const [admissions] = await pool.execute(
+      'SELECT * FROM admissions WHERE lead_id = ? LIMIT 1',
+      [req.params.leadId]
+    );
+    if (admissions.length > 0) {
+      return resolveAdmissionCollegeId(pool, admissions[0]);
+    }
+  }
+
+  return null;
+};
+
 // Check if time tracking is enabled for User/Counsellor/Manager dashboards
 // Super Admin, Sub Super Admin, Data Entry User are not restricted by this setting
 export const requireTimeTrackingEnabled = (req, res, next) => {
@@ -140,16 +225,23 @@ export const requireJoiningEditReference = (req, res, next) => {
 };
 
 /** Sub Super Admin joining desk: edit admission / joining forms (Super Admin always allowed). */
-export const requireJoiningEditAdmission = (req, res, next) => {
+export const requireJoiningEditAdmission = async (req, res, next) => {
   if (!req.user) {
     return errorResponse(res, 'Not authenticated', 401);
   }
   if (!hasElevatedAdminPrivileges(req.user.roleName)) {
     return errorResponse(res, 'Access denied. Super Admin only', 403);
   }
-  if (canJoiningEditAdmission(req.user)) {
-    return next();
+
+  try {
+    const targetCollegeId = await resolveTargetCollegeId(req);
+    if (canJoiningEditAdmission(req.user, targetCollegeId)) {
+      return next();
+    }
+  } catch (error) {
+    console.error('requireJoiningEditAdmission error:', error);
   }
+
   return errorResponse(res, 'Access denied. Joining admission edit permission required', 403);
 };
 

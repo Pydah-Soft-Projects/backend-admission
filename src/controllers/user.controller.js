@@ -536,6 +536,12 @@ const sanitizePermissions = (permissions = {}) => {
         entry.editAdmission = Boolean(value.editAdmission);
         entry.approveFeeRequest = Boolean(value.approveFeeRequest);
       }
+      if (Array.isArray(value.allowedColleges)) {
+        entry.allowedColleges = value.allowedColleges
+          .filter((v) => typeof v === 'string')
+          .map((v) => v.trim())
+          .filter((v) => v !== '');
+      }
     }
     sanitized[key] = entry;
   });
