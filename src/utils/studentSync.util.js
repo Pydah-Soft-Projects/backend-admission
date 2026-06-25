@@ -13,6 +13,10 @@ import {
 } from './lateralBatch.util.js';
 import { classifyAdmissionQuotaCategory } from './quotaClassification.util.js';
 import { extractPortraitPhotosFromRegistrationFormData } from './joiningParentPhotos.util.js';
+import {
+  assignStudentRollNumber,
+  isRollEligibleAdmissionNumber,
+} from './studentRollNumber.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -888,7 +892,28 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         )
       : { credentialsCreated: false, plainPassword: null };
 
-    return { ok: true, ...credentialResult };
+    let rollNumberResult = null;
+    if (studentId && isRollEligibleAdmissionNumber(resolvedAdmissionNumber)) {
+      try {
+        rollNumberResult = await assignStudentRollNumber(secondaryPool, {
+          studentId,
+          admissionNumber: resolvedAdmissionNumber,
+          managedBranchId:
+            admissionData?.courseInfo?.branchId ??
+            registrationExtras?.managed_branch_id ??
+            registrationExtras?.managedBranchId,
+          branchLabel: resolvedSecondaryBranch,
+          batch: resolvedBatch,
+        });
+      } catch (rollErr) {
+        console.error(
+          `[student-roll] assignment failed for ${resolvedAdmissionNumber}:`,
+          rollErr?.message || rollErr
+        );
+      }
+    }
+
+    return { ok: true, ...credentialResult, rollNumber: rollNumberResult?.roll_number ?? null };
   } catch (error) {
     console.error('Secondary DB sync failed:', error);
     return { ok: false };
