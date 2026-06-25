@@ -1,12 +1,18 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
-import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
+import {
+  mapCourseAndBranch,
+  mapCourseLabel,
+  pickSecondaryBranchDisplayLabel,
+} from '../data/admissionsCourseBranchMap2026.js';
 import {
   deriveAdmissionSeriesYear,
+  enrichRegistrationExtrasWithFeeDetails,
   isBtechCourseName,
   isLateralRegistrationExtras,
   normalizeCourseNameForSecondarySync,
+  parseSemesterForSecondaryColumns,
   resolveExpectedBatchYear,
   resolveSecondarySemesterForSync,
   resolveSecondaryYearOfStudy,
@@ -299,11 +305,15 @@ export const resolveSecondaryCourseNameForSync = async (
 
 /**
  * Resolves the branch label for secondary `students.branch` using the managed branch ID.
- * Mirrors resolveSecondaryCourseNameForSync — looks up `course_branches` by id and
- * returns `code || name`. This ensures diploma (and other) branches are always written
- * with the catalog label rather than whatever raw string is stored on the admission row.
+ * Uses catalog `name` for display when it differs from roll `code` (e.g. DAP not DAPPTV).
  */
-const resolveSecondaryBranchLabelForSync = async (secondaryPool, { managedBranchId, branchLabel }) => {
+const resolveSecondaryBranchLabelForSync = async (
+  secondaryPool,
+  { managedBranchId, branchLabel, courseLabel }
+) => {
+  const mappedBranch = mapCourseAndBranch(courseLabel || '', branchLabel || '').branch;
+  const branchHint = mappedBranch || branchLabel;
+
   const branchId = Number.parseInt(String(managedBranchId ?? '').trim(), 10);
   if (Number.isFinite(branchId)) {
     try {
@@ -312,14 +322,14 @@ const resolveSecondaryBranchLabelForSync = async (secondaryPool, { managedBranch
         [branchId]
       );
       if (rows.length > 0) {
-        const catalogLabel = String(rows[0].code || rows[0].name || '').trim();
+        const catalogLabel = pickSecondaryBranchDisplayLabel(rows[0], branchHint);
         if (catalogLabel) return catalogLabel;
       }
     } catch (err) {
       console.warn('[secondary-sync] course_branches lookup failed:', err?.message || err);
     }
   }
-  return String(branchLabel || '').trim();
+  return String(branchHint || branchLabel || '').trim();
 };
 
 export { deriveAdmissionSeriesYear as deriveAdmissionBatchFromNumber } from './lateralBatch.util.js';
@@ -539,7 +549,14 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       typeof admissionData.registrationFormData === 'object'
         ? admissionData.registrationFormData
         : {};
-    const registrationExtras = { ...joiningExtras, ...regFormExtras };
+    const leadDataForExtras =
+      admissionData?.leadData && typeof admissionData.leadData === 'object'
+        ? admissionData.leadData
+        : {};
+    const registrationExtras = enrichRegistrationExtrasWithFeeDetails(
+      { ...joiningExtras, ...regFormExtras },
+      leadDataForExtras
+    );
     for (const key of [
       'semester',
       'current_semester',
@@ -609,6 +626,11 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     } else if (currentYearFromExtras == null && btechLateralForSync) {
       currentYearFromExtras = 2;
     }
+    const parsedSemesterColumns = parseSemesterForSecondaryColumns(resolvedSemester);
+    if (parsedSemesterColumns.yearOfStudy != null) {
+      currentYearFromExtras = parsedSemesterColumns.yearOfStudy;
+    }
+    const currentSemesterColumn = parsedSemesterColumns.semesterInYear;
     const certificatesStatus = deriveCertificatesStatus(registrationExtras);
     const secondaryStudentStatus = deriveSecondaryStudentStatus(
       admissionData?.status,
@@ -682,6 +704,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         registrationExtras?.managed_branch_id ??
         registrationExtras?.managedBranchId,
       branchLabel: admissionData?.courseInfo?.branch || '',
+      courseLabel: admissionData?.courseInfo?.course || courseLabelRaw,
     });
 
     const { payload: studentDataSecondary, studentAddressLine } = buildStudentDataForSecondaryStorage(
@@ -793,6 +816,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       normalizeStudentPhotoForSecondary(fatherPhotoExtracted),
       normalizeStudentPhotoForSecondary(motherPhotoExtracted),
       currentYearFromExtras,
+      currentSemesterColumn,
       new Date().toISOString().split('T')[0],
       secondaryStudentStatus,
     ];
@@ -830,6 +854,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           father_photo = ?,
           mother_photo = ?,
           current_year = COALESCE(?, current_year),
+          current_semester = COALESCE(?, current_semester),
           updated_at = NOW(),
           admission_date = ?,
           student_status = ?
@@ -872,11 +897,12 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           father_photo,
           mother_photo,
           current_year,
+          current_semester,
           created_at,
           updated_at,
           admission_date,
           student_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
         studentParams
       );
       console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);

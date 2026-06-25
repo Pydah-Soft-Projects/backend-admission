@@ -46,6 +46,44 @@ const pickFourDigitYear = (...vals) => {
   return null;
 };
 
+/** Merge fee-details batch into extras for lateral/batch resolution. */
+export const enrichRegistrationExtrasWithFeeDetails = (registrationExtras, leadData) => {
+  const base =
+    registrationExtras && typeof registrationExtras === 'object'
+      ? { ...registrationExtras }
+      : {};
+  const fee =
+    leadData?._joiningStudentFeeDetails &&
+    typeof leadData._joiningStudentFeeDetails === 'object'
+      ? leadData._joiningStudentFeeDetails
+      : null;
+  if (!fee) return base;
+
+  const feeBatch = String(fee.batch ?? '').trim();
+  if (feeBatch && /^(19|20)\d{2}$/.test(feeBatch)) {
+    base._fee_batch = feeBatch;
+    if (!String(base.batch ?? '').trim()) base.batch = feeBatch;
+  }
+  return base;
+};
+
+const pickIntakeYearForLateral = (registrationExtras) => {
+  const fromIntakeFields = pickFourDigitYear(
+    registrationExtras?.academic_year,
+    registrationExtras?.academicYear,
+    registrationExtras?.batch,
+    registrationExtras?._fee_batch
+  );
+  if (fromIntakeFields) return Number(fromIntakeFields);
+
+  const fromCurrent = pickFourDigitYear(
+    registrationExtras?.current_year,
+    registrationExtras?.currentYear
+  );
+  if (!fromCurrent) return null;
+  return Number(fromCurrent);
+};
+
 /** True when registration extras indicate lateral entry (2-1 / prior intake year). */
 export const isLateralRegistrationExtras = (registrationExtras, admissionNumber) => {
   if (!registrationExtras || typeof registrationExtras !== 'object') return false;
@@ -67,16 +105,24 @@ export const isLateralRegistrationExtras = (registrationExtras, admissionNumber)
   ).trim();
   if (sem === '2-1') return true;
 
-  const intake = Number(
-    String(
-      registrationExtras.current_year ??
-        registrationExtras.currentYear ??
-        registrationExtras.academic_year ??
-        registrationExtras.academicYear ??
-        ''
-    ).trim()
+  if (!Number.isFinite(seriesNum)) return false;
+
+  const intake = pickIntakeYearForLateral(registrationExtras);
+  if (Number.isFinite(intake) && intake === seriesNum - 1) {
+    return true;
+  }
+
+  // Extras sometimes store admission-cycle year (2026) in current_year while batch/fee is 2025.
+  const calendarCurrent = pickFourDigitYear(
+    registrationExtras?.current_year,
+    registrationExtras?.currentYear
   );
-  if (Number.isFinite(seriesNum) && Number.isFinite(intake) && intake === seriesNum - 1) {
+  if (
+    calendarCurrent &&
+    Number(calendarCurrent) === seriesNum &&
+    Number.isFinite(intake) &&
+    intake === seriesNum - 1
+  ) {
     return true;
   }
 
@@ -286,12 +332,32 @@ export const normalizeCourseNameForSecondarySync = (courseName) => {
   return label;
 };
 
+/** Map semester token (e.g. 2-1) to secondary `students` tinyint columns. */
+export const parseSemesterForSecondaryColumns = (semesterToken) => {
+  const sem = String(semesterToken ?? '').trim();
+  const m = sem.match(/^(\d+)\s*[-/]\s*(\d+)/);
+  if (!m) return { yearOfStudy: null, semesterInYear: null };
+  const yearOfStudy = Number.parseInt(m[1], 10);
+  const semesterInYear = Number.parseInt(m[2], 10);
+  if (!Number.isFinite(yearOfStudy) || yearOfStudy < 1 || yearOfStudy > 12) {
+    return { yearOfStudy: null, semesterInYear: null };
+  }
+  if (!Number.isFinite(semesterInYear) || semesterInYear < 1 || semesterInYear > 2) {
+    return { yearOfStudy, semesterInYear: null };
+  }
+  return { yearOfStudy, semesterInYear };
+};
+
 /** Semester token for student_data (e.g. 2-1 for B.Tech lateral only). */
 export const resolveSecondarySemesterForSync = (
   registrationExtras,
   admissionNumber,
   courseLabel = ''
 ) => {
+  const baseCourse = normalizeCourseNameForSecondarySync(courseLabel);
+  const lateral = isLateralRegistrationExtras(registrationExtras, admissionNumber);
+  const btechLateral = isBtechCourseName(baseCourse) && lateral;
+
   const sem = String(
     registrationExtras?.semester ??
       registrationExtras?.current_semester ??
@@ -299,25 +365,22 @@ export const resolveSecondarySemesterForSync = (
       registrationExtras?.semister ??
       ''
   ).trim();
+
+  if (btechLateral && (!sem || sem === '1' || sem === '1-1')) {
+    return '2-1';
+  }
   if (sem === '1') return '1-1';
   if (sem) return sem;
 
-  const baseCourse = normalizeCourseNameForSecondarySync(courseLabel);
   if (/^b\.?\s*sc$/i.test(baseCourse) || /^degree$/i.test(String(courseLabel || '').trim())) {
     return '1-1';
   }
 
-  if (
-    /^diploma$/i.test(baseCourse) &&
-    !isLateralRegistrationExtras(registrationExtras, admissionNumber)
-  ) {
+  if (/^diploma$/i.test(baseCourse) && !lateral) {
     return '1-1';
   }
 
-  if (
-    isBtechCourseName(baseCourse) &&
-    isLateralRegistrationExtras(registrationExtras, admissionNumber)
-  ) {
+  if (btechLateral) {
     return '2-1';
   }
   return null;

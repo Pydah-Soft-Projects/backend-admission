@@ -44,8 +44,9 @@ export const mapCourseAndBranch = (course, branch) => {
   if (mappedCourse === 'Degree' && /^Others$/i.test(b)) {
     return { course: 'DAP-PTV', branch: 'DAP' };
   }
-  if (/^degree\s*pvrt$/i.test(mappedCourse)) {
-    return { course: 'DAP-PTV', branch: b === 'DAP' ? 'DAP' : b };
+  if (/^degree\s*pvrt$/i.test(mappedCourse) || /^dap-?ptv$/i.test(mappedCourse)) {
+    if (/^(dap|dapptv)$/i.test(b)) return { course: 'DAP-PTV', branch: 'DAP' };
+    return { course: 'DAP-PTV', branch: b };
   }
 
   return { course: mappedCourse, branch: b };
@@ -86,4 +87,29 @@ export const resolveSecondaryManagedIds = (course, branch) => {
       return kc === c.toUpperCase() && kb === b.toUpperCase();
     })?.[1];
   return hit ? { managedCourseId: hit.courseId, managedBranchId: hit.branchId, course: c, branch: b } : { managedCourseId: null, managedBranchId: null, course: c, branch: b };
+};
+
+const normBranchToken = (s) => String(s ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/**
+ * Secondary `students.branch` uses catalog display name (e.g. DAP, CSE, DCSE(AIML)).
+ * `course_branches.code` is often a roll/internal prefix (DAPPTV, BCSE, DAIML).
+ */
+export const pickSecondaryBranchDisplayLabel = (catalogRow, branchHint = '') => {
+  const name = String(catalogRow?.name ?? '').trim();
+  const code = String(catalogRow?.code ?? '').trim();
+  const hint = String(branchHint ?? '').trim();
+
+  if (hint) {
+    if (name && normBranchToken(hint) === normBranchToken(name)) return name;
+    if (code && normBranchToken(hint) === normBranchToken(code)) {
+      if (name && normBranchToken(name) !== normBranchToken(code)) return name;
+      return code;
+    }
+  }
+
+  if (name && code && normBranchToken(name) !== normBranchToken(code)) {
+    return name;
+  }
+  return code || name || hint;
 };
