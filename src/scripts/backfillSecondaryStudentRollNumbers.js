@@ -47,12 +47,7 @@ async function main() {
        AND s.admission_number IS NOT NULL
        AND TRIM(s.admission_number) != ''
        AND s.admission_number LIKE '2026%'
-     ORDER BY
-       COALESCE(NULLIF(TRIM(s.batch), ''), SUBSTRING(s.admission_number, 1, 4)) ASC,
-       s.branch ASC,
-       s.admission_date ASC,
-       CAST(s.admission_number AS UNSIGNED) ASC,
-       s.id ASC`
+     ORDER BY s.branch ASC, CAST(s.admission_number AS UNSIGNED) ASC, s.id ASC`
   );
 
   const report = {

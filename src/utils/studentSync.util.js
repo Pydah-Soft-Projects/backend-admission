@@ -16,6 +16,9 @@ import { extractPortraitPhotosFromRegistrationFormData } from './joiningParentPh
 import {
   assignStudentRollNumber,
   isRollEligibleAdmissionNumber,
+  isAdmissionCancelledStatus,
+  revokeStudentRollNumber,
+  resolveBranchScope,
 } from './studentRollNumber.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
@@ -895,16 +898,46 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     let rollNumberResult = null;
     if (studentId && isRollEligibleAdmissionNumber(resolvedAdmissionNumber)) {
       try {
-        rollNumberResult = await assignStudentRollNumber(secondaryPool, {
-          studentId,
-          admissionNumber: resolvedAdmissionNumber,
-          managedBranchId:
+        const admissionStatus = admissionData?.status ?? null;
+        if (isAdmissionCancelledStatus(admissionStatus)) {
+          rollNumberResult = await revokeStudentRollNumber(secondaryPool, {
+            studentId,
+            admissionNumber: resolvedAdmissionNumber,
+          });
+        } else {
+          const managedBranchIdForRoll =
             admissionData?.courseInfo?.branchId ??
             registrationExtras?.managed_branch_id ??
-            registrationExtras?.managedBranchId,
-          branchLabel: resolvedSecondaryBranch,
-          batch: resolvedBatch,
-        });
+            registrationExtras?.managedBranchId;
+          const branchScope = resolveBranchScope({
+            managedBranchId: managedBranchIdForRoll,
+            branchLabel: resolvedSecondaryBranch,
+          });
+          let forceRoll = Boolean(extraInfo.reconcileRollNumber);
+          if (!forceRoll) {
+            const [rollRows] = await secondaryPool.execute(
+              `SELECT branch_scope, roll_number FROM student_roll_numbers WHERE student_id = ? LIMIT 1`,
+              [studentId]
+            );
+            if (
+              rollRows.length > 0 &&
+              rollRows[0].branch_scope &&
+              rollRows[0].branch_scope !== branchScope
+            ) {
+              forceRoll = true;
+            }
+          }
+
+          rollNumberResult = await assignStudentRollNumber(secondaryPool, {
+            studentId,
+            admissionNumber: resolvedAdmissionNumber,
+            admissionStatus,
+            managedBranchId: managedBranchIdForRoll,
+            branchLabel: resolvedSecondaryBranch,
+            batch: resolvedBatch,
+            force: forceRoll,
+          });
+        }
       } catch (rollErr) {
         console.error(
           `[student-roll] assignment failed for ${resolvedAdmissionNumber}:`,
