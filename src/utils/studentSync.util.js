@@ -12,6 +12,7 @@ import {
   resolveSecondaryYearOfStudy,
 } from './lateralBatch.util.js';
 import { classifyAdmissionQuotaCategory } from './quotaClassification.util.js';
+import { extractPortraitPhotosFromRegistrationFormData } from './joiningParentPhotos.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -723,13 +724,19 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     studentDataSecondary._crm_secondary_course = resolvedSecondaryCourse;
     stripHeavyMediaFromStudentDataPayload(studentDataSecondary);
 
+    const portraitsFromReg = extractPortraitPhotosFromRegistrationFormData(registrationExtras);
+    const studentPhotoExtracted =
+      portraitsFromReg.studentPhoto ||
+      admissionData?.studentInfo?.photo ||
+      null;
     const fatherPhotoExtracted =
+      portraitsFromReg.fatherPhoto ||
       admissionData?.parents?.father?.photo ||
-      registrationExtras?.father_photo;
-
+      null;
     const motherPhotoExtracted =
+      portraitsFromReg.motherPhoto ||
       admissionData?.parents?.mother?.photo ||
-      registrationExtras?.mother_photo;
+      null;
 
     const preferredMobileForSecondary = (() => {
       const preferred = String(admissionData.studentInfo?.preferredMobileNumber ?? '')
@@ -775,7 +782,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       toNullableText(registrationExtras?.remarks),
       toNullableText(registrationExtras?.previous_college),
       certificatesStatus,
-      normalizeStudentPhotoForSecondary(registrationExtras?.student_photo),
+      normalizeStudentPhotoForSecondary(studentPhotoExtracted),
       normalizeStudentPhotoForSecondary(fatherPhotoExtracted),
       normalizeStudentPhotoForSecondary(motherPhotoExtracted),
       currentYearFromExtras,

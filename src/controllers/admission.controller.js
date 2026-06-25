@@ -11,6 +11,8 @@ import ExcelJS from 'exceljs';
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
+  STUDENT_PHOTO_REG_KEYS,
+  extractPortraitPhotosFromRegistrationFormData,
 } from '../utils/joiningParentPhotos.util.js';
 import {
   formatBtechCourseDisplayName,
@@ -732,6 +734,114 @@ export const persistAdmissionReference1 = async (pool, admissionId, reference1, 
   }
 };
 
+/**
+ * Merge registration extras (and optional fee sidecar) on admissions + linked joinings,
+ * and sync dedicated portrait columns from merged extras.
+ */
+export const persistAdmissionRegistrationSidecar = async (pool, admissionId, payload, userId) => {
+  const hasReg =
+    payload.registrationFormData !== undefined && payload.registrationFormData !== null;
+  const hasFees = Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails');
+  if (!hasReg && !hasFees) return;
+
+  const [admRows] = await pool.execute(
+    'SELECT id, lead_data, joining_id FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  if (!admRows.length) return;
+
+  const adm = admRows[0];
+  let admLd =
+    typeof adm.lead_data === 'string' ? JSON.parse(adm.lead_data) : adm.lead_data || {};
+  if (!admLd || typeof admLd !== 'object') admLd = {};
+
+  const prevExtras =
+    admLd._joiningRegistrationExtras && typeof admLd._joiningRegistrationExtras === 'object'
+      ? { ...admLd._joiningRegistrationExtras }
+      : {};
+
+  let mergedExtras = prevExtras;
+  if (hasReg && typeof payload.registrationFormData === 'object') {
+    mergedExtras = { ...prevExtras, ...payload.registrationFormData };
+  }
+
+  const admNextLd = { ...admLd };
+  if (Object.keys(mergedExtras).length > 0) {
+    admNextLd._joiningRegistrationExtras = mergedExtras;
+  }
+
+  const portraits = extractPortraitPhotosFromRegistrationFormData(mergedExtras);
+  const admPortraitFields = [];
+  const admPortraitParams = [];
+  if (portraits.studentPhoto) {
+    admPortraitFields.push('student_photo = ?');
+    admPortraitParams.push(portraits.studentPhoto);
+  }
+  if (portraits.fatherPhoto) {
+    admPortraitFields.push('father_photo = ?');
+    admPortraitParams.push(portraits.fatherPhoto);
+  }
+  if (portraits.motherPhoto) {
+    admPortraitFields.push('mother_photo = ?');
+    admPortraitParams.push(portraits.motherPhoto);
+  }
+
+  await pool.execute(
+    `UPDATE admissions SET lead_data = ?${
+      admPortraitFields.length ? `, ${admPortraitFields.join(', ')}` : ''
+    }, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(admNextLd), ...admPortraitParams, userId, admissionId]
+  );
+
+  if (!adm.joining_id) return;
+
+  const [joiningRows] = await pool.execute('SELECT id, lead_data FROM joinings WHERE id = ? LIMIT 1', [
+    adm.joining_id,
+  ]);
+  if (!joiningRows.length) return;
+
+  const joining = joiningRows[0];
+  let jLd =
+    typeof joining.lead_data === 'string' ? JSON.parse(joining.lead_data) : joining.lead_data || {};
+  if (!jLd || typeof jLd !== 'object') jLd = {};
+
+  const jPrevExtras =
+    jLd._joiningRegistrationExtras && typeof jLd._joiningRegistrationExtras === 'object'
+      ? { ...jLd._joiningRegistrationExtras }
+      : {};
+  const jMergedExtras = hasReg && typeof payload.registrationFormData === 'object'
+    ? { ...jPrevExtras, ...payload.registrationFormData }
+    : { ...jPrevExtras, ...mergedExtras };
+
+  const jNextLd = {
+    ...jLd,
+    ...(Object.keys(jMergedExtras).length > 0 ? { _joiningRegistrationExtras: jMergedExtras } : {}),
+  };
+
+  const jPortraits = extractPortraitPhotosFromRegistrationFormData(jMergedExtras);
+  const jPortraitFields = [];
+  const jPortraitParams = [];
+  if (jPortraits.studentPhoto) {
+    jPortraitFields.push('student_photo = ?');
+    jPortraitParams.push(jPortraits.studentPhoto);
+  }
+  if (jPortraits.fatherPhoto) {
+    jPortraitFields.push('father_photo = ?');
+    jPortraitParams.push(jPortraits.fatherPhoto);
+  }
+  if (jPortraits.motherPhoto) {
+    jPortraitFields.push('mother_photo = ?');
+    jPortraitParams.push(jPortraits.motherPhoto);
+  }
+
+  await pool.execute(
+    `UPDATE joinings SET lead_data = ?${
+      jPortraitFields.length ? `, ${jPortraitFields.join(', ')}` : ''
+    }, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(jNextLd), ...jPortraitParams, userId, joining.id]
+  );
+};
+
 const qualificationMeritFromSql = (value) => {
   if (value === 1 || value === true) return true;
   return false;
@@ -842,15 +952,24 @@ export const formatAdmission = async (admissionData, pool) => {
     registrationFormData,
     MOTHER_PHOTO_REG_KEYS
   );
+  const fromRegStudentPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    STUDENT_PHOTO_REG_KEYS
+  );
   const colFatherPhoto = String(admissionData.father_photo || '').trim();
   const colMotherPhoto = String(admissionData.mother_photo || '').trim();
+  const colStudentPhoto = String(admissionData.student_photo || '').trim();
   const fatherPortrait = (fromRegFatherPhoto || colFatherPhoto || '').trim();
   const motherPortrait = (fromRegMotherPhoto || colMotherPhoto || '').trim();
+  const studentPortrait = (fromRegStudentPhoto || colStudentPhoto || '').trim();
   if (colFatherPhoto && !fromRegFatherPhoto) {
     registrationFormData = { ...registrationFormData, father_photo: colFatherPhoto };
   }
   if (colMotherPhoto && !fromRegMotherPhoto) {
     registrationFormData = { ...registrationFormData, mother_photo: colMotherPhoto };
+  }
+  if (colStudentPhoto && !fromRegStudentPhoto) {
+    registrationFormData = { ...registrationFormData, student_photo: colStudentPhoto };
   }
 
   const reservationOther = typeof admissionData.reservation_other === 'string'
@@ -913,6 +1032,7 @@ export const formatAdmission = async (admissionData, pool) => {
       dateOfBirth: admissionData.student_date_of_birth || '',
       notes: admissionData.student_notes || '',
       aadhaarNumber: admissionData.student_aadhaar_number || '',
+      photo: studentPortrait,
     },
     parents: {
       father: {
@@ -2003,6 +2123,11 @@ export const updateAdmissionById = async (req, res) => {
           .slice(-10);
         updateParams.push(preferred.length === 10 ? preferred : '');
       }
+      if (payload.studentInfo.photo !== undefined) {
+        updateFields.push('student_photo = ?');
+        const p = String(payload.studentInfo.photo || '').trim();
+        updateParams.push(p || null);
+      }
     }
 
     if (payload.parents !== undefined) {
@@ -2171,6 +2296,10 @@ export const updateAdmissionById = async (req, res) => {
 
     if (payload.reference1 !== undefined) {
       await persistAdmissionReference1(pool, admissionId, payload.reference1, req.user.id);
+    }
+
+    if (payload.registrationFormData !== undefined || Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails')) {
+      await persistAdmissionRegistrationSidecar(pool, admissionId, payload, req.user.id);
     }
 
     // Fetch and return updated admission
@@ -2275,6 +2404,11 @@ export const updateAdmissionByLead = async (req, res) => {
           .slice(-10);
         updateParams.push(preferred.length === 10 ? preferred : '');
       }
+      if (payload.studentInfo.photo !== undefined) {
+        updateFields.push('student_photo = ?');
+        const p = String(payload.studentInfo.photo || '').trim();
+        updateParams.push(p || null);
+      }
     }
 
     if (payload.parents !== undefined) {
@@ -2443,6 +2577,10 @@ export const updateAdmissionByLead = async (req, res) => {
 
     if (payload.reference1 !== undefined) {
       await persistAdmissionReference1(pool, admissionId, payload.reference1, req.user.id);
+    }
+
+    if (payload.registrationFormData !== undefined || Object.prototype.hasOwnProperty.call(payload, 'studentFeeDetails')) {
+      await persistAdmissionRegistrationSidecar(pool, admissionId, payload, req.user.id);
     }
 
     // Fetch and return updated admission

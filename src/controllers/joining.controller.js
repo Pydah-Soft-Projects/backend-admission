@@ -16,6 +16,8 @@ import { resolveBtechCourseDisplayName, deriveAdmissionSeriesYear } from '../uti
 import {
   FATHER_PHOTO_REG_KEYS,
   MOTHER_PHOTO_REG_KEYS,
+  STUDENT_PHOTO_REG_KEYS,
+  extractPortraitPhotosFromRegistrationFormData,
 } from '../utils/joiningParentPhotos.util.js';
 import {
   communicationAddressFromSqlRow,
@@ -760,15 +762,26 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     registrationFormData,
     MOTHER_PHOTO_REG_KEYS
   );
+  const fromRegStudentPhoto = pickFromRegistrationFormData(
+    registrationFormData,
+    STUDENT_PHOTO_REG_KEYS
+  );
   const colFatherPhoto = String(joiningData.father_photo || '').trim();
   const colMotherPhoto = String(joiningData.mother_photo || '').trim();
+  const colStudentPhoto = String(joiningData.student_photo || '').trim();
   const fatherPortrait = (fromRegFatherPhoto || colFatherPhoto || '').trim();
   const motherPortrait = (fromRegMotherPhoto || colMotherPhoto || '').trim();
+  const studentPortrait = (fromRegStudentPhoto || colStudentPhoto || '').trim();
   if (colFatherPhoto && !fromRegFatherPhoto) {
     registrationFormData = { ...registrationFormData, father_photo: colFatherPhoto };
   }
   if (colMotherPhoto && !fromRegMotherPhoto) {
     registrationFormData = { ...registrationFormData, mother_photo: colMotherPhoto };
+  }
+  // Ensure student_photo from the dedicated column is always available in registrationFormData
+  // so the frontend photo slot shows the saved image on reload.
+  if (colStudentPhoto && !fromRegStudentPhoto) {
+    registrationFormData = { ...registrationFormData, student_photo: colStudentPhoto };
   }
 
   return {
@@ -810,6 +823,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       dateOfBirth: joiningData.student_date_of_birth || '',
       notes: joiningData.student_notes || '',
       aadhaarNumber: joiningData.student_aadhaar_number || '',
+      photo: studentPortrait,
     },
     parents: {
       father: {
@@ -2201,8 +2215,13 @@ export const saveJoiningDraft = async (req, res) => {
       regExtrasForParentPhotos,
       MOTHER_PHOTO_REG_KEYS
     );
+    const studentPhotoForRowPick = pickFromRegistrationFormData(
+      regExtrasForParentPhotos,
+      STUDENT_PHOTO_REG_KEYS
+    );
     const fatherPhotoForRow = fatherPhotoForRowPick ? fatherPhotoForRowPick : null;
     const motherPhotoForRow = motherPhotoForRowPick ? motherPhotoForRowPick : null;
+    const studentPhotoForRow = studentPhotoForRowPick ? studentPhotoForRowPick : null;
 
     const statusToPersist =
       previousStatus === 'approved' || previousStatus === 'pending_approval'
@@ -2238,6 +2257,7 @@ export const saveJoiningDraft = async (req, res) => {
         preferred_mobile_number = ?,
         father_photo = ?,
         mother_photo = ?,
+        student_photo = ?,
         reservation_general = ?,
         reservation_other = ?,
         address_door_street = ?,
@@ -2306,6 +2326,7 @@ export const saveJoiningDraft = async (req, res) => {
         })(),
         fatherPhotoForRow,
         motherPhotoForRow,
+        studentPhotoForRow,
         reservation.general || DEFAULT_GENERAL_RESERVATION,
         JSON.stringify(reservation.other || []),
         address.communication?.doorOrStreet || '',
@@ -2410,6 +2431,41 @@ export const saveJoiningDraft = async (req, res) => {
       });
     }
 
+    // When updating an already-approved joining, sync the student record to the
+    // secondary DB so that profile changes (including a new student photo) are
+    // reflected immediately in the student portal without waiting for a re-approval.
+    if (previousStatus === 'approved') {
+      try {
+        const [admRows] = await pool.execute(
+          'SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1',
+          [joiningIdToUse]
+        );
+        const admissionNumber = admRows?.[0]?.admission_number;
+        if (admissionNumber) {
+          const [freshJoiningRows] = await pool.execute(
+            'SELECT * FROM joinings WHERE id = ?',
+            [joiningIdToUse]
+          );
+          if (freshJoiningRows?.[0]) {
+            const freshFormatted = await formatJoining(freshJoiningRows[0], pool);
+            const secondarySyncResult = await syncToSecondaryDatabase(
+              freshFormatted,
+              admissionNumber,
+              { leadId: finalPayload.leadId || lead?.id || null, joiningId: joiningIdToUse }
+            );
+            warnIfSecondaryStudentSyncMissed(
+              secondarySyncResult,
+              'saveJoiningDraft (approved update)',
+              { joiningId: joiningIdToUse, admissionNumber }
+            );
+          }
+        }
+      } catch (syncErr) {
+        // Secondary sync is best-effort — log but don't fail the save response.
+        console.error('[saveJoiningDraft] secondary DB sync error:', syncErr?.message || syncErr);
+      }
+    }
+
     // Fetch and return formatted joining
     const [updated] = await pool.execute(
       'SELECT * FROM joinings WHERE id = ?',
@@ -2505,6 +2561,28 @@ export const patchJoiningStepTwo = async (req, res) => {
       [JSON.stringify(nextLd), req.user.id, joining.id]
     );
 
+    const portraitsFromMerged = extractPortraitPhotosFromRegistrationFormData(mergedExtras);
+    const portraitColumnFields = [];
+    const portraitColumnParams = [];
+    if (portraitsFromMerged.studentPhoto) {
+      portraitColumnFields.push('student_photo = ?');
+      portraitColumnParams.push(portraitsFromMerged.studentPhoto);
+    }
+    if (portraitsFromMerged.fatherPhoto) {
+      portraitColumnFields.push('father_photo = ?');
+      portraitColumnParams.push(portraitsFromMerged.fatherPhoto);
+    }
+    if (portraitsFromMerged.motherPhoto) {
+      portraitColumnFields.push('mother_photo = ?');
+      portraitColumnParams.push(portraitsFromMerged.motherPhoto);
+    }
+    if (portraitColumnFields.length > 0) {
+      await pool.execute(
+        `UPDATE joinings SET ${portraitColumnFields.join(', ')}, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+        [...portraitColumnParams, req.user.id, joining.id]
+      );
+    }
+
     const resolvedLeadIdForFeeMirror =
       joining.lead_id != null && String(joining.lead_id).trim() !== ''
         ? String(joining.lead_id).trim()
@@ -2557,6 +2635,28 @@ export const patchJoiningStepTwo = async (req, res) => {
         `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
         [JSON.stringify(admNextLd), req.user.id, adm.id]
       );
+
+      const admPortraits = extractPortraitPhotosFromRegistrationFormData(admMergedExtras);
+      const admPortraitFields = [];
+      const admPortraitParams = [];
+      if (admPortraits.studentPhoto) {
+        admPortraitFields.push('student_photo = ?');
+        admPortraitParams.push(admPortraits.studentPhoto);
+      }
+      if (admPortraits.fatherPhoto) {
+        admPortraitFields.push('father_photo = ?');
+        admPortraitParams.push(admPortraits.fatherPhoto);
+      }
+      if (admPortraits.motherPhoto) {
+        admPortraitFields.push('mother_photo = ?');
+        admPortraitParams.push(admPortraits.motherPhoto);
+      }
+      if (admPortraitFields.length > 0) {
+        await pool.execute(
+          `UPDATE admissions SET ${admPortraitFields.join(', ')}, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+          [...admPortraitParams, req.user.id, adm.id]
+        );
+      }
 
       const [admFresh] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [adm.id]);
       const formattedAdmission = await formatAdmission(admFresh[0], pool);
