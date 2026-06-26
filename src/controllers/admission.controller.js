@@ -125,11 +125,15 @@ const getAdmissionCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
   return count;
 };
 
-const SQL_IS_ACTIVE_ADMISSION = `status != '${ADMISSION_CANCELLED_STATUS}'`;
+/** Abstract sheet "Active" column — only enrolled students, not withdrawn. */
+const SQL_IS_ACTIVE_ADMISSION = `status = 'active'`;
 const SQL_IS_CANCELLED_ADMISSION = `status = '${ADMISSION_CANCELLED_STATUS}'`;
 /** Qualification Merit Yes/No from joining form (`qualification_merit`: 1 = Yes, 0 = No). */
 const SQL_IS_MERIT_YES = 'qualification_merit = 1';
 const SQL_IS_MERIT_NO = 'qualification_merit = 0';
+/** Abstract Merit column — active admissions only (excludes withdrawn and cancelled). */
+const SQL_ABSTRACT_MERIT_YES = `${SQL_IS_MERIT_YES} AND ${SQL_IS_ACTIVE_ADMISSION}`;
+const SQL_ABSTRACT_MERIT_NO = `${SQL_IS_MERIT_NO} AND ${SQL_IS_ACTIVE_ADMISSION}`;
 
 const parseBranchMetadataObject = (metadata) => {
   if (!metadata) return null;
@@ -2694,8 +2698,8 @@ export const getAdmissionStats = async (req, res) => {
         ${SQL_EFF_COURSE_ID} as courseId, 
         ${SQL_BTECH_LATERAL_TRACK} as lateralTrack,
         ${SQL_COURSE_DISPLAY_NAME} as courseName,
-        COUNT(CASE WHEN status != 'Admission Cancelled' THEN 1 END) as totalAdmissions,
-        COUNT(CASE WHEN status = 'Admission Cancelled' THEN 1 END) as totalCancelled
+        COUNT(CASE WHEN ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as totalAdmissions,
+        COUNT(CASE WHEN ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as totalCancelled
       FROM admissions
       ${whereClause}
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_BTECH_LATERAL_TRACK}
@@ -2716,8 +2720,8 @@ export const getAdmissionStats = async (req, res) => {
         COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as mqCancelled,
         COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as spotAdmitted,
         COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as spotCancelled,
-        COUNT(CASE WHEN ${SQL_IS_MERIT_YES} THEN 1 END) as meritYes,
-        COUNT(CASE WHEN ${SQL_IS_MERIT_NO} THEN 1 END) as meritNo
+        COUNT(CASE WHEN ${SQL_ABSTRACT_MERIT_YES} THEN 1 END) as meritYes,
+        COUNT(CASE WHEN ${SQL_ABSTRACT_MERIT_NO} THEN 1 END) as meritNo
       FROM admissions
       ${whereClause}
       GROUP BY ${SQL_EFF_COURSE_ID}, ${SQL_EFF_BRANCH_ID}, ${SQL_BTECH_LATERAL_TRACK}

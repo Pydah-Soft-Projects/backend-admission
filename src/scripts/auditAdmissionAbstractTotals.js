@@ -11,8 +11,6 @@ import {
 
 dotenv.config();
 
-const ADMISSION_CANCELLED = 'Admission Cancelled';
-
 async function main() {
   const pool = await mysql.createConnection({
     host: process.env.DB_HOST,
@@ -27,17 +25,16 @@ async function main() {
     SELECT
       COALESCE(NULLIF(TRIM(course), ''), '(no course)') AS courseName,
       COALESCE(NULLIF(TRIM(branch), ''), '(no branch)') AS branchName,
-      COUNT(CASE WHEN status != ? THEN 1 END) AS totalActive,
-      COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND status != ? THEN 1 END) AS cqAdmitted,
-      COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND status != ? THEN 1 END) AS mqAdmitted,
-      COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND status != ? THEN 1 END) AS spotAdmitted
+      COUNT(CASE WHEN status = 'active' THEN 1 END) AS totalActive,
+      COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND status = 'active' THEN 1 END) AS cqAdmitted,
+      COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND status = 'active' THEN 1 END) AS mqAdmitted,
+      COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND status = 'active' THEN 1 END) AS spotAdmitted
     FROM admissions
     GROUP BY courseName, branchName
     HAVING totalActive > 0
     ORDER BY courseName, branchName
   `;
-  const params = [ADMISSION_CANCELLED, ADMISSION_CANCELLED, ADMISSION_CANCELLED, ADMISSION_CANCELLED];
-  const [rows] = await pool.execute(sql, params);
+  const [rows] = await pool.execute(sql);
 
   const mismatches = [];
   const byCourse = new Map();
