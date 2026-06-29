@@ -906,6 +906,23 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     registrationFormData = { ...registrationFormData, student_photo: colStudentPhoto };
   }
 
+  let resolvedBranch = joiningData.branch || '';
+  if (normalizedJoiningBranchId) {
+    try {
+      const secondaryPool = getSecondaryPool();
+      const [branchRows] = await secondaryPool.execute(
+        'SELECT name FROM course_branches WHERE id = ? LIMIT 1',
+        [normalizedJoiningBranchId]
+      );
+      const catalogBranchName = String(branchRows[0]?.name || '').trim();
+      if (catalogBranchName) {
+        resolvedBranch = catalogBranchName;
+      }
+    } catch (err) {
+      console.warn('formatJoining: branch name lookup failed:', err?.message || err);
+    }
+  }
+
   return {
     _id: joiningData.id,
     id: joiningData.id,
@@ -925,7 +942,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
           registrationFormData
         )
       ),
-      branch: joiningData.branch || '',
+      branch: resolvedBranch,
       quota: joiningData.quota || '',
       programLevel: storedProgramLevel || undefined,
     },
@@ -1960,8 +1977,9 @@ export const saveJoiningDraft = async (req, res) => {
       }
 
       payload.courseInfo.branchId = branchDoc.id;
-      if (!payload.courseInfo.branch) {
-        payload.courseInfo.branch = branchDoc.name;
+      const catalogBranchName = String(branchDoc.name || '').trim();
+      if (catalogBranchName) {
+        payload.courseInfo.branch = catalogBranchName;
       }
 
       if (!payload.courseInfo.courseId) {

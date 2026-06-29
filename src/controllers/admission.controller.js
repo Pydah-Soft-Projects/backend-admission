@@ -364,7 +364,7 @@ const enrichAdmissionCourseInfoFromSecondary = async (courseInfo) => {
       }
       if (branchDoc) {
         info.branchId = String(branchDoc.id);
-        const catalogBranch = String(branchDoc.code || branchDoc.name || '').trim();
+        const catalogBranch = String(branchDoc.name || branchDoc.code || '').trim();
         if (catalogBranch) {
           info.branch = catalogBranch;
         }
@@ -408,7 +408,7 @@ const enrichAdmissionCourseInfoFromSecondary = async (courseInfo) => {
         );
         if (byLabel.length > 0) {
           info.branchId = String(byLabel[0].id);
-          info.branch = String(byLabel[0].code || byLabel[0].name || '').trim() || storedBranch;
+          info.branch = String(byLabel[0].name || byLabel[0].code || '').trim() || storedBranch;
         }
       }
     }
@@ -490,7 +490,7 @@ const loadSecondaryCourseBranchLabelMaps = async () => {
     );
     for (const row of branchRows || []) {
       const id = String(row.id ?? '').trim();
-      const label = String(row.code || row.name || '').trim();
+      const label = String(row.name || row.code || '').trim();
       if (id && label) branches.set(id, label);
     }
   } catch (err) {
