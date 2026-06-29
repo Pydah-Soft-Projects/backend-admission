@@ -9,7 +9,10 @@ import {
 } from '../controllers/paymentConfig.controller.js';
 import {
   createCashfreeOrder,
+  getOverallConcessions,
+  listFeeManagementTransactions,
   listTransactions,
+  recordFeeManagementTransaction,
   recordCashPayment,
   reconcilePendingTransactions,
   verifyCashfreePayment,
@@ -31,6 +34,9 @@ router.put('/settings/cashfree', isSuperAdmin, updateCashfreeConfig);
 
 // payment transactions
 router.get('/transactions', listTransactions);
+router.get('/overall-concessions', getOverallConcessions);
+router.get('/fee-management/transactions', listFeeManagementTransactions);
+router.post('/fee-management/transactions', recordFeeManagementTransaction);
 router.post('/cash', recordCashPayment);
 router.post('/cashfree/order', createCashfreeOrder);
 router.post('/cashfree/verify', verifyCashfreePayment);

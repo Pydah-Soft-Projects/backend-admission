@@ -1,8 +1,11 @@
 import { getPool } from '../config-sql/database.js';
+import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import mongoose from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { createOrder as cashfreeCreateOrder, getOrder as cashfreeGetOrder } from '../services/cashfree.service.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
+import { connectFeeManagement } from '../config-mongo/feeManagement.js';
 
 const resolveConfiguredFee = async (courseId, branchId) => {
   if (!courseId) return 0;
@@ -169,6 +172,304 @@ const updatePaymentSummary = async ({
   }
 
   await Promise.all(updates);
+};
+
+const toMongoFeeHeadValue = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^[a-fA-F0-9]{24}$/.test(raw)) {
+    try {
+      return new mongoose.Types.ObjectId(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+};
+
+const generateReceiptNumber = () => `REC${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+const normalizeManualPaymentMode = (value) => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'bank' || raw === 'net banking') return 'Bank';
+  return 'Cash';
+};
+
+const serializeFeeMongoTransaction = (doc, feeHeadDetails = null) => ({
+  _id: String(doc._id),
+  studentId: doc.studentId || '',
+  studentName: doc.studentName || '',
+  feeHead: doc.feeHead ? String(doc.feeHead) : '',
+  feeHeadName: feeHeadDetails?.name || feeHeadDetails?.feeHeadName || feeHeadDetails?.headName || '',
+  feeHeadCode: feeHeadDetails?.code || feeHeadDetails?.feeHeadCode || feeHeadDetails?.headCode || '',
+  amount: Number(doc.amount) || 0,
+  paymentDate: doc.paymentDate || null,
+  transactionType: doc.transactionType || '',
+  paymentMode: doc.paymentMode || '',
+  bankName: doc.bankName || '',
+  instrumentDate: doc.instrumentDate || null,
+  referenceNo: doc.referenceNo || '',
+  referenceDate: doc.referenceDate || null,
+  gatewayPaymentId: doc.gatewayPaymentId || '',
+  remarks: doc.remarks || '',
+  semester: doc.semester || null,
+  studentYear: doc.studentYear || null,
+  receiptNumber: doc.receiptNumber || '',
+  collectedBy: doc.collectedBy || '',
+  collectedByName: doc.collectedByName || '',
+  paymentConfigId: doc.paymentConfigId ? String(doc.paymentConfigId) : '',
+  depositedToAccount: doc.depositedToAccount || '',
+  proceedingId: doc.proceedingId ? String(doc.proceedingId) : '',
+  concessionRequestId: doc.concessionRequestId ? String(doc.concessionRequestId) : '',
+  createdAt: doc.createdAt || null,
+  updatedAt: doc.updatedAt || null,
+});
+
+export const getOverallConcessions = async (req, res) => {
+  try {
+    const admissionNumber = String(req.query.admissionNumber || '').trim();
+    if (!admissionNumber) {
+      return errorResponse(res, 'admissionNumber is required', 422);
+    }
+
+    const secondaryPool = getSecondaryPool();
+    const [rows] = await secondaryPool.execute(
+      `SELECT admission_number, pin_no, student_name, batch, course, branch, revised_fees, updated_at
+       FROM overall_concessions
+       WHERE admission_number = ?
+       LIMIT 1`,
+      [admissionNumber]
+    );
+
+    const row = rows[0] || null;
+    if (!row) {
+      return successResponse(res, {
+        admissionNumber,
+        revisedFees: [],
+      });
+    }
+
+    let revisedFees = [];
+    try {
+      revisedFees =
+        typeof row.revised_fees === 'string'
+          ? JSON.parse(row.revised_fees || '[]')
+          : Array.isArray(row.revised_fees)
+            ? row.revised_fees
+            : [];
+    } catch {
+      revisedFees = [];
+    }
+
+    return successResponse(res, {
+      admissionNumber: row.admission_number,
+      pinNo: row.pin_no || '',
+      studentName: row.student_name || '',
+      batch: row.batch || '',
+      course: row.course || '',
+      branch: row.branch || '',
+      revisedFees: Array.isArray(revisedFees) ? revisedFees : [],
+      updatedAt: row.updated_at || null,
+    });
+  } catch (error) {
+    console.error('Error fetching overall concessions:', error);
+    return errorResponse(res, error.message || 'Failed to fetch overall concessions', 500);
+  }
+};
+
+export const listFeeManagementTransactions = async (req, res) => {
+  try {
+    const joiningId = String(req.query.joiningId || '').trim();
+    const admissionId = String(req.query.admissionId || '').trim();
+    const fallbackStudentId = String(req.query.studentId || req.query.admissionNumber || '').trim();
+    let studentId = '';
+    const studentYear = String(req.query.studentYear || '').trim();
+    if (admissionId || joiningId) {
+      const pool = getPool();
+      let admission = null;
+      if (admissionId) {
+        const [rows] = await pool.execute('SELECT admission_number FROM admissions WHERE id = ? LIMIT 1', [
+          admissionId,
+        ]);
+        admission = rows[0] || null;
+      }
+      if (!admission && joiningId) {
+        const [rows] = await pool.execute(
+          'SELECT admission_number FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+          [joiningId]
+        );
+        admission = rows[0] || null;
+      }
+      studentId = String(admission?.admission_number || '').trim();
+    }
+    if (!studentId) studentId = fallbackStudentId;
+    if (!studentId) {
+      return errorResponse(res, 'studentId/admissionNumber or joiningId/admissionId is required', 422);
+    }
+
+    const conn = await connectFeeManagement();
+    const query = { studentId };
+    if (studentYear) {
+      const numericYear = Number(studentYear);
+      query.studentYear = Number.isFinite(numericYear) ? { $in: [studentYear, numericYear] } : studentYear;
+    }
+    const docs = await conn.db
+      .collection('transactions')
+      .find(query)
+      .sort({ paymentDate: -1, createdAt: -1 })
+      .limit(100)
+      .toArray();
+
+    const feeHeadIds = [
+      ...new Set(
+        docs
+          .map((doc) => (doc.feeHead ? String(doc.feeHead) : ''))
+          .filter((id) => /^[a-fA-F0-9]{24}$/.test(id))
+      ),
+    ].map((id) => new mongoose.Types.ObjectId(id));
+    const feeHeads =
+      feeHeadIds.length > 0
+        ? await conn.db.collection('feeheads').find({ _id: { $in: feeHeadIds } }).toArray()
+        : [];
+    const feeHeadById = new Map(feeHeads.map((head) => [String(head._id), head]));
+
+    const transactions = docs.map((doc) =>
+      serializeFeeMongoTransaction(doc, feeHeadById.get(String(doc.feeHead)))
+    );
+
+    return successResponse(res, {
+      transactions,
+      data: transactions,
+      total: docs.length,
+      filters: { studentId, studentYear: studentYear || null },
+    });
+  } catch (error) {
+    console.error('Error listing Fee Management transactions:', error);
+    return errorResponse(res, error.message || 'Failed to fetch fee transactions', 500);
+  }
+};
+
+export const recordFeeManagementTransaction = async (req, res) => {
+  try {
+    const {
+      joiningId,
+      admissionId,
+      feeHead,
+      feeHeadName,
+      feeHeadCode,
+      amount,
+      paymentMode,
+      receiptNumber,
+      remarks,
+      semester,
+      studentYear,
+    } = req.body || {};
+
+    if (!joiningId) {
+      return errorResponse(res, 'joiningId is required', 422);
+    }
+    const amountValue = Number(amount);
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      return errorResponse(res, 'Amount must be a positive number', 422);
+    }
+    const feeHeadValue = toMongoFeeHeadValue(feeHead);
+    if (!feeHeadValue) {
+      return errorResponse(res, 'feeHead is required', 422);
+    }
+
+    const pool = getPool();
+    const [joiningRows] = await pool.execute('SELECT * FROM joinings WHERE id = ? LIMIT 1', [
+      joiningId,
+    ]);
+    if (joiningRows.length === 0) {
+      return errorResponse(res, 'Joining not found', 404);
+    }
+    const joining = joiningRows[0];
+
+    let admission = null;
+    if (admissionId) {
+      const [admissionRows] = await pool.execute('SELECT * FROM admissions WHERE id = ? LIMIT 1', [
+        admissionId,
+      ]);
+      admission = admissionRows[0] || null;
+    }
+    if (!admission) {
+      const [admissionRows] = await pool.execute(
+        'SELECT * FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+        [joiningId]
+      );
+      admission = admissionRows[0] || null;
+    }
+
+    const studentId = String(admission?.admission_number || '').trim();
+    if (!studentId) {
+      return errorResponse(
+        res,
+        'Admission number is required before recording fee portal transactions',
+        422
+      );
+    }
+
+    const [users] = req.user?.id
+      ? await pool.execute('SELECT id, name FROM users WHERE id = ? LIMIT 1', [req.user.id])
+      : [[]];
+    const collector = users[0] || null;
+    const now = new Date();
+    const normalizedReceipt =
+      receiptNumber != null && String(receiptNumber).trim() !== ''
+        ? String(receiptNumber).trim()
+        : generateReceiptNumber();
+    const normalizedPaymentMode = normalizeManualPaymentMode(paymentMode);
+    const normalizedStudentYear =
+      studentYear != null && String(studentYear).trim() !== ''
+        ? String(studentYear).trim()
+        : '1';
+    const normalizedSemester =
+      semester != null && String(semester).trim() !== '' ? String(semester).trim() : null;
+
+    const conn = await connectFeeManagement();
+    const doc = {
+      studentId,
+      studentName: String(admission?.student_name || joining.student_name || '').trim(),
+      feeHead: feeHeadValue,
+      amount: amountValue,
+      transactionType: 'DEBIT',
+      paymentMode: normalizedPaymentMode,
+      remarks:
+        String(remarks || '').trim() ||
+        String(feeHeadName || feeHeadCode || 'Fee payment').trim(),
+      semester: normalizedSemester,
+      studentYear: normalizedStudentYear,
+      receiptNumber: normalizedReceipt,
+      referenceNo: normalizedReceipt,
+      referenceDate: now,
+      collectedBy: req.user?.id ? String(req.user.id) : '',
+      collectedByName: String(collector?.name || req.user?.name || '').trim(),
+      paymentDate: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const result = await conn.db.collection('transactions').insertOne(doc);
+
+    return successResponse(
+      res,
+      {
+        _id: String(result.insertedId),
+        ...doc,
+        feeHead: String(feeHeadValue),
+      },
+      'Fee payment transaction recorded',
+      201
+    );
+  } catch (error) {
+    console.error('Error recording Fee Management transaction:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to record fee payment transaction',
+      error.statusCode || 500
+    );
+  }
 };
 
 // Helper function to format payment transaction

@@ -100,7 +100,27 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
         if (Number.isFinite(n) && n >= 0) amount = n;
       }
       const remarks = typeof line?.remarks === 'string' ? line.remarks.trim().slice(0, 2000) : '';
-      return { structureId, amount, remarks };
+      const rawConcessionType = String(line?.concessionType || '').trim().toUpperCase();
+      const concessionType =
+        rawConcessionType === 'CONCESSION' || rawConcessionType === 'REVISED_FEE'
+          ? rawConcessionType
+          : undefined;
+      
+      const feeHeadId = line?.feeHeadId ? String(line.feeHeadId).trim() : undefined;
+      const feeHeadCode = line?.feeHeadCode ? String(line.feeHeadCode).trim() : undefined;
+      const feeHeadName = line?.feeHeadName ? String(line.feeHeadName).trim() : undefined;
+      const studentYear = line?.studentYear != null ? Number(line.studentYear) : undefined;
+
+      return {
+        structureId,
+        amount,
+        remarks,
+        ...(concessionType ? { concessionType } : {}),
+        ...(feeHeadId ? { feeHeadId } : {}),
+        ...(feeHeadCode ? { feeHeadCode } : {}),
+        ...(feeHeadName ? { feeHeadName } : {}),
+        ...(studentYear != null && !Number.isNaN(studentYear) ? { studentYear } : {}),
+      };
     })
     .filter(Boolean);
   if (lines.length === 0 && !batch) return null;
@@ -263,7 +283,7 @@ const runJoiningFeePortalSync = async ({
     }
   }
 
-  await syncJoiningStudentFeeDetailsToFeeMongo({
+  const feeSyncResult = await syncJoiningStudentFeeDetailsToFeeMongo({
     joiningId,
     leadId: leadId || joiningRow.lead_id || null,
     studentFeeDetails,
@@ -274,6 +294,108 @@ const runJoiningFeePortalSync = async ({
       admissionNumber
     ),
   });
+
+  await syncDirectConcessionsToSecondaryOverall({
+    admissionNumber,
+    joiningRow,
+    studentFeeDetails,
+    portalLines: feeSyncResult?.lines || [],
+  });
+};
+
+const syncDirectConcessionsToSecondaryOverall = async ({
+  admissionNumber,
+  joiningRow,
+  studentFeeDetails,
+  portalLines = [],
+}) => {
+  const safeAdmissionNumber = normalizeAdmissionNumberCandidate(admissionNumber);
+  if (!safeAdmissionNumber) return;
+
+  const sourceLines = Array.isArray(portalLines) && portalLines.length > 0
+    ? portalLines
+    : Array.isArray(studentFeeDetails?.lines)
+      ? studentFeeDetails.lines
+      : [];
+  const revisedFees = sourceLines
+    .filter((line) => line?.concessionType === 'CONCESSION' || line?.concessionType === 'REVISED_FEE')
+    .map((line) => {
+      const actualAmount = Number(line.actualAmount) || 0;
+      const rawAmount = Number(line.amount) || 0;
+      const revisedAmount =
+        line.revisedAmount !== undefined && line.revisedAmount !== null
+          ? Number(line.revisedAmount) || 0
+          : line.concessionType === 'CONCESSION'
+            ? Math.max(actualAmount - rawAmount, 0)
+            : rawAmount;
+      if (revisedAmount <= 0) return null;
+      const concessionAmount =
+        line.concessionType === 'CONCESSION'
+          ? Math.max(actualAmount - revisedAmount, 0)
+          : 0;
+      return {
+        semester: null,
+        feeHeadId: line.feeHeadId || null,
+        feeHeadCode: line.feeHeadCode || '',
+        studentYear: Number(line.studentYear) || 1,
+        actualAmount,
+        revisedAmount,
+        concessionAmount,
+        concessionType: line.concessionType === 'CONCESSION' ? 'CONCESSION' : 'REVISED',
+      };
+    })
+    .filter(Boolean);
+
+  try {
+    const secondaryPool = getSecondaryPool();
+    if (revisedFees.length === 0) {
+      await secondaryPool.execute('DELETE FROM overall_concessions WHERE admission_number = ?', [
+        safeAdmissionNumber,
+      ]);
+      return;
+    }
+
+    const [studentRows] = await secondaryPool.execute(
+      'SELECT pin_no, student_name, batch, course, branch FROM students WHERE admission_number = ? LIMIT 1',
+      [safeAdmissionNumber]
+    );
+
+    const pinNo = studentRows[0]?.pin_no || safeAdmissionNumber;
+    const studentName = studentRows[0]?.student_name || joiningRow?.student_name || '';
+    const batch =
+      studentRows[0]?.batch ||
+      studentFeeDetails?.batch ||
+      deriveAdmissionSeriesYear(safeAdmissionNumber) ||
+      '';
+    const course = studentRows[0]?.course || joiningRow?.course || '';
+    const branch = studentRows[0]?.branch || joiningRow?.branch || '';
+
+    await secondaryPool.execute(
+      `INSERT INTO overall_concessions
+        (admission_number, pin_no, student_name, batch, course, branch, revised_fees, created_at, updated_at)
+       VALUES
+        (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE
+        pin_no = VALUES(pin_no),
+        student_name = VALUES(student_name),
+        batch = VALUES(batch),
+        course = VALUES(course),
+        branch = VALUES(branch),
+        revised_fees = VALUES(revised_fees),
+        updated_at = NOW()`,
+      [
+        safeAdmissionNumber,
+        pinNo,
+        studentName,
+        batch,
+        course,
+        branch,
+        JSON.stringify(revisedFees),
+      ]
+    );
+  } catch (error) {
+    console.error('Failed to sync direct concessions to secondary overall_concessions:', error);
+  }
 };
 
 /** Managed course/branch IDs may come from the student DB; FK columns on joinings/admissions point at primary `courses` / `branches`. */
@@ -2658,21 +2780,46 @@ export const patchJoiningStepTwo = async (req, res) => {
         );
       }
 
-      const [admFresh] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [adm.id]);
-      const formattedAdmission = await formatAdmission(admFresh[0], pool);
-      warnIfSecondaryStudentSyncMissed(
-        'patchJoiningStepTwo',
-        { joiningId: joining.id, admissionId: adm.id },
-        await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
-          leadId: formattedAdmission.leadId,
-          joiningId: formattedAdmission.joiningId,
-          email: formattedAdmission.leadData?.email || '',
-        })
-      );
+      try {
+        const [admFresh] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [adm.id]);
+        const formattedAdmission = await formatAdmission(admFresh[0], pool);
+        warnIfSecondaryStudentSyncMissed(
+          'patchJoiningStepTwo',
+          { joiningId: joining.id, admissionId: adm.id },
+          await syncToSecondaryDatabase(formattedAdmission, formattedAdmission.admissionNumber, {
+            leadId: formattedAdmission.leadId,
+            joiningId: formattedAdmission.joiningId,
+            email: formattedAdmission.leadData?.email || '',
+          })
+        );
+      } catch (syncError) {
+        console.warn(
+          '[patchJoiningStepTwo] Admission secondary sync skipped after joining fee save:',
+          syncError?.message || syncError
+        );
+      }
     }
 
-    const [updatedJoining] = await pool.execute('SELECT * FROM joinings WHERE id = ?', [joining.id]);
-    const formattedJoining = await formatJoining(updatedJoining[0], pool);
+    let formattedJoining;
+    try {
+      const [updatedJoining] = await pool.execute('SELECT * FROM joinings WHERE id = ?', [joining.id]);
+      formattedJoining = await formatJoining(updatedJoining[0], pool);
+    } catch (formatError) {
+      console.warn(
+        '[patchJoiningStepTwo] Returning lightweight joining response after save:',
+        formatError?.message || formatError
+      );
+      formattedJoining = {
+        _id: joining.id,
+        id: joining.id,
+        leadId: joining.lead_id,
+        leadData: nextLd,
+        registrationFormData: mergedExtras,
+        studentFeeDetails: rawFees || nextLd._joiningStudentFeeDetails || { lines: [] },
+        status: joining.status,
+        updatedAt: new Date().toISOString(),
+      };
+    }
     return successResponse(
       res,
       { joining: formattedJoining },

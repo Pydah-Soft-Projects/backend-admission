@@ -308,6 +308,32 @@ const feeHeadFilterValue = (feeHeadId) => {
   }
 };
 
+const feeHeadMatchValues = (feeHeadId) => {
+  const raw = String(feeHeadId || '').trim();
+  if (!raw) return [];
+  const values = [raw];
+  try {
+    values.push(new ObjectId(raw));
+  } catch {
+    // Non-ObjectId fee heads are matched as-is.
+  }
+  return values;
+};
+
+const normalizeStudentFeeKeyPart = (value) =>
+  value === undefined || value === null || value === '' ? 'null' : String(value).trim();
+
+const buildStudentFeeSourceKey = ({ admissionNumber, feeHeadId, academicYear, studentYear, semester, remarks }) =>
+  [
+    'admissions_crm',
+    normalizeStudentFeeKeyPart(admissionNumber),
+    normalizeStudentFeeKeyPart(feeHeadId),
+    normalizeStudentFeeKeyPart(academicYear),
+    normalizeStudentFeeKeyPart(studentYear),
+    normalizeStudentFeeKeyPart(semester),
+    normalizeStudentFeeKeyPart(remarks),
+  ].join('|');
+
 const SESSION_ACADEMIC_YEAR_REGEX = /^\d{4}-\d{4}$/;
 
 const normalizeStudentFeeAmount = (value) => {
@@ -409,11 +435,25 @@ const buildStudentFeeUpsertDocs = ({
       const remarks = studentFeeRemarksForPortalLine(line);
       const feeHead = feeHeadFilterValue(line.feeHeadId);
       if (!feeHead) return null;
+      const feeHeadId = String(line.feeHeadId || '').trim();
+      const sourceKey = buildStudentFeeSourceKey({
+        admissionNumber,
+        feeHeadId,
+        academicYear,
+        studentYear,
+        semester,
+        remarks,
+      });
 
       return {
+        sourceKey,
+        feeHeadId,
         filter: {
+          sourceKey,
+        },
+        legacyFilter: {
           studentId: admissionNumber,
-          feeHead,
+          feeHead: { $in: feeHeadMatchValues(feeHeadId) },
           academicYear,
           studentYear,
           semester,
@@ -423,6 +463,7 @@ const buildStudentFeeUpsertDocs = ({
           studentId: admissionNumber,
           studentName: String(joiningContext?.studentName || '').trim(),
           feeHead,
+          feeHeadId,
           college: 'Default',
           course: String(joiningContext?.course || '').trim(),
           branch: String(joiningContext?.branch || '').trim(),
@@ -431,6 +472,8 @@ const buildStudentFeeUpsertDocs = ({
           semester,
           amount: normalizeStudentFeeAmount(line.revisedAmount),
           remarks,
+          source: 'admissions_crm',
+          sourceKey,
           updatedAt: now,
         },
       };
@@ -496,6 +539,30 @@ export function previewJoiningStudentFeesSync({
   };
 }
 
+async function findExistingStudentFeeRows(coll, row) {
+  const selectors = [row.filter, row.legacyFilter].filter(Boolean);
+  if (selectors.length === 0) return [];
+  return coll
+    .find({ $or: selectors })
+    .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+    .toArray();
+}
+
+async function cleanupDuplicateStudentFeeRowsForUpsert(coll, row) {
+  const existingRows = await findExistingStudentFeeRows(coll, row);
+  if (existingRows.length === 0) return { targetId: null, deletedCount: 0 };
+
+  const survivor = existingRows[0];
+  const duplicateIds = existingRows.slice(1).map((doc) => doc._id);
+  let deletedCount = 0;
+  if (duplicateIds.length > 0) {
+    const result = await coll.deleteMany({ _id: { $in: duplicateIds } });
+    deletedCount = result.deletedCount || 0;
+  }
+
+  return { targetId: survivor._id, deletedCount };
+}
+
 /**
  * Upsert resolved portal lines into the live Fee Management `studentfees` ledger.
  * This is what the fee portal UI uses (distinct from the CRM mirror collection).
@@ -511,8 +578,25 @@ export async function syncPortalLinesToStudentFees(db, params) {
   const docs = buildStudentFeeUpsertDocs(params);
   let upserted = 0;
   let modified = 0;
+  let deduped = 0;
 
   for (const row of docs) {
+    const cleanup = await cleanupDuplicateStudentFeeRowsForUpsert(coll, row);
+    deduped += cleanup.deletedCount;
+    if (cleanup.targetId) {
+      const result = await coll.updateOne(
+        { _id: cleanup.targetId },
+        {
+          $set: row.update,
+          $setOnInsert: { createdAt: row.update.updatedAt },
+        },
+        { upsert: true }
+      );
+      upserted += result.upsertedCount || 0;
+      modified += result.modifiedCount || 0;
+      continue;
+    }
+
     const result = await coll.updateOne(
       row.filter,
       {
@@ -533,6 +617,7 @@ export async function syncPortalLinesToStudentFees(db, params) {
     rowCount: docs.length,
     upserted,
     modified,
+    deduped,
   };
 }
 
@@ -548,15 +633,25 @@ const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => 
     merged.set(String(row._id), row);
   }
 
-  return [...merged.values()].map((row) => {
+  const lines = [...merged.values()].map((row) => {
     const structureId = String(row._id);
     const override = overrideMap.get(structureId);
     const actualAmount = Number(row.amount) || 0;
-    const revisedAmount =
+    const overrideAmount =
       override?.amount !== undefined &&
       override?.amount !== null &&
       Number.isFinite(Number(override.amount))
         ? Number(override.amount)
+        : null;
+    const concessionType =
+      override?.concessionType === 'CONCESSION' || override?.concessionType === 'REVISED_FEE'
+        ? override.concessionType
+        : undefined;
+    const revisedAmount =
+      overrideAmount !== null
+        ? concessionType === 'CONCESSION'
+          ? Math.max(actualAmount - overrideAmount, 0)
+          : overrideAmount
         : actualAmount;
 
     return {
@@ -567,11 +662,47 @@ const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => 
       studentYear: row.studentYear ?? null,
       actualAmount,
       revisedAmount,
-      isRevised: revisedAmount !== actualAmount,
+      isRevised: revisedAmount !== actualAmount || Boolean(concessionType),
+      concessionType,
       remarks: typeof override?.remarks === 'string' ? override.remarks.trim() : '',
       accommodationType: row.accommodationType || null,
     };
   });
+
+  for (const [structureId, override] of overrideMap.entries()) {
+    if (!merged.has(structureId)) {
+      const feeHeadId = override.feeHeadId || null;
+      const feeHeadCode = override.feeHeadCode || '';
+      const feeHeadName = override.feeHeadName || '';
+      const studentYear = override.studentYear != null ? Number(override.studentYear) : null;
+      const actualAmount = 0;
+      const overrideAmount = Number(override.amount) || 0;
+      const concessionType =
+        override?.concessionType === 'CONCESSION' || override?.concessionType === 'REVISED_FEE'
+          ? override.concessionType
+          : undefined;
+      const revisedAmount = concessionType === 'CONCESSION' ? 0 : overrideAmount;
+      if (revisedAmount <= 0) {
+        continue;
+      }
+
+      lines.push({
+        structureId,
+        feeHeadId,
+        feeHeadCode,
+        feeHeadName,
+        studentYear,
+        actualAmount,
+        revisedAmount,
+        isRevised: true,
+        concessionType,
+        remarks: typeof override.remarks === 'string' ? override.remarks.trim() : '',
+        accommodationType: null,
+      });
+    }
+  }
+
+  return lines;
 };
 
 /**
@@ -711,7 +842,7 @@ export async function buildJoiningStepFourSyncPlan({
     lines: portalLines,
     feePortal: feePortalDoc,
     studentFees: previewJoiningStudentFeesSync({
-      portalLines,
+      portalLines: buildPortalLines(catalogRows, accommodationRows, null),
       joiningContext,
       transportDetails,
       batch,
@@ -835,7 +966,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     }
 
     studentFeesResult = await syncPortalLinesToStudentFees(db, {
-      portalLines,
+      portalLines: buildPortalLines(catalogRows, accommodationRows, null),
       joiningContext,
       transportDetails,
       batch,

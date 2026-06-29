@@ -1,7 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import { getPool } from '../config-sql/database.js';
+import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
-import { syncJoiningStudentFeeDetailsToFeeMongo } from '../services/joiningStudentFeeMongoSync.service.js';
+import {
+  syncJoiningStudentFeeDetailsToFeeMongo,
+  buildJoiningStepFourSyncPlan,
+} from '../services/joiningStudentFeeMongoSync.service.js';
 import { normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 import { deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
 import {
@@ -26,7 +30,21 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
         if (Number.isFinite(n) && n >= 0) amount = n;
       }
       const remarks = typeof line?.remarks === 'string' ? line.remarks.trim().slice(0, 2000) : '';
-      return { structureId, amount, remarks };
+      
+      const feeHeadId = line?.feeHeadId ? String(line.feeHeadId).trim() : undefined;
+      const feeHeadCode = line?.feeHeadCode ? String(line.feeHeadCode).trim() : undefined;
+      const feeHeadName = line?.feeHeadName ? String(line.feeHeadName).trim() : undefined;
+      const studentYear = line?.studentYear != null ? Number(line.studentYear) : undefined;
+
+      return {
+        structureId,
+        amount,
+        remarks,
+        ...(feeHeadId ? { feeHeadId } : {}),
+        ...(feeHeadCode ? { feeHeadCode } : {}),
+        ...(feeHeadName ? { feeHeadName } : {}),
+        ...(studentYear != null && !Number.isNaN(studentYear) ? { studentYear } : {}),
+      };
     })
     .filter(Boolean);
   if (lines.length === 0 && !batch) return null;
@@ -308,7 +326,7 @@ export const submitFeeRequest = async (req, res) => {
       registrationExtras,
       admissionNumber
     );
-    const syncResult = await syncJoiningStudentFeeDetailsToFeeMongo({
+    const syncResult = await buildJoiningStepFourSyncPlan({
       joiningId,
       leadId: joining.lead_id,
       studentFeeDetails,
@@ -494,6 +512,67 @@ export const approveFeeRequest = async (req, res) => {
        WHERE id = ?`,
       [req.user.id, reviewerNote || null, id]
     );
+
+    // Sync approved concessions to secondary database overall_concessions table
+    try {
+      const secondaryPool = getSecondaryPool();
+      
+      const [studentRows] = await secondaryPool.execute(
+        'SELECT pin_no, student_name, batch, course, branch FROM students WHERE admission_number = ? LIMIT 1',
+        [request.admission_number]
+      );
+      
+      const pinNo = studentRows[0]?.pin_no || request.admission_number || '';
+      const studentName = studentRows[0]?.student_name || request.student_name || '';
+      const batch = studentRows[0]?.batch || request.batch || '';
+      const course = studentRows[0]?.course || request.course || '';
+      const branch = studentRows[0]?.branch || request.branch || '';
+      
+      const requestLines = typeof request.request_lines === 'string'
+        ? JSON.parse(request.request_lines)
+        : request.request_lines || [];
+        
+      const revisedFees = requestLines.map((line) => {
+        const revisedAmount = Number(line.revisedAmount) || 0;
+        const actualAmount = Number(line.actualAmount) || 0;
+        const concessionType = revisedAmount < actualAmount ? 'CONCESSION' : 'REVISED';
+        return {
+          semester: null,
+          feeHeadId: line.feeHeadId || null,
+          feeHeadCode: line.feeHeadCode || '',
+          studentYear: Number(line.studentYear) || 1,
+          revisedAmount,
+          concessionType,
+        };
+      });
+
+      await secondaryPool.execute(
+        `INSERT INTO overall_concessions 
+          (admission_number, pin_no, student_name, batch, course, branch, revised_fees, created_at, updated_at)
+         VALUES 
+          (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+         ON DUPLICATE KEY UPDATE
+          pin_no = VALUES(pin_no),
+          student_name = VALUES(student_name),
+          batch = VALUES(batch),
+          course = VALUES(course),
+          branch = VALUES(branch),
+          revised_fees = VALUES(revised_fees),
+          updated_at = NOW()`,
+        [
+          request.admission_number,
+          pinNo,
+          studentName,
+          batch,
+          course,
+          branch,
+          JSON.stringify(revisedFees)
+        ]
+      );
+      console.log(`Synced concessions for ${request.admission_number} to secondary overall_concessions`);
+    } catch (secErr) {
+      console.error('Failed to sync concessions to secondary database overall_concessions:', secErr);
+    }
 
     const [updated] = await pool.execute('SELECT * FROM fee_requests WHERE id = ?', [id]);
     return successResponse(res, formatFeeRequestRow(updated[0]), 'Fee request approved', 200);

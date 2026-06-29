@@ -133,6 +133,24 @@ const formatStructure = (doc) => ({
   updatedAt: doc.updatedAt || null,
 });
 
+const firstNonEmpty = (...values) => {
+  for (const value of values) {
+    const normalized = normalize(value);
+    if (normalized) return normalized;
+  }
+  return '';
+};
+
+const formatFeeHead = (doc) => ({
+  _id: String(doc._id),
+  id: String(doc._id),
+  name: firstNonEmpty(doc.name, doc.feeHeadName, doc.headName, doc.title, doc.label),
+  code: firstNonEmpty(doc.code, doc.feeHeadCode, doc.headCode, doc.shortCode),
+  description: firstNonEmpty(doc.description, doc.feeHeadDescription, doc.headDescription),
+  createdAt: doc.createdAt || null,
+  updatedAt: doc.updatedAt || null,
+});
+
 /**
  * GET /api/fee-structures
  * Filters: course, branch, category (or quota), batch, studentYear, college
@@ -187,6 +205,30 @@ export const listFeeStructures = async (req, res) => {
   } catch (error) {
     console.error('listFeeStructures error:', error);
     return errorResponse(res, error.message || 'Failed to fetch fee structures', 500);
+  }
+};
+
+/** GET /api/fee-structures/fee-heads — all fee head master rows from Fee Management. */
+export const listFeeHeads = async (_req, res) => {
+  try {
+    const conn = await getActiveConnection();
+    const db = conn.db;
+    const docs = await db
+      .collection('feeheads')
+      .find({})
+      .sort({ code: 1, feeHeadCode: 1, name: 1, feeHeadName: 1 })
+      .toArray();
+
+    const payload = docs
+      .map(formatFeeHead)
+      .filter((head) => head.id && (head.name || head.code));
+    return successResponse(res, {
+      data: payload,
+      total: payload.length,
+    });
+  } catch (error) {
+    console.error('listFeeHeads error:', error);
+    return errorResponse(res, error.message || 'Failed to fetch fee heads', 500);
   }
 };
 

@@ -1,9 +1,18 @@
+/**
+ * Seed a Super Admin user if none exists.
+ *
+ * Usage (from backend-admission):
+ *   node src/scripts-sql/seedSuperAdmin.js
+ */
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getPool, closeDB } from '../config-sql/database.js';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const seedSuperAdmin = async () => {
   let pool;
@@ -18,7 +27,7 @@ const seedSuperAdmin = async () => {
       ['admin@leadtracker.com']
     );
 
-    let seedEmail = 'admin@leadtracker.com';
+    let seedEmail = 'superadmin';
     let seedName = 'Super Admin';
 
     if (primaryAdmin.length > 0) {
@@ -42,7 +51,7 @@ const seedSuperAdmin = async () => {
 
     // Hash password
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash('Admin@123', salt);
+    const hashedPassword = await bcrypt.hash('superadmin123', salt);
 
     // Generate UUID for user
     const userId = uuidv4();
@@ -56,7 +65,7 @@ const seedSuperAdmin = async () => {
 
     console.log(`${seedName} created successfully!`);
     console.log(`Email: ${seedEmail}`);
-    console.log('Password: Admin@123');
+    console.log('Password: superadmin123');
     // console.log('Email: admin@leadtracker.com');
     // console.log('Password: Admin@123');
     console.log('⚠️  Please change the password after first login!');
