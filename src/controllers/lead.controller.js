@@ -1372,6 +1372,7 @@ export const updateLead = async (req, res) => {
       isStudentCounselor &&
       assignedAsCounsellor &&
       currentLead.assigned_to_pro &&
+      !isCallStatusConfirmedValue(currentLead.visit_status) &&
       (
         callStatus !== undefined ||
         notes !== undefined ||
@@ -1451,7 +1452,9 @@ export const updateLead = async (req, res) => {
 
     const callMarkedConfirmed =
       callStatus !== undefined && isCallStatusConfirmedValue(nextCall);
-    if (callMarkedConfirmed) {
+    const visitMarkedConfirmed =
+      visitStatus !== undefined && isCallStatusConfirmedValue(nextVisit);
+    if (callMarkedConfirmed || visitMarkedConfirmed) {
       await applyReference1OnCallStatusConfirm(
         pool,
         currentLead,

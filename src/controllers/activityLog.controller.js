@@ -209,6 +209,7 @@ export const addActivity = async (req, res) => {
       isStudentCounselor &&
       lead.assigned_to === userId &&
       lead.assigned_to_pro &&
+      !isCallStatusConfirmedValue(lead.visit_status) &&
       !updateFields.some((f) => String(f).startsWith('visit_status')) &&
       (leadModified || (comment && comment.trim()))
     ) {
@@ -222,7 +223,10 @@ export const addActivity = async (req, res) => {
       const callMarkedConfirmed =
         metadata.statusChannel === 'call_status' &&
         isCallStatusConfirmedValue(metadata.callStatus ?? newStatus);
-      if (callMarkedConfirmed) {
+      const visitMarkedConfirmed =
+        metadata.statusChannel === 'visit_status' &&
+        isCallStatusConfirmedValue(metadata.visitStatus ?? newStatus);
+      if (callMarkedConfirmed || visitMarkedConfirmed) {
         await applyReference1OnCallStatusConfirm(pool, lead, updateFields, updateValues, null, userId);
       }
       updateFields.push('updated_at = NOW()');

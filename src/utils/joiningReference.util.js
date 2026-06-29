@@ -2,13 +2,17 @@ import { v4 as uuidv4 } from 'uuid';
 import { isSelfRegistrationLead } from './joiningSelfRegistration.util.js';
 
 /**
- * Reference 1 mirrors the staff member who last marked call_status as Confirmed.
+ * Reference 1 mirrors the staff member who most recently marked either
+ * counsellor call_status or PRO visit_status as Confirmed.
  * Stored at lead_data.reference1, dynamic_fields.reference1 (leads), and admission records.
  */
 
-/** Activity log row where call_status was set to Confirmed (metadata.callStatus). */
-const CALL_STATUS_CONFIRMED_SQL = `
-  LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.callStatus')), ''))) = 'confirmed'
+/** Activity log row where call_status or visit_status was set to Confirmed. */
+const CHANNEL_STATUS_CONFIRMED_SQL = `
+  (
+    LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.callStatus')), ''))) = 'confirmed'
+    OR LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitStatus')), ''))) = 'confirmed'
+  )
 `;
 
 export const isCallStatusConfirmedValue = (value) =>
@@ -19,8 +23,8 @@ export const readReference1FromDynamicFields = (dynamicFields) => {
   return String(dynamicFields.reference1 ?? '').trim();
 };
 
-/** Last user who marked call_status as Confirmed (from activity_logs). */
-export async function fetchLastCallStatusConfirmedByUserName(pool, leadId) {
+/** Last user who marked call_status or visit_status as Confirmed (from activity_logs). */
+export async function fetchLastConfirmedStatusByUserName(pool, leadId) {
   if (!leadId || typeof leadId !== 'string') return '';
 
   const [rows] = await pool.execute(
@@ -29,7 +33,7 @@ export async function fetchLastCallStatusConfirmedByUserName(pool, leadId) {
      INNER JOIN users u ON u.id = a.performed_by
      WHERE a.lead_id = ?
        AND a.type = 'status_change'
-       AND (${CALL_STATUS_CONFIRMED_SQL})
+       AND (${CHANNEL_STATUS_CONFIRMED_SQL})
      ORDER BY a.created_at DESC
      LIMIT 1`,
     [leadId]
@@ -38,11 +42,23 @@ export async function fetchLastCallStatusConfirmedByUserName(pool, leadId) {
   return String(rows[0]?.confirmer_name ?? '').trim();
 }
 
-/** Resolve reference1 from stored fields, optional override, or call-status confirmer log. */
+/** @deprecated Use fetchLastConfirmedStatusByUserName. */
+export const fetchLastCallStatusConfirmedByUserName = fetchLastConfirmedStatusByUserName;
+
+/** Resolve reference1 from latest confirmed status, optional override, then stored fields. */
 export async function resolveReference1ForLead(pool, leadOrSnapshot, options = {}) {
   const { confirmerNameOverride = '', skipReferenceResolution = false } = options;
   if (skipReferenceResolution || isSelfRegistrationLead(leadOrSnapshot)) return '';
   if (!leadOrSnapshot || typeof leadOrSnapshot !== 'object') return '';
+
+  const override = String(confirmerNameOverride ?? '').trim();
+  if (override) return override;
+
+  const leadId = String(leadOrSnapshot.id ?? leadOrSnapshot._id ?? '').trim();
+  if (leadId && pool) {
+    const latestConfirmedBy = await fetchLastConfirmedStatusByUserName(pool, leadId);
+    if (latestConfirmedBy) return latestConfirmedBy;
+  }
 
   const dyn = leadOrSnapshot.dynamicFields ?? leadOrSnapshot.dynamic_fields;
   const fromDyn = readReference1FromDynamicFields(dyn);
@@ -50,14 +66,6 @@ export async function resolveReference1ForLead(pool, leadOrSnapshot, options = {
 
   const fromSnap = String(leadOrSnapshot.reference1 ?? '').trim();
   if (fromSnap) return fromSnap;
-
-  const override = String(confirmerNameOverride ?? '').trim();
-  if (override) return override;
-
-  const leadId = String(leadOrSnapshot.id ?? leadOrSnapshot._id ?? '').trim();
-  if (leadId && pool) {
-    return fetchLastCallStatusConfirmedByUserName(pool, leadId);
-  }
 
   return '';
 }
@@ -84,7 +92,7 @@ export const applyReference1ToSnapshot = (snapshot, reference1) => {
   return snapshot;
 };
 
-/** Lead snapshot for joinings — ensures reference1 is set from call-status confirmer when missing. */
+/** Lead snapshot for joinings — ensures reference1 follows latest confirmed call/visit status. */
 export async function buildJoiningLeadDataSnapshot(pool, lead, options = {}) {
   const snapshot = { ...(lead || {}) };
   delete snapshot._id;
@@ -103,7 +111,7 @@ export async function buildJoiningLeadDataSnapshot(pool, lead, options = {}) {
 }
 
 /**
- * When call_status is marked Confirmed, persist the acting user as reference1 if not already set.
+ * When call_status/visit_status is marked Confirmed, persist the acting user as reference1.
  * Mutates parallel updateFields / updateValues arrays used by lead update handlers.
  */
 export async function applyReference1OnCallStatusConfirm(
@@ -134,8 +142,6 @@ export async function applyReference1OnCallStatusConfirm(
       /* ignore malformed queued JSON */
     }
   }
-
-  if (readReference1FromDynamicFields(dyn)) return;
 
   const actorId = confirmerUserId || null;
   if (!actorId) return;
