@@ -6,6 +6,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { createOrder as cashfreeCreateOrder, getOrder as cashfreeGetOrder } from '../services/cashfree.service.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+import { normalizeOverallConcessionLinesForStorage } from '../utils/overallConcessions.util.js';
 
 const resolveConfiguredFee = async (courseId, branchId) => {
   if (!courseId) return 0;
@@ -261,6 +262,10 @@ export const getOverallConcessions = async (req, res) => {
       revisedFees = [];
     }
 
+    const normalizedRevisedFees = normalizeOverallConcessionLinesForStorage(
+      Array.isArray(revisedFees) ? revisedFees : []
+    );
+
     return successResponse(res, {
       admissionNumber: row.admission_number,
       pinNo: row.pin_no || '',
@@ -268,7 +273,7 @@ export const getOverallConcessions = async (req, res) => {
       batch: row.batch || '',
       course: row.course || '',
       branch: row.branch || '',
-      revisedFees: Array.isArray(revisedFees) ? revisedFees : [],
+      revisedFees: normalizedRevisedFees,
       updatedAt: row.updated_at || null,
     });
   } catch (error) {

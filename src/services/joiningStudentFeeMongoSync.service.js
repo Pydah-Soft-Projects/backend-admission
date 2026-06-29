@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
 import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import { deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
+import { resolveFeePortalBranchLabel } from '../utils/feePortalBranchLabel.util.js';
 import { resolveTransportAcademicYear, normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
 import {
   previewJoiningBusSync,
@@ -240,15 +241,23 @@ const enrichWithFeeHead = async (db, structures) => {
   });
 };
 
-const loadCatalogFeeStructures = async (db, { course, branch, quota, batch, intakeBatch, admissionNumber }) => {
+const loadCatalogFeeStructures = async (
+  db,
+  { course, branch, quota, batch, intakeBatch, admissionNumber, managedBranchId = null }
+) => {
   const catalogCourse = resolveFeePortalCourse(course);
+  const feePortalBranch = await resolveFeePortalBranchLabel({
+    branchLabel: branch,
+    courseLabel: catalogCourse || course,
+    managedBranchId,
+  });
   const category = mapQuotaToCategory(quota);
   const requestedBatch = resolveRequestedFeeBatch({ batch, intakeBatch, admissionNumber });
 
   const buildFilter = (batchVal) => {
     const filter = {};
     if (catalogCourse) filter.course = exactIRegex(catalogCourse);
-    if (branch) filter.branch = exactIRegex(branch);
+    if (feePortalBranch) filter.branch = exactIRegex(feePortalBranch);
     if (category) filter.category = category;
     if (batchVal) filter.batch = exactIRegex(batchVal);
     return filter;
@@ -285,7 +294,8 @@ const loadCatalogFeeStructures = async (db, { course, branch, quota, batch, inta
     rows,
     catalogLookup: {
       course: normalize(catalogCourse || course),
-      branch: normalize(branch),
+      branch: normalize(feePortalBranch || branch),
+      branchInput: normalize(branch),
       quota: normalize(quota),
       categoryMapped: category,
       requestedBatch,
@@ -621,6 +631,12 @@ export async function syncPortalLinesToStudentFees(db, params) {
   };
 }
 
+const readPositiveOverrideAmount = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
 const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => {
   const overrideMap = new Map();
   for (const line of studentFeeDetails?.lines || []) {
@@ -640,11 +656,14 @@ const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => 
     const overrideAmount =
       override?.amount !== undefined &&
       override?.amount !== null &&
-      Number.isFinite(Number(override.amount))
+      override?.amount !== '' &&
+      Number.isFinite(Number(override.amount)) &&
+      Number(override.amount) > 0
         ? Number(override.amount)
         : null;
     const concessionType =
-      override?.concessionType === 'CONCESSION' || override?.concessionType === 'REVISED_FEE'
+      overrideAmount !== null &&
+      (override?.concessionType === 'CONCESSION' || override?.concessionType === 'REVISED_FEE')
         ? override.concessionType
         : undefined;
     const revisedAmount =
@@ -662,7 +681,9 @@ const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => 
       studentYear: row.studentYear ?? null,
       actualAmount,
       revisedAmount,
-      isRevised: revisedAmount !== actualAmount || Boolean(concessionType),
+      isRevised:
+        overrideAmount !== null &&
+        (revisedAmount !== actualAmount || Boolean(concessionType)),
       concessionType,
       remarks: typeof override?.remarks === 'string' ? override.remarks.trim() : '',
       accommodationType: row.accommodationType || null,
@@ -676,15 +697,15 @@ const buildPortalLines = (catalogRows, accommodationRows, studentFeeDetails) => 
       const feeHeadName = override.feeHeadName || '';
       const studentYear = override.studentYear != null ? Number(override.studentYear) : null;
       const actualAmount = 0;
-      const overrideAmount = Number(override.amount) || 0;
+      const overrideAmount = readPositiveOverrideAmount(override?.amount);
       const concessionType =
         override?.concessionType === 'CONCESSION' || override?.concessionType === 'REVISED_FEE'
           ? override.concessionType
           : undefined;
-      const revisedAmount = concessionType === 'CONCESSION' ? 0 : overrideAmount;
-      if (revisedAmount <= 0) {
+      if (!overrideAmount || !concessionType) {
         continue;
       }
+      const revisedAmount = concessionType === 'CONCESSION' ? 0 : overrideAmount;
 
       lines.push({
         structureId,
@@ -762,6 +783,7 @@ export async function buildJoiningStepFourSyncPlan({
     batch: batch || '',
     intakeBatch: joiningContext?.intakeBatch || '',
     admissionNumber: joiningContext?.admissionNumber || '',
+    managedBranchId: joiningContext?.managedBranchId || null,
   });
   const catalogRows = catalogResult.rows;
   const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
@@ -841,14 +863,11 @@ export async function buildJoiningStepFourSyncPlan({
     revisedLineCount,
     lines: portalLines,
     feePortal: feePortalDoc,
-    studentFees: previewJoiningStudentFeesSync({
-      portalLines: buildPortalLines(catalogRows, accommodationRows, null),
-      joiningContext,
-      transportDetails,
-      batch,
-      resolvedBatch,
-      catalogRows,
-    }),
+    studentFees: {
+      skipped: true,
+      reason: 'Standard student fee assignment is handled by Fee Management /api/sync/student-fees after SQL student sync',
+      admissionNumber: joiningContext?.admissionNumber || '',
+    },
     transport: previewJoiningBusSync({ joiningId, leadId, joiningContext, portalLines }),
     hostel: previewJoiningHostelSync({ joiningId, leadId, joiningContext, portalLines }),
   };
@@ -905,6 +924,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
       batch: batch || '',
       intakeBatch: joiningContext?.intakeBatch || '',
       admissionNumber: joiningContext?.admissionNumber || '',
+      managedBranchId: joiningContext?.managedBranchId || null,
     });
     const catalogRows = catalogResult.rows;
     const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
@@ -965,14 +985,11 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
       );
     }
 
-    studentFeesResult = await syncPortalLinesToStudentFees(db, {
-      portalLines: buildPortalLines(catalogRows, accommodationRows, null),
-      joiningContext,
-      transportDetails,
-      batch,
-      resolvedBatch,
-      catalogRows,
-    });
+    studentFeesResult = {
+      skipped: true,
+      reason: 'Standard student fee assignment is handled by Fee Management /api/sync/student-fees after SQL student sync',
+      admissionNumber: joiningContext?.admissionNumber || '',
+    };
   } catch (err) {
     console.error(
       '[joiningStudentFeeMongoSync] Fee Mongo mirror failed (SQL save still succeeded):',

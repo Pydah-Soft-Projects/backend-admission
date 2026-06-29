@@ -32,6 +32,10 @@ import {
   readReference1FromDynamicFields,
 } from '../utils/joiningReference.util.js';
 import {
+  buildOverallConcessionLinesFromBuilder,
+  isPersistableBuilderConcessionLine,
+} from '../utils/overallConcessions.util.js';
+import {
   SELF_REGISTRATION_ROUTE_KEY,
   SELF_REGISTRATION_SOURCE,
   SQL_JOINING_IS_SELF_REGISTRATION,
@@ -111,7 +115,7 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
       const feeHeadName = line?.feeHeadName ? String(line.feeHeadName).trim() : undefined;
       const studentYear = line?.studentYear != null ? Number(line.studentYear) : undefined;
 
-      return {
+      const row = {
         structureId,
         amount,
         remarks,
@@ -121,6 +125,7 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
         ...(feeHeadName ? { feeHeadName } : {}),
         ...(studentYear != null && !Number.isNaN(studentYear) ? { studentYear } : {}),
       };
+      return isPersistableBuilderConcessionLine(row) ? row : null;
     })
     .filter(Boolean);
   if (lines.length === 0 && !batch) return null;
@@ -205,6 +210,11 @@ const buildJoiningFeeSyncContext = (
       joiningRow?.managed_course_id ??
       registrationExtras?.managed_course_id ??
       registrationExtras?.managedCourseId ??
+      null,
+    managedBranchId:
+      joiningRow?.managed_branch_id ??
+      registrationExtras?.managed_branch_id ??
+      registrationExtras?.managedBranchId ??
       null,
     collegeId:
       registrationExtras?.college_id ??
@@ -299,7 +309,6 @@ const runJoiningFeePortalSync = async ({
     admissionNumber,
     joiningRow,
     studentFeeDetails,
-    portalLines: feeSyncResult?.lines || [],
   });
 };
 
@@ -307,44 +316,12 @@ const syncDirectConcessionsToSecondaryOverall = async ({
   admissionNumber,
   joiningRow,
   studentFeeDetails,
-  portalLines = [],
 }) => {
   const safeAdmissionNumber = normalizeAdmissionNumberCandidate(admissionNumber);
   if (!safeAdmissionNumber) return;
 
-  const sourceLines = Array.isArray(portalLines) && portalLines.length > 0
-    ? portalLines
-    : Array.isArray(studentFeeDetails?.lines)
-      ? studentFeeDetails.lines
-      : [];
-  const revisedFees = sourceLines
-    .filter((line) => line?.concessionType === 'CONCESSION' || line?.concessionType === 'REVISED_FEE')
-    .map((line) => {
-      const actualAmount = Number(line.actualAmount) || 0;
-      const rawAmount = Number(line.amount) || 0;
-      const revisedAmount =
-        line.revisedAmount !== undefined && line.revisedAmount !== null
-          ? Number(line.revisedAmount) || 0
-          : line.concessionType === 'CONCESSION'
-            ? Math.max(actualAmount - rawAmount, 0)
-            : rawAmount;
-      if (revisedAmount <= 0) return null;
-      const concessionAmount =
-        line.concessionType === 'CONCESSION'
-          ? Math.max(actualAmount - revisedAmount, 0)
-          : 0;
-      return {
-        semester: null,
-        feeHeadId: line.feeHeadId || null,
-        feeHeadCode: line.feeHeadCode || '',
-        studentYear: Number(line.studentYear) || 1,
-        actualAmount,
-        revisedAmount,
-        concessionAmount,
-        concessionType: line.concessionType === 'CONCESSION' ? 'CONCESSION' : 'REVISED',
-      };
-    })
-    .filter(Boolean);
+  const sanitizedFeeDetails = sanitizeStudentFeeDetailsForDb(studentFeeDetails);
+  const revisedFees = buildOverallConcessionLinesFromBuilder(sanitizedFeeDetails || { lines: [] });
 
   try {
     const secondaryPool = getSecondaryPool();

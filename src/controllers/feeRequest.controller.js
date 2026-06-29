@@ -12,6 +12,11 @@ import {
   canApproveFeeRequest,
   canSubmitFeeRequest,
 } from '../utils/joiningPermissions.util.js';
+import {
+  buildOverallConcessionLinesFromBuilder,
+  buildOverallConcessionLinesFromPortalLines,
+  isPersistableBuilderConcessionLine,
+} from '../utils/overallConcessions.util.js';
 
 const sanitizeStudentFeeDetailsForDb = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
@@ -30,21 +35,28 @@ const sanitizeStudentFeeDetailsForDb = (raw) => {
         if (Number.isFinite(n) && n >= 0) amount = n;
       }
       const remarks = typeof line?.remarks === 'string' ? line.remarks.trim().slice(0, 2000) : '';
-      
+      const rawConcessionType = String(line?.concessionType || '').trim().toUpperCase();
+      const concessionType =
+        rawConcessionType === 'CONCESSION' || rawConcessionType === 'REVISED_FEE'
+          ? rawConcessionType
+          : undefined;
+
       const feeHeadId = line?.feeHeadId ? String(line.feeHeadId).trim() : undefined;
       const feeHeadCode = line?.feeHeadCode ? String(line.feeHeadCode).trim() : undefined;
       const feeHeadName = line?.feeHeadName ? String(line.feeHeadName).trim() : undefined;
       const studentYear = line?.studentYear != null ? Number(line.studentYear) : undefined;
 
-      return {
+      const row = {
         structureId,
         amount,
         remarks,
+        ...(concessionType ? { concessionType } : {}),
         ...(feeHeadId ? { feeHeadId } : {}),
         ...(feeHeadCode ? { feeHeadCode } : {}),
         ...(feeHeadName ? { feeHeadName } : {}),
         ...(studentYear != null && !Number.isNaN(studentYear) ? { studentYear } : {}),
       };
+      return isPersistableBuilderConcessionLine(row) ? row : null;
     })
     .filter(Boolean);
   if (lines.length === 0 && !batch) return null;
@@ -531,20 +543,25 @@ export const approveFeeRequest = async (req, res) => {
       const requestLines = typeof request.request_lines === 'string'
         ? JSON.parse(request.request_lines)
         : request.request_lines || [];
-        
-      const revisedFees = requestLines.map((line) => {
-        const revisedAmount = Number(line.revisedAmount) || 0;
-        const actualAmount = Number(line.actualAmount) || 0;
-        const concessionType = revisedAmount < actualAmount ? 'CONCESSION' : 'REVISED';
-        return {
-          semester: null,
-          feeHeadId: line.feeHeadId || null,
-          feeHeadCode: line.feeHeadCode || '',
-          studentYear: Number(line.studentYear) || 1,
-          revisedAmount,
-          concessionType,
-        };
-      });
+
+      let studentFeeDetails = null;
+      try {
+        studentFeeDetails =
+          typeof request.student_fee_details === 'string'
+            ? JSON.parse(request.student_fee_details || 'null')
+            : request.student_fee_details || null;
+      } catch {
+        studentFeeDetails = null;
+      }
+      studentFeeDetails = sanitizeStudentFeeDetailsForDb(studentFeeDetails);
+
+      const revisedFeesFromBuilder = buildOverallConcessionLinesFromBuilder(
+        studentFeeDetails || { lines: [] }
+      );
+      const revisedFees =
+        revisedFeesFromBuilder.length > 0
+          ? revisedFeesFromBuilder
+          : buildOverallConcessionLinesFromPortalLines(requestLines);
 
       await secondaryPool.execute(
         `INSERT INTO overall_concessions 

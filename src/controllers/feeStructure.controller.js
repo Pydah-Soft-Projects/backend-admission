@@ -3,6 +3,8 @@ import {
   connectFeeManagement,
   getFeeManagementConnection,
 } from '../config-mongo/feeManagement.js';
+import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
+import { resolveFeePortalBranchLabel } from '../utils/feePortalBranchLabel.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 
 const { Types: { ObjectId } } = mongoose;
@@ -163,7 +165,13 @@ export const listFeeStructures = async (req, res) => {
     const query = {};
 
     const courseRaw = normalize(req.query.course);
-    const branchRaw = normalize(req.query.branch);
+    const branchRawInput = normalize(req.query.branch);
+    const branchRaw = branchRawInput
+      ? await resolveFeePortalBranchLabel({
+          branchLabel: branchRawInput,
+          courseLabel: mapCourseLabel(courseRaw || ''),
+        })
+      : '';
     const collegeRaw = normalize(req.query.college);
     const batchRaw = normalize(req.query.batch);
     const studentYearRaw = normalize(req.query.studentYear);
@@ -172,7 +180,7 @@ export const listFeeStructures = async (req, res) => {
       categoryRaw = mapQuotaToCategory(req.query.quota);
     }
 
-    if (courseRaw) query.course = exactIRegex(courseRaw);
+    if (courseRaw) query.course = exactIRegex(mapCourseLabel(courseRaw));
     if (branchRaw) query.branch = exactIRegex(branchRaw);
     if (collegeRaw) query.college = exactIRegex(collegeRaw);
     if (batchRaw) query.batch = String(batchRaw);
@@ -195,6 +203,7 @@ export const listFeeStructures = async (req, res) => {
       filters: {
         course: courseRaw || null,
         branch: branchRaw || null,
+        branchInput: branchRawInput || null,
         college: collegeRaw || null,
         batch: batchRaw || null,
         category: categoryRaw || null,

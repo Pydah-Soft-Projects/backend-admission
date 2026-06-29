@@ -26,6 +26,7 @@ import {
   revokeStudentRollNumber,
   resolveBranchScope,
 } from './studentRollNumber.util.js';
+import { syncStudentFeesToFeeManagement } from '../services/feeManagementStudentFeeSync.service.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -972,7 +973,14 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       }
     }
 
-    return { ok: true, ...credentialResult, rollNumber: rollNumberResult?.roll_number ?? null };
+    const feeManagementStudentFeeSync = await syncStudentFeesToFeeManagement(resolvedAdmissionNumber);
+
+    return {
+      ok: true,
+      ...credentialResult,
+      rollNumber: rollNumberResult?.roll_number ?? null,
+      feeManagementStudentFeeSync,
+    };
   } catch (error) {
     console.error('Secondary DB sync failed:', error);
     return { ok: false };
