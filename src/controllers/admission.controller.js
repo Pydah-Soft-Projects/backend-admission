@@ -1529,6 +1529,65 @@ const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
   }
 };
 
+/**
+ * Index-friendly admission list search. Uses EXISTS on leads instead of JOIN + JSON_EXTRACT
+ * (the previous pattern caused ER_OUT_OF_SORTMEMORY on large admission tables).
+ * @returns {boolean} whether a search predicate was added
+ */
+const appendAdmissionListSearchCondition = (conditions, params, rawSearch) => {
+  const t = String(rawSearch || '').trim();
+  if (!t) return false;
+
+  const isEnq = t.toUpperCase().startsWith('ENQ');
+  const isPhone = /^\d{5,}$/.test(t);
+
+  if (isEnq) {
+    const enqPattern = `${t}%`;
+    conditions.push(`(
+      COALESCE(a.enquiry_number, '') LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM leads l WHERE l.id = a.lead_id AND l.enquiry_number LIKE ?
+      )
+    )`);
+    params.push(enqPattern, enqPattern);
+    return true;
+  }
+
+  if (isPhone) {
+    const phonePattern = `${t}%`;
+    conditions.push(`(
+      a.student_phone LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM leads l
+        WHERE l.id = a.lead_id AND (l.phone LIKE ? OR l.father_phone LIKE ?)
+      )
+    )`);
+    params.push(phonePattern, phonePattern, phonePattern);
+    return true;
+  }
+
+  if (t.length < 2) return false;
+
+  const like = `%${t}%`;
+  conditions.push(`(
+    a.admission_number LIKE ?
+    OR a.student_name LIKE ?
+    OR COALESCE(a.enquiry_number, '') LIKE ?
+    OR EXISTS (
+      SELECT 1 FROM leads l
+      WHERE l.id = a.lead_id AND (
+        l.name LIKE ?
+        OR l.enquiry_number LIKE ?
+        OR l.hall_ticket_number LIKE ?
+        OR l.phone LIKE ?
+        OR l.father_phone LIKE ?
+      )
+    )
+  )`);
+  params.push(like, like, like, like, like, like, like, like);
+  return true;
+};
+
 export const listAdmissions = async (req, res) => {
   try {
     const {
@@ -1595,29 +1654,14 @@ export const listAdmissions = async (req, res) => {
       params.push(String(endDate).slice(0, 10));
     }
 
-    // Search filtering
-    if (search) {
-      const searchPattern = `%${search}%`;
-      conditions.push(`(
-        a.admission_number LIKE ? OR
-        l.name LIKE ? OR l.phone LIKE ? OR l.hall_ticket_number LIKE ? OR l.enquiry_number LIKE ?
-        OR JSON_EXTRACT(a.lead_data, "$.name") LIKE ? OR JSON_EXTRACT(a.lead_data, "$.phone") LIKE ?
-        OR JSON_EXTRACT(a.lead_data, "$.hallTicketNumber") LIKE ? OR JSON_EXTRACT(a.lead_data, "$.enquiryNumber") LIKE ?
-        OR a.student_name LIKE ? OR a.student_phone LIKE ?
-      )`);
-      params.push(
-        searchPattern,
-        searchPattern, searchPattern, searchPattern, searchPattern,
-        searchPattern, searchPattern, searchPattern, searchPattern,
-        searchPattern, searchPattern
-      );
-    }
+    const hasSearch = appendAdmissionListSearchCondition(conditions, params, search);
 
-    const needsLeadJoin = Boolean(search);
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const fromClause = needsLeadJoin
-      ? 'FROM admissions a LEFT JOIN leads l ON a.lead_id = l.id'
-      : 'FROM admissions a';
+    const fromClause = 'FROM admissions a';
+
+    if (hasSearch) {
+      await pool.execute('SET SESSION sort_buffer_size = 4194304');
+    }
 
     // Get total count (brief cache — pagination/filter toggles hit this often).
     const total = await getAdmissionCachedCount(
@@ -3712,9 +3756,14 @@ export const exportAdmissions = async (req, res) => {
     }
 
     if (search) {
-      const searchTerm = `%${search.trim()}%`;
-      conditions.push('(a.student_name LIKE ? OR a.admission_number LIKE ? OR a.student_phone LIKE ?)');
-      params.push(searchTerm, searchTerm, searchTerm);
+      const t = String(search).trim();
+      const searchTerm = `%${t}%`;
+      const isPhone = /^\d{5,}$/.test(t);
+      const phoneTerm = isPhone ? `${t}%` : searchTerm;
+      conditions.push(
+        '(a.student_name LIKE ? OR a.admission_number LIKE ? OR COALESCE(a.enquiry_number, \'\') LIKE ? OR a.student_phone LIKE ?)'
+      );
+      params.push(searchTerm, searchTerm, searchTerm, phoneTerm);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
