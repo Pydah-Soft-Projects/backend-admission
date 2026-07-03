@@ -79,6 +79,14 @@ const buildJoiningFeeSyncContext = (joiningRow, leadData, studentFeeDetails, reg
     course: joiningRow?.course || '',
     branch: joiningRow?.branch || '',
     quota: joiningRow?.quota || '',
+    studentStatus:
+      String(
+        registrationExtras?.student_status ??
+        registrationExtras?.studentStatus ??
+        joiningRow?.student_status ??
+        joiningRow?.studentStatus ??
+        ''
+      ).trim(),
     batch:
       studentFeeDetails?.batch != null && String(studentFeeDetails.batch).trim() !== ''
         ? String(studentFeeDetails.batch).trim()

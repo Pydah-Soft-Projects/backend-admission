@@ -37,10 +37,22 @@ const QUOTA_TO_CATEGORY = {
 const normalize = (value) =>
   typeof value === 'string' ? value.trim() : value === undefined ? '' : String(value);
 
-/** Best-effort mapping from CRM `quota` to feestructures.category bucket. */
-const mapQuotaToCategory = (quota) => {
+const mapQuotaToCategory = (quota, studentStatus = null, batch = null) => {
   const key = normalize(quota).toLowerCase();
   if (!key) return '';
+
+  const cleanBatch = normalize(batch || '');
+  const isLateral = String(studentStatus || '').trim().toLowerCase() === 'lateral';
+
+  if (isLateral && cleanBatch === '2025') {
+    if (key === 'cq' || key.includes('conv') || key.includes('later')) {
+      return 'LATER';
+    }
+    if (key === 'spot' || key.includes('lspot')) {
+      return 'LSPOT';
+    }
+  }
+
   if (QUOTA_TO_CATEGORY[key]) return QUOTA_TO_CATEGORY[key];
   for (const [needle, bucket] of Object.entries(QUOTA_TO_CATEGORY)) {
     if (key.includes(needle)) return bucket;
@@ -175,9 +187,10 @@ export const listFeeStructures = async (req, res) => {
     const collegeRaw = normalize(req.query.college);
     const batchRaw = normalize(req.query.batch);
     const studentYearRaw = normalize(req.query.studentYear);
+    const studentStatusRaw = normalize(req.query.studentStatus);
     let categoryRaw = normalize(req.query.category);
     if (!categoryRaw && req.query.quota) {
-      categoryRaw = mapQuotaToCategory(req.query.quota);
+      categoryRaw = mapQuotaToCategory(req.query.quota, studentStatusRaw, batchRaw);
     }
 
     if (courseRaw) query.course = exactIRegex(mapCourseLabel(courseRaw));

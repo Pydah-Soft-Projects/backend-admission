@@ -119,9 +119,22 @@ const QUOTA_TO_CATEGORY = {
 const normalize = (value) =>
   typeof value === 'string' ? value.trim() : value === undefined ? '' : String(value);
 
-const mapQuotaToCategory = (quota) => {
+const mapQuotaToCategory = (quota, studentStatus = null, batch = null) => {
   const key = normalize(quota).toLowerCase();
   if (!key) return '';
+
+  const cleanBatch = normalize(batch || '');
+  const isLateral = String(studentStatus || '').trim().toLowerCase() === 'lateral';
+
+  if (isLateral && cleanBatch === '2025') {
+    if (key === 'cq' || key.includes('conv') || key.includes('later')) {
+      return 'LATER';
+    }
+    if (key === 'spot' || key.includes('lspot')) {
+      return 'LSPOT';
+    }
+  }
+
   if (QUOTA_TO_CATEGORY[key]) return QUOTA_TO_CATEGORY[key];
   for (const [needle, bucket] of Object.entries(QUOTA_TO_CATEGORY)) {
     if (key.includes(needle)) return bucket;
@@ -243,7 +256,7 @@ const enrichWithFeeHead = async (db, structures) => {
 
 const loadCatalogFeeStructures = async (
   db,
-  { course, branch, quota, batch, intakeBatch, admissionNumber, managedBranchId = null }
+  { course, branch, quota, batch, intakeBatch, admissionNumber, managedBranchId = null, studentStatus = null }
 ) => {
   const catalogCourse = resolveFeePortalCourse(course);
   const feePortalBranch = await resolveFeePortalBranchLabel({
@@ -251,7 +264,7 @@ const loadCatalogFeeStructures = async (
     courseLabel: catalogCourse || course,
     managedBranchId,
   });
-  const category = mapQuotaToCategory(quota);
+  const category = mapQuotaToCategory(quota, studentStatus, batch);
   const requestedBatch = resolveRequestedFeeBatch({ batch, intakeBatch, admissionNumber });
 
   const buildFilter = (batchVal) => {
@@ -784,6 +797,7 @@ export async function buildJoiningStepFourSyncPlan({
     intakeBatch: joiningContext?.intakeBatch || '',
     admissionNumber: joiningContext?.admissionNumber || '',
     managedBranchId: joiningContext?.managedBranchId || null,
+    studentStatus: joiningContext?.studentStatus || null,
   });
   const catalogRows = catalogResult.rows;
   const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
@@ -925,6 +939,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
       intakeBatch: joiningContext?.intakeBatch || '',
       admissionNumber: joiningContext?.admissionNumber || '',
       managedBranchId: joiningContext?.managedBranchId || null,
+      studentStatus: joiningContext?.studentStatus || null,
     });
     const catalogRows = catalogResult.rows;
     const resolvedBatch = catalogResult.catalogLookup.resolvedBatch || batch;
