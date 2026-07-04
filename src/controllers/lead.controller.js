@@ -453,6 +453,40 @@ const ASSIGNED_USER_SQL_SELECT = `
         u3.id as assigned_to_pro_id, u3.name as assigned_to_pro_name, u3.email as assigned_to_pro_email,
         u3.role_name as assigned_to_pro_role_name, u3.designation as assigned_to_pro_designation`;
 
+const CONFIRMER_USER_SQL_SELECT = `
+        conf.confirmer_id, conf.confirmer_name, conf.confirmer_email,
+        conf.confirmer_role_name, conf.confirmer_designation`;
+
+const CONFIRMER_USER_SQL_JOIN = `
+      LEFT JOIN (
+        SELECT c.lead_id, c.confirmer_id, c.confirmer_name, c.confirmer_email, c.confirmer_role_name, c.confirmer_designation
+        FROM (
+          SELECT a.lead_id, u.id AS confirmer_id, u.name AS confirmer_name, u.email AS confirmer_email,
+                 u.role_name AS confirmer_role_name, u.designation AS confirmer_designation,
+                 a.created_at AS confirmed_at
+          FROM activity_logs a
+          INNER JOIN users u ON u.id = a.performed_by
+          WHERE a.type = 'status_change'
+            AND (
+              LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.callStatus')), ''))) = 'confirmed'
+              OR LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitStatus')), ''))) = 'confirmed'
+            )
+        ) c
+        INNER JOIN (
+          SELECT lead_id, MAX(confirmed_at) AS max_at
+          FROM (
+            SELECT a.lead_id, a.created_at AS confirmed_at
+            FROM activity_logs a
+            WHERE a.type = 'status_change'
+              AND (
+                LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.callStatus')), ''))) = 'confirmed'
+                OR LOWER(TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.metadata, '$.visitStatus')), ''))) = 'confirmed'
+              )
+          ) x
+          GROUP BY lead_id
+        ) latest ON latest.lead_id = c.lead_id AND latest.max_at = c.confirmed_at
+      ) conf ON conf.lead_id = l.id`;
+
 /** Raw row from leads + user joins (same shape as getLeads main SELECT). */
 function buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday) {
   const assignedToUser = buildAssignedCounsellorFromSqlRow(lead);
@@ -470,6 +504,17 @@ function buildFormattedLeadFromSqlRow(lead, req, autoRescheduledFromYesterday) {
     formattedLead.isYesterdayMissedCall = true;
     formattedLead.missedScheduledDate = autoRescheduledFromYesterday.get(lead.id);
   }
+
+  formattedLead.confirmedBy = lead.confirmer_id ? {
+    id: lead.confirmer_id,
+    _id: lead.confirmer_id,
+    name: lead.confirmer_name,
+    email: lead.confirmer_email,
+    roleName: lead.confirmer_role_name,
+    designation: lead.confirmer_designation,
+    department: lead.confirmer_role_name || lead.confirmer_designation || undefined,
+  } : null;
+
   return formattedLead;
 }
 
@@ -562,7 +607,9 @@ export const getLeads = async (req, res) => {
         l.visit_status, l.academic_year, l.student_group, l.admission_number, l.assigned_at, 
         l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
         l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
-        ${ASSIGNED_USER_SQL_SELECT}
+        l.dynamic_fields as dynamic_fields,
+        ${ASSIGNED_USER_SQL_SELECT},
+        ${CONFIRMER_USER_SQL_SELECT}
       FROM (
         SELECT l.id
         FROM leads l
@@ -574,6 +621,7 @@ export const getLeads = async (req, res) => {
       LEFT JOIN users u1 ON l.assigned_to = u1.id
       LEFT JOIN users u2 ON l.uploaded_by = u2.id
       LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
+      ${CONFIRMER_USER_SQL_JOIN}
       ORDER BY l.created_at DESC, l.id ASC
     `;
 
@@ -613,11 +661,14 @@ export const getLeads = async (req, res) => {
             l.source, l.last_follow_up, l.next_scheduled_call, l.created_at, l.updated_at,
             l.cycle_number, l.counsellor_target_date, l.pro_target_date, l.target_date, l.needs_manual_update,
             DATE_FORMAT(DATE_SUB(DATE(l.next_scheduled_call), INTERVAL 1 DAY), '%Y-%m-%d') AS missed_schedule_prev_day,
-            ${ASSIGNED_USER_SQL_SELECT}
+            l.dynamic_fields as dynamic_fields,
+            ${ASSIGNED_USER_SQL_SELECT},
+            ${CONFIRMER_USER_SQL_SELECT}
           FROM leads l
           LEFT JOIN users u1 ON l.assigned_to = u1.id
           LEFT JOIN users u2 ON l.uploaded_by = u2.id
           LEFT JOIN users u3 ON l.assigned_to_pro = u3.id
+          ${CONFIRMER_USER_SQL_JOIN}
           ${rolledWhereClause}
           ORDER BY l.updated_at DESC
           LIMIT 500
