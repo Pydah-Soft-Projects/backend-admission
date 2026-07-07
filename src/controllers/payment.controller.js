@@ -7,6 +7,8 @@ import { createOrder as cashfreeCreateOrder, getOrder as cashfreeGetOrder } from
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
 import { normalizeOverallConcessionLinesForStorage } from '../utils/overallConcessions.util.js';
+import crypto from 'crypto';
+import axios from 'axios';
 
 const resolveConfiguredFee = async (courseId, branchId) => {
   if (!courseId) return 0;
@@ -1374,6 +1376,365 @@ export const reconcilePendingTransactions = async (req, res) => {
   } catch (error) {
     console.error('Error reconciling pending transactions:', error);
     return errorResponse(res, error.message || 'Failed to reconcile pending transactions', 500);
+  }
+};
+
+export const createRazorpayQR = async (req, res) => {
+  try {
+    const {
+      joiningId,
+      admissionId,
+      amount,
+      feeHeadId,
+      feeHeadName,
+      feeHeadCode,
+      studentYear,
+      semester,
+      targets,
+    } = req.body || {};
+
+    if (!joiningId) {
+      return errorResponse(res, 'joiningId is required', 422);
+    }
+    const amountValue = Number(amount);
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      return errorResponse(res, 'Amount must be a positive number', 422);
+    }
+
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+    if (!keyId || !keySecret) {
+      return errorResponse(
+        res,
+        'Razorpay configuration is missing or incomplete (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)',
+        503
+      );
+    }
+
+    const pool = getPool();
+    const [joinings] = await pool.execute(
+      'SELECT lead_id, course_id, branch_id, student_name, student_phone FROM joinings WHERE id = ? LIMIT 1',
+      [joiningId]
+    );
+    if (joinings.length === 0) {
+      return errorResponse(res, 'Joining not found', 404);
+    }
+    const joining = joinings[0];
+    const leadId = joining.lead_id || null;
+    const courseId = joining.course_id || null;
+    const branchId = joining.branch_id || null;
+    const studentName = String(joining.student_name || 'Student').trim();
+    const studentPhone = String(joining.student_phone || '').trim();
+
+    const amountInPaise = Math.round(amountValue * 100);
+    const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+
+    const orderData = {
+      amount: amountInPaise,
+      currency: 'INR',
+      receipt: `receipt_${Date.now()}`,
+      notes: {
+        joiningId: String(joiningId),
+        admissionId: admissionId ? String(admissionId) : '',
+        leadId: leadId ? String(leadId) : '',
+        feeHeadId: feeHeadId ? String(feeHeadId) : '',
+        feeHeadName: feeHeadName || '',
+        feeHeadCode: feeHeadCode || '',
+        studentYear: String(studentYear || '1'),
+        semester: semester ? String(semester) : '',
+        targets: targets ? JSON.stringify(targets) : '',
+      },
+    };
+
+    const response = await axios.post(
+      'https://api.razorpay.com/v1/orders',
+      orderData,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Basic ${authHeader}`,
+        },
+      }
+    );
+
+    const order = response.data;
+    if (!order || !order.id) {
+      return errorResponse(res, 'Failed to create order from Razorpay', 502);
+    }
+
+    const transactionId = uuidv4();
+    const metaObj = {
+      order,
+      feeHeadId,
+      feeHeadName,
+      feeHeadCode,
+      studentYear,
+      semester,
+      targets,
+    };
+
+    await pool.execute(
+      `INSERT INTO payment_transactions (
+        id, admission_id, joining_id, lead_id, course_id, branch_id,
+        amount, currency, mode, status, collected_by, reference_id,
+        notes, is_additional_fee, meta, processed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        transactionId,
+        admissionId || null,
+        joiningId,
+        leadId,
+        courseId,
+        branchId,
+        amountValue,
+        'INR',
+        'upi_qr',
+        'pending',
+        req.user?.id || null,
+        order.id,
+        `Razorpay Order created for gateway check out: ${order.id}`,
+        false,
+        JSON.stringify(metaObj),
+      ]
+    );
+
+    return successResponse(
+      res,
+      {
+        transactionId,
+        key: keyId,
+        amount: order.amount,
+        currency: order.currency,
+        orderId: order.id,
+        studentName,
+        studentPhone,
+      },
+      'Razorpay Order created successfully',
+      201
+    );
+  } catch (error) {
+    console.error('Error creating Razorpay Order:', error.response?.data || error.message);
+    return errorResponse(
+      res,
+      error.response?.data?.error?.description || error.message || 'Failed to create payment order',
+      error.response?.status || 500
+    );
+  }
+};
+
+export const verifyRazorpayQR = async (req, res) => {
+  try {
+    const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body || {};
+    
+    if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+      return errorResponse(res, 'razorpay_payment_id, razorpay_order_id, and razorpay_signature are required', 422);
+    }
+
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keySecret) {
+      return errorResponse(res, 'Razorpay configuration is missing', 503);
+    }
+
+    const generatedSignature = crypto
+      .createHmac('sha256', keySecret)
+      .update(razorpay_order_id + '|' + razorpay_payment_id)
+      .digest('hex');
+
+    if (generatedSignature !== razorpay_signature) {
+      return errorResponse(res, 'Payment signature verification failed', 400);
+    }
+
+    const pool = getPool();
+    const [transactions] = await pool.execute(
+      `SELECT * FROM payment_transactions WHERE reference_id = ? AND mode = 'upi_qr' LIMIT 1`,
+      [razorpay_order_id]
+    );
+
+    if (transactions.length === 0) {
+      return errorResponse(res, 'Transaction not found for the provided order ID', 404);
+    }
+
+    const transaction = transactions[0];
+    if (transaction.status === 'success') {
+      return successResponse(
+        res,
+        { status: 'success', paymentId: transaction.reference_id },
+        'Payment already verified'
+      );
+    }
+
+    const transactionStatus = 'success';
+    const metaObj = typeof transaction.meta === 'string'
+      ? JSON.parse(transaction.meta)
+      : transaction.meta || {};
+
+    // Fetch detailed payment details from Razorpay to extract the bank UTR / UPI RRN
+    let bankUtr = razorpay_payment_id;
+    let paymentDetails = null;
+    try {
+      const authHeader = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${keySecret}`).toString('base64');
+      const payResponse = await axios.get(
+        `https://api.razorpay.com/v1/payments/${razorpay_payment_id}`,
+        {
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+          },
+        }
+      );
+      paymentDetails = payResponse.data;
+      if (paymentDetails && paymentDetails.acquirer_data) {
+        bankUtr = paymentDetails.acquirer_data.rrn || 
+                  paymentDetails.acquirer_data.bank_transaction_id || 
+                  paymentDetails.acquirer_data.upi_transaction_id || 
+                  razorpay_payment_id;
+      }
+    } catch (fetchError) {
+      console.error('Error fetching payment details from Razorpay:', fetchError.message || fetchError);
+    }
+
+    const updatedMetaObj = {
+      ...metaObj,
+      razorpay_payment_id,
+      razorpay_signature,
+      razorpayPaymentDetails: paymentDetails,
+    };
+
+    await pool.execute(
+      `UPDATE payment_transactions SET
+        status = ?,
+        meta = ?,
+        processed_at = NOW(),
+        verified_at = NOW(),
+        updated_at = NOW()
+      WHERE id = ?`,
+      [
+        transactionStatus,
+        JSON.stringify(updatedMetaObj),
+        transaction.id,
+      ]
+    );
+
+    const joiningId = transaction.joining_id;
+    const [joiningRows] = await pool.execute('SELECT * FROM joinings WHERE id = ? LIMIT 1', [
+      joiningId,
+    ]);
+    if (joiningRows.length === 0) {
+      return errorResponse(res, 'Joining record not found', 404);
+    }
+    const joining = joiningRows[0];
+
+    let admissionId = transaction.admission_id;
+    let admission = null;
+    if (admissionId) {
+      const [admissionRows] = await pool.execute('SELECT * FROM admissions WHERE id = ? LIMIT 1', [
+        admissionId,
+      ]);
+      admission = admissionRows[0] || null;
+    }
+    if (!admission) {
+      const [admissionRows] = await pool.execute(
+        'SELECT * FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+        [joiningId]
+      );
+      admission = admissionRows[0] || null;
+    }
+
+    const studentId = String(admission?.admission_number || '').trim();
+    if (!studentId) {
+      return errorResponse(
+        res,
+        'Admission number is required before recording transactions in fee portal',
+        422
+      );
+    }
+
+    const [users] = transaction.collected_by
+      ? await pool.execute('SELECT id, name FROM users WHERE id = ? LIMIT 1', [transaction.collected_by])
+      : [[]];
+    const collector = users[0] || null;
+    const now = new Date();
+    const conn = await connectFeeManagement();
+
+    const targets = metaObj.targets || [];
+    if (Array.isArray(targets) && targets.length > 0) {
+      for (const t of targets) {
+        const feeHeadValue = toMongoFeeHeadValue(t.feeHeadId);
+        if (!feeHeadValue) continue;
+        const normalizedReceipt = generateReceiptNumber();
+        const doc = {
+          studentId,
+          studentName: String(admission?.student_name || joining.student_name || '').trim(),
+          feeHead: feeHeadValue,
+          amount: Number(t.amount),
+          transactionType: 'DEBIT',
+          paymentMode: 'UPI',
+          remarks:
+            String(metaObj.remarks || '').trim() ||
+            String(t.feeHeadName || t.feeHeadCode || 'Fee payment').trim(),
+          semester: t.semester ? String(t.semester) : null,
+          studentYear: t.studentYear ? String(t.studentYear) : '1',
+          receiptNumber: normalizedReceipt,
+          referenceNo: bankUtr,
+          referenceDate: now,
+          collectedBy: transaction.collected_by ? String(transaction.collected_by) : '',
+          collectedByName: String(collector?.name || 'Razorpay Online').trim(),
+          paymentDate: now,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await conn.db.collection('transactions').insertOne(doc);
+      }
+    } else {
+      const feeHeadValue = toMongoFeeHeadValue(metaObj.feeHeadId);
+      if (feeHeadValue) {
+        const normalizedReceipt = generateReceiptNumber();
+        const doc = {
+          studentId,
+          studentName: String(admission?.student_name || joining.student_name || '').trim(),
+          feeHead: feeHeadValue,
+          amount: Number(transaction.amount),
+          transactionType: 'DEBIT',
+          paymentMode: 'UPI',
+          remarks:
+            String(metaObj.remarks || '').trim() ||
+            String(metaObj.feeHeadName || metaObj.feeHeadCode || 'Fee payment').trim(),
+          semester: metaObj.semester ? String(metaObj.semester) : null,
+          studentYear: metaObj.studentYear ? String(metaObj.studentYear) : '1',
+          receiptNumber: normalizedReceipt,
+          referenceNo: bankUtr,
+          referenceDate: now,
+          collectedBy: transaction.collected_by ? String(transaction.collected_by) : '',
+          collectedByName: String(collector?.name || 'Razorpay Online').trim(),
+          paymentDate: now,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await conn.db.collection('transactions').insertOne(doc);
+      }
+    }
+
+    await updatePaymentSummary({
+      joiningId: transaction.joining_id,
+      admissionId: transaction.admission_id,
+      leadId: transaction.lead_id,
+      courseId: transaction.course_id,
+      branchId: transaction.branch_id,
+      amount: Number(transaction.amount),
+      currency: 'INR',
+    });
+
+    return successResponse(
+      res,
+      {
+        status: 'success',
+        paymentId: bankUtr,
+      },
+      'Payment verified and recorded successfully'
+    );
+  } catch (error) {
+    console.error('Error verifying Razorpay payment:', error);
+    return errorResponse(res, error.message || 'Failed to verify payment', 500);
   }
 };
 

@@ -16,6 +16,8 @@ import {
   recordCashPayment,
   reconcilePendingTransactions,
   verifyCashfreePayment,
+  createRazorpayQR,
+  verifyRazorpayQR,
 } from '../controllers/payment.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -41,6 +43,8 @@ router.post('/cash', recordCashPayment);
 router.post('/cashfree/order', createCashfreeOrder);
 router.post('/cashfree/verify', verifyCashfreePayment);
 router.post('/cashfree/reconcile', isSuperAdmin, reconcilePendingTransactions);
+router.post('/razorpay/qr', createRazorpayQR);
+router.post('/razorpay/verify-qr', verifyRazorpayQR);
 
 export default router;
 
