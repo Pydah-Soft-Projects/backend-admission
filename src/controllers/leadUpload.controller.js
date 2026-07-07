@@ -707,9 +707,9 @@ const processImportJob = async (jobId) => {
     const [lastLeads] = await pool.execute(
       `SELECT enquiry_number FROM leads 
        WHERE enquiry_number LIKE ? 
-       ORDER BY enquiry_number DESC 
+       ORDER BY CAST(SUBSTRING(enquiry_number, ?) AS UNSIGNED) DESC 
        LIMIT 1`,
-      [`${enquiryPrefix}%`]
+      [`${enquiryPrefix}%`, enquiryPrefix.length + 1]
     );
 
     if (lastLeads.length > 0 && lastLeads[0].enquiry_number) {

@@ -23,9 +23,9 @@ export const generateEnquiryNumber = async () => {
     const [leads] = await pool.execute(
       `SELECT enquiry_number FROM leads 
        WHERE enquiry_number LIKE ? 
-       ORDER BY enquiry_number DESC 
+       ORDER BY CAST(SUBSTRING(enquiry_number, ?) AS UNSIGNED) DESC 
        LIMIT 1`,
-      [`${prefix}%`]
+      [`${prefix}%`, prefix.length + 1]
     );
 
     let sequenceNumber = 1;
