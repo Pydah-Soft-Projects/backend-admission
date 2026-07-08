@@ -1134,7 +1134,8 @@ const mergePortfolioStatusBreakdown = (rows, target) => {
   const bag = new Map();
   (rows || []).forEach((row) => {
     const raw = row.status != null ? String(row.status).trim() : '';
-    const canonical = canonicalCohortBucketForRole(target.roleName, raw || 'Not set');
+    const defaultVal = target.isPro || target.isStudentCounselor ? 'Not set' : 'Unknown';
+    const canonical = canonicalCohortBucketForRole(target.roleName, raw || defaultVal);
     const cnt = typeof row.count === 'bigint' ? Number(row.count) : Number(row.count || 0);
     bag.set(canonical, (bag.get(canonical) || 0) + (Number.isFinite(cnt) ? cnt : 0));
   });
@@ -1212,10 +1213,10 @@ export const getAssignmentPortfolio = async (req, res) => {
     const whereSql = conditions.join(' AND ');
 
     const statusGroupExpr = target.isPro
-      ? `COALESCE(NULLIF(TRIM(visit_status), ''), 'Not set')`
+      ? 'visit_status'
       : target.isStudentCounselor
-        ? `COALESCE(NULLIF(TRIM(call_status), ''), 'Not set')`
-        : `COALESCE(NULLIF(TRIM(lead_status), ''), 'Unknown')`;
+        ? 'call_status'
+        : 'lead_status';
 
     const [[countRows], [statusRows]] = await Promise.all([
       pool.execute(`SELECT COUNT(*) as total FROM leads WHERE ${whereSql}`, params),
@@ -1461,9 +1462,9 @@ export const getUserLeadAnalytics = async (req, res) => {
 
     // Dashboard breakdown: PRO -> visit_status, Student Counselor -> call_status, others -> lead_status
     const statusGroupExpr = isProRole
-      ? `COALESCE(NULLIF(TRIM(visit_status), ''), 'Not set')`
+      ? 'visit_status'
       : isStudentCounselor
-        ? `COALESCE(NULLIF(TRIM(call_status), ''), 'Not set')`
+        ? 'call_status'
         : 'lead_status';
 
     // Get recent activity (last 7 days)
@@ -1595,7 +1596,7 @@ export const getUserLeadAnalytics = async (req, res) => {
             ? 'Not set'
             : 'New'
           : String(key).trim();
-      statusCounts[label] = item.count;
+      statusCounts[label] = (statusCounts[label] || 0) + Number(item.count || 0);
     });
 
     const recentLeads = recentLeadsResult[0].total;
@@ -2525,23 +2526,33 @@ async function fetchPortfolioCohortSummaryTotals(pool, userIds, leadFiltersSql, 
 
   const [statusRows] = await pool.execute(
     `SELECT
-      CASE
-        WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
-        WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
-             AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
-        ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
-      END AS computed_status,
+      u.role_name,
+      l.visit_status,
+      l.call_status,
+      l.lead_status,
       COUNT(*) AS cnt
      FROM users u
      INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
      WHERE u.id IN (${ph})${leadFiltersSql}
-     GROUP BY computed_status`,
+     GROUP BY u.role_name, l.visit_status, l.call_status, l.lead_status`,
     [...userIds, ...leadFiltersParams]
   );
 
   let totalInterested = 0;
   (statusRows || []).forEach((row) => {
-    const status = String(row.computed_status || '').trim().toLowerCase();
+    const role = String(row.role_name || '').trim();
+    const isCounselor = role === 'Student Counselor' || role === 'Counselor' || role === 'Counsellor';
+    
+    let rawStatus;
+    if (role === 'PRO') {
+      rawStatus = row.visit_status;
+    } else if (isCounselor) {
+      rawStatus = row.call_status;
+    } else {
+      rawStatus = row.lead_status;
+    }
+    
+    const status = String(rawStatus || '').trim().toLowerCase();
     if (status === 'interested' || status === 'cet applied') {
       totalInterested += Number(row.cnt) || 0;
     }
@@ -2566,16 +2577,40 @@ async function fetchPortfolioStudentGroupCountsByUser(pool, userIds, leadFilters
   const ph = userIds.map(() => '?').join(',');
   const [rows] = await pool.execute(
     `SELECT u.id AS user_id,
-            COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') AS student_group,
+            l.student_group,
             COUNT(DISTINCT l.id) AS cnt
      FROM users u
      INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
      WHERE u.id IN (${ph})${leadFiltersSql}
-     GROUP BY u.id, COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
-     ORDER BY u.id, cnt DESC`,
+     GROUP BY u.id, l.student_group`,
     [...userIds, ...leadFiltersParams]
   );
-  return rows || [];
+
+  const processedRows = [];
+  const userGroupMap = new Map();
+  
+  (rows || []).forEach(row => {
+    const rawGroup = row.student_group;
+    const normalized = (rawGroup && String(rawGroup).trim()) ? String(rawGroup).trim() : 'Unknown';
+    const key = `${row.user_id}|${normalized}`;
+    
+    if (userGroupMap.has(key)) {
+      userGroupMap.get(key).cnt += Number(row.cnt);
+    } else {
+      const entry = { user_id: row.user_id, student_group: normalized, cnt: Number(row.cnt) };
+      userGroupMap.set(key, entry);
+      processedRows.push(entry);
+    }
+  });
+  
+  processedRows.sort((a, b) => {
+    if (a.user_id !== b.user_id) {
+      return String(a.user_id).localeCompare(String(b.user_id));
+    }
+    return b.cnt - a.cnt;
+  });
+  
+  return processedRows;
 }
 
 /** Portfolio leads per user × mandal × student_group (raw mandal; normalized in JS). */
@@ -2584,21 +2619,50 @@ async function fetchPortfolioMandalStudentGroupCountsByUser(pool, userIds, leadF
   const ph = userIds.map(() => '?').join(',');
   const [rows] = await pool.execute(
     `SELECT u.id AS user_id,
-            COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') AS mandal,
+            l.mandal,
             l.needs_manual_update,
-            COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown') AS student_group,
+            l.student_group,
             COUNT(DISTINCT l.id) AS cnt
      FROM users u
      INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
      WHERE u.id IN (${ph})${leadFiltersSql}
      GROUP BY u.id,
-              COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown'),
+              l.mandal,
               l.needs_manual_update,
-              COALESCE(NULLIF(TRIM(l.student_group), ''), 'Unknown')
-     ORDER BY u.id, cnt DESC`,
+              l.student_group`,
     [...userIds, ...leadFiltersParams]
   );
-  return rows || [];
+
+  const processedRows = [];
+  const rowMap = new Map();
+  
+  (rows || []).forEach(row => {
+    const mandalRaw = row.mandal;
+    const studentGroupRaw = row.student_group;
+    
+    const mandal = (mandalRaw && String(mandalRaw).trim()) ? String(mandalRaw).trim() : 'Unknown';
+    const student_group = (studentGroupRaw && String(studentGroupRaw).trim()) ? String(studentGroupRaw).trim() : 'Unknown';
+    const needs_manual_update = row.needs_manual_update;
+    const user_id = row.user_id;
+    
+    const key = `${user_id}|${mandal}|${needs_manual_update}|${student_group}`;
+    if (rowMap.has(key)) {
+      rowMap.get(key).cnt += Number(row.cnt);
+    } else {
+      const entry = { user_id, mandal, needs_manual_update, student_group, cnt: Number(row.cnt) };
+      rowMap.set(key, entry);
+      processedRows.push(entry);
+    }
+  });
+  
+  processedRows.sort((a, b) => {
+    if (a.user_id !== b.user_id) {
+      return String(a.user_id).localeCompare(String(b.user_id));
+    }
+    return b.cnt - a.cnt;
+  });
+  
+  return processedRows;
 }
 
 async function fetchActiveMandalNamesSet(pool) {
@@ -2649,32 +2713,72 @@ async function fetchPortfolioMandalStatusCountsByUser(pool, userIds, leadFilters
   const [rows] = await pool.execute(
     `SELECT u.id AS user_id,
             u.role_name,
-            COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown') AS mandal,
+            l.mandal,
             l.needs_manual_update,
-            CASE
-              WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
-              WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
-                   AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
-              ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
-            END AS computed_status,
+            l.visit_status,
+            l.call_status,
+            l.lead_status,
             COUNT(DISTINCT l.id) AS cnt
      FROM users u
      INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
      WHERE u.id IN (${ph})${leadFiltersSql}
      GROUP BY u.id,
               u.role_name,
-              COALESCE(NULLIF(TRIM(l.mandal), ''), 'Unknown'),
+              l.mandal,
               l.needs_manual_update,
-              CASE
-                WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
-                WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%')
-                     AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
-                ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
-              END
-     ORDER BY u.id, cnt DESC`,
+              l.visit_status,
+              l.call_status,
+              l.lead_status`,
     [...userIds, ...leadFiltersParams]
   );
-  return rows || [];
+
+  const processedRows = [];
+  const rowMap = new Map();
+  
+  (rows || []).forEach(row => {
+    const mandalRaw = row.mandal;
+    const mandal = (mandalRaw && String(mandalRaw).trim()) ? String(mandalRaw).trim() : 'Unknown';
+    const role_name = String(row.role_name || '').trim();
+    const isCounselor = role_name === 'Student Counselor' || role_name === 'Counselor' || role_name === 'Counsellor';
+    
+    let rawStatus;
+    if (role_name === 'PRO') {
+      rawStatus = (row.visit_status && String(row.visit_status).trim()) ? String(row.visit_status).trim() : 'Not set';
+    } else if (isCounselor) {
+      rawStatus = (row.call_status && String(row.call_status).trim()) ? String(row.call_status).trim() : 'Not set';
+    } else {
+      rawStatus = (row.lead_status && String(row.lead_status).trim()) ? String(row.lead_status).trim() : 'Unknown';
+    }
+    
+    const computed_status = rawStatus;
+    const needs_manual_update = row.needs_manual_update;
+    const user_id = row.user_id;
+    
+    const key = `${user_id}|${role_name}|${mandal}|${needs_manual_update}|${computed_status}`;
+    if (rowMap.has(key)) {
+      rowMap.get(key).cnt += Number(row.cnt);
+    } else {
+      const entry = {
+        user_id,
+        role_name,
+        mandal,
+        needs_manual_update,
+        computed_status,
+        cnt: Number(row.cnt)
+      };
+      rowMap.set(key, entry);
+      processedRows.push(entry);
+    }
+  });
+  
+  processedRows.sort((a, b) => {
+    if (a.user_id !== b.user_id) {
+      return String(a.user_id).localeCompare(String(b.user_id));
+    }
+    return b.cnt - a.cnt;
+  });
+  
+  return processedRows;
 }
 
 function applyPortfolioMandalStatusRowsToStats(stats, rows, validMandalsSet) {
@@ -3412,17 +3516,15 @@ export const getUserAnalytics = async (req, res) => {
         ),
         pool.execute(
           `SELECT u.id AS user_id,
-            CASE 
-              WHEN TRIM(UPPER(u.role_name)) = 'PRO' THEN COALESCE(NULLIF(TRIM(l.visit_status), ''), 'Not set')
-              WHEN (TRIM(UPPER(u.role_name)) LIKE '%COUNSELOR%' OR TRIM(UPPER(u.role_name)) LIKE '%COUNSELLOR%') 
-                   AND TRIM(UPPER(u.role_name)) NOT LIKE '%PRO%' THEN COALESCE(NULLIF(TRIM(l.call_status), ''), 'Not set')
-              ELSE COALESCE(NULLIF(TRIM(l.lead_status), ''), 'Unknown')
-            END AS computed_status,
-            COUNT(*) AS status_count
+                  u.role_name,
+                  l.visit_status,
+                  l.call_status,
+                  l.lead_status,
+                  COUNT(*) AS status_count
            FROM users u
            INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
            WHERE u.id IN (${ph}) ${aySql}
-           GROUP BY u.id, computed_status`,
+           GROUP BY u.id, u.role_name, l.visit_status, l.call_status, l.lead_status`,
           paramsBase
         ),
         pool.execute(
@@ -4064,9 +4166,25 @@ export const getUserAnalytics = async (req, res) => {
 
     actionCounts.forEach(row => {
       const stats = statsByUserId.get(analyticsUserIdKey(row.user_id));
-      const statusKey = row.lead_status || row.computed_status || row.bucket;
+      if (!stats) return;
+
+      let statusKey = row.lead_status || row.computed_status || row.bucket;
+      if (!statusKey && row.role_name !== undefined) {
+        const role = String(row.role_name || '').trim();
+        const isCounselor = role === 'Student Counselor' || role === 'Counselor' || role === 'Counsellor';
+        let rawStatus;
+        if (role === 'PRO') {
+          rawStatus = (row.visit_status && String(row.visit_status).trim()) ? String(row.visit_status).trim() : 'Not set';
+        } else if (isCounselor) {
+          rawStatus = (row.call_status && String(row.call_status).trim()) ? String(row.call_status).trim() : 'Not set';
+        } else {
+          rawStatus = (row.lead_status && String(row.lead_status).trim()) ? String(row.lead_status).trim() : 'Unknown';
+        }
+        statusKey = rawStatus;
+      }
+
       const countVal = Number(row.status_count ?? row.cnt ?? 0);
-      if (stats && statusKey) {
+      if (statusKey) {
         stats.statusBreakdown[statusKey] = (stats.statusBreakdown[statusKey] || 0) + countVal;
       }
     });
