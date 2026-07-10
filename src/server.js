@@ -34,6 +34,7 @@ import feeStructureRoutes from './routes/feeStructure.routes.js';
 import transportRoutes from './routes/transport.routes.js';
 import hostelRoutes from './routes/hostel.routes.js';
 import feeRequestRoutes from './routes/feeRequest.routes.js';
+import printProxyRoutes from './routes/printProxy.routes.js';
 
 // Load environment variables
 dotenv.config();
@@ -170,6 +171,7 @@ app.use('/api/fee-structures', feeStructureRoutes);
 app.use('/api/transport', transportRoutes);
 app.use('/api/hostel', hostelRoutes);
 app.use('/api/fee-requests', feeRequestRoutes);
+app.use('/api/print', printProxyRoutes);
 // Role routes removed - using roleName string in User model instead
 
 // Health check

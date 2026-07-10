@@ -3,12 +3,16 @@ import { protect } from '../middleware/auth.middleware.js';
 import {
   listTransportRoutes,
   getTransportRouteDetail,
+  getNextTransportApplicationNumberPreview,
+  getStudentTransportRequest,
 } from '../controllers/transport.controller.js';
 
 const router = express.Router();
 
 router.use(protect);
 
+router.get('/next-application-number', getNextTransportApplicationNumberPreview);
+router.get('/requests', getStudentTransportRequest);
 router.get('/routes', listTransportRoutes);
 router.get('/routes/:routeId', getTransportRouteDetail);
 

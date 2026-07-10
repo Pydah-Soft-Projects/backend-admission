@@ -313,11 +313,28 @@ const runJoiningFeePortalSync = async ({
     ),
   });
 
-  await syncDirectConcessionsToSecondaryOverall({
-    admissionNumber,
-    joiningRow,
-    studentFeeDetails,
-  });
+  // Revised fees (CONCESSION / REVISED_FEE lines) must go through the fee-request
+  // approval workflow — they are written to overall_concessions only after approval
+  // in feeRequest.controller.js → approveFeeRequest.
+  // Direct save must NOT bypass that approval gate, so we skip the direct sync
+  // whenever the builder has concession/revised lines.
+  const sanitized = sanitizeStudentFeeDetailsForDb(studentFeeDetails);
+  const concessionLines = (sanitized?.lines || []).filter(
+    (line) => line.concessionType === 'CONCESSION' || line.concessionType === 'REVISED_FEE'
+  );
+  if (concessionLines.length === 0) {
+    // No concession/revised lines — safe to sync directly (clears stale rows if any)
+    await syncDirectConcessionsToSecondaryOverall({
+      admissionNumber,
+      joiningRow,
+      studentFeeDetails,
+    });
+  } else {
+    console.log(
+      `[FeeSync] Skipping direct overall_concessions write for joining ${joiningId} — ` +
+      `${concessionLines.length} concession/revised line(s) present; approval required via fee_request workflow.`
+    );
+  }
 };
 
 const syncDirectConcessionsToSecondaryOverall = async ({
@@ -892,7 +909,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
   }
 
   let resolvedBranch = joiningData.branch || '';
-  if (normalizedJoiningBranchId) {
+  if (normalizedJoiningBranchId && !listMode) {
     try {
       const secondaryPool = getSecondaryPool();
       const [branchRows] = await secondaryPool.execute(

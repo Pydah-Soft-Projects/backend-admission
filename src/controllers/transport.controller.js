@@ -3,6 +3,12 @@ import {
   getTransportConnection,
 } from '../config-mongo/transport.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import {
+  resolveTransportApplicationCodes,
+  peekNextTransportApplicationNumber,
+  calendarYearToAcademicYearSession,
+} from '../utils/transportApplicationNumber.util.js';
 
 const getActiveConnection = async () => {
   try {
@@ -111,5 +117,82 @@ export const getTransportRouteDetail = async (req, res) => {
   } catch (error) {
     console.error('getTransportRouteDetail error:', error);
     return errorResponse(res, error.message || 'Failed to load transport route', 500);
+  }
+};
+
+/** GET /api/transport/next-application-number — peek next sequence number for college/course/AY. */
+export const getNextTransportApplicationNumberPreview = async (req, res) => {
+  try {
+    const { academicYear, collegeId, managedCourseId, courseName, collegeName } = req.query;
+
+    if (!academicYear) {
+      return errorResponse(res, 'academicYear is required', 400);
+    }
+
+    let pool;
+    try {
+      pool = getSecondaryPool();
+    } catch (err) {
+      return errorResponse(res, 'Secondary database is not available', 503);
+    }
+
+    const { collegeCode, courseCode } = await resolveTransportApplicationCodes(pool, {
+      collegeId: collegeId ? Number(collegeId) : null,
+      managedCourseId: managedCourseId ? Number(managedCourseId) : null,
+      courseName,
+      collegeName,
+    });
+
+    const normalizedAY = calendarYearToAcademicYearSession(academicYear);
+    const nextNumberInfo = await peekNextTransportApplicationNumber(
+      pool,
+      normalizedAY,
+      collegeCode,
+      courseCode
+    );
+
+    return successResponse(res, nextNumberInfo);
+  } catch (error) {
+    console.error('getNextTransportApplicationNumberPreview error:', error);
+    return errorResponse(res, error.message || 'Failed to peek next transport application number', 500);
+  }
+};
+
+/** GET /api/transport/requests — fetch student's transport request for a given admission number & academic year. */
+export const getStudentTransportRequest = async (req, res) => {
+  try {
+    const { admissionNumber, academicYear } = req.query;
+
+    if (!admissionNumber) {
+      return errorResponse(res, 'admissionNumber is required', 400);
+    }
+
+    let pool;
+    try {
+      pool = getSecondaryPool();
+    } catch (err) {
+      return errorResponse(res, 'Secondary database is not available', 503);
+    }
+
+    const normalizedAY = academicYear ? calendarYearToAcademicYearSession(academicYear) : null;
+
+    let query = `SELECT id, admission_number, student_name, route_id, route_name, stage_name, bus_id, fare, status, request_date, academic_year, application_number, application_serial 
+                 FROM transport_requests 
+                 WHERE admission_number = ?`;
+    const params = [admissionNumber];
+
+    if (normalizedAY) {
+      query += ' AND academic_year = ?';
+      params.push(normalizedAY);
+    }
+
+    query += ' ORDER BY request_date DESC LIMIT 1';
+
+    const [rows] = await pool.execute(query, params);
+
+    return successResponse(res, rows[0] || null);
+  } catch (error) {
+    console.error('getStudentTransportRequest error:', error);
+    return errorResponse(res, error.message || 'Failed to fetch student transport request', 500);
   }
 };

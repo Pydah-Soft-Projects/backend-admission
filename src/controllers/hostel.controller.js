@@ -5,6 +5,7 @@ import {
 } from '../config-mongo/hostel.js';
 import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
+import { getPool } from '../config-sql/database.js';
 
 const { Types: { ObjectId } } = mongoose;
 
@@ -638,5 +639,105 @@ export const getHostelFee = async (req, res) => {
   } catch (error) {
     console.error('getHostelFee error:', error);
     return errorResponse(res, error.message || 'Failed to load hostel fee', 500);
+  }
+};
+
+/** GET /api/hostel/student */
+export const getHostelStudentDetails = async (req, res) => {
+  try {
+    const { admissionNumber, joiningId, hostelId, academicYear } = req.query;
+    const conn = await getActiveConnection();
+    const db = conn.db;
+
+    let existingUser = null;
+    let gender = '';
+
+    // 1. Try to find the student in HMS by admissionNumber
+    const admNum = String(admissionNumber || '').trim();
+    if (admNum) {
+      existingUser = await db.collection('users').findOne({ admissionNumber: admNum });
+    }
+
+    // 2. If not found in HMS, try by joiningId
+    const joinId = String(joiningId || '').trim();
+    if (!existingUser && joinId) {
+      existingUser = await db.collection('users').findOne({ 
+        joiningId: joinId,
+        source: 'admissions_crm'
+      });
+    }
+
+    // 3. If student is registered, return their details
+    if (existingUser && existingUser.hostelId) {
+      let hostelName = '';
+      const hostelRef = existingUser.hostel || existingUser.host;
+      if (hostelRef) {
+        const hostelDoc = await db.collection('hostels').findOne({
+          _id: toObjectIdOrString(hostelRef)
+        });
+        hostelName = hostelDoc?.name || '';
+      }
+
+      return successResponse(res, {
+        _id: String(existingUser._id),
+        hostelId: existingUser.hostelId,
+        isAssigned: true,
+        bedNumber: existingUser.bedNumber || '',
+        roomNumber: existingUser.roomNumber || '',
+        hostelName: hostelName,
+      });
+    }
+
+    // 4. If not registered, let's resolve gender from SQL database
+    const pool = getPool();
+    if (admNum) {
+      const [rows] = await pool.execute(
+        'SELECT student_gender FROM admissions WHERE admission_number = ? LIMIT 1',
+        [admNum]
+      );
+      if (rows?.[0]?.student_gender) {
+        gender = rows[0].student_gender;
+      }
+    }
+    if (!gender && joinId) {
+      const [rows] = await pool.execute(
+        'SELECT student_gender, gender FROM joinings WHERE id = ? LIMIT 1',
+        [joinId]
+      );
+      if (rows?.[0]) {
+        gender = rows[0].student_gender || rows[0].gender || '';
+      }
+    }
+
+    // 5. If we have a hostel selected, peek the next hostel student ID
+    if (hostelId && academicYear) {
+      const { peekNextHostelStudentId } = await import('../utils/hostelStudentId.util.js');
+      const normalizedGender = String(gender || '').trim().toLowerCase().startsWith('f') ? 'Female' : 'Male';
+      try {
+        const preview = await peekNextHostelStudentId(db, {
+          hostelObjectId: hostelId,
+          academicYear,
+          gender: normalizedGender,
+        });
+        return successResponse(res, {
+          hostelId: preview.hostelId,
+          isAssigned: false,
+        });
+      } catch (err) {
+        return successResponse(res, {
+          hostelId: null,
+          isAssigned: false,
+          error: err.message,
+        });
+      }
+    }
+
+    return successResponse(res, {
+      hostelId: null,
+      isAssigned: false,
+    });
+  } catch (err) {
+    console.error('Error fetching hostel student details:', err);
+    return errorResponse(res, err.message, 500);
   }
 };

@@ -245,38 +245,112 @@ export const getOverallConcessions = async (req, res) => {
     );
 
     const row = rows[0] || null;
-    if (!row) {
+
+    // Parse approved revised fees from the secondary overall_concessions table
+    let approvedRevisedFees = [];
+    if (row) {
+      try {
+        const raw =
+          typeof row.revised_fees === 'string'
+            ? JSON.parse(row.revised_fees || '[]')
+            : Array.isArray(row.revised_fees)
+              ? row.revised_fees
+              : [];
+        approvedRevisedFees = normalizeOverallConcessionLinesForStorage(
+          Array.isArray(raw) ? raw : []
+        );
+      } catch {
+        approvedRevisedFees = [];
+      }
+    }
+
+    // Also check for a pending fee_request for this admission number.
+    // If one exists, extract its concession lines and include them tagged with
+    // pending:true so the builder and print can display them even before approval.
+    let pendingRevisedFees = [];
+    try {
+      const primaryPool = getPool();
+      const [pendingRows] = await primaryPool.execute(
+        `SELECT student_fee_details, request_lines
+         FROM fee_requests
+         WHERE admission_number = ? AND status = 'pending_approval'
+         ORDER BY submitted_at DESC
+         LIMIT 1`,
+        [admissionNumber]
+      );
+      if (pendingRows.length > 0) {
+        const pr = pendingRows[0];
+        let sfd = null;
+        try {
+          sfd =
+            typeof pr.student_fee_details === 'string'
+              ? JSON.parse(pr.student_fee_details || 'null')
+              : pr.student_fee_details || null;
+        } catch {
+          sfd = null;
+        }
+
+        // Build canonical lines from builder studentFeeDetails (preferred) or request_lines (fallback)
+        const { buildOverallConcessionLinesFromBuilder, buildOverallConcessionLinesFromPortalLines } =
+          await import('../utils/overallConcessions.util.js');
+
+        const fromBuilder = sfd ? buildOverallConcessionLinesFromBuilder(sfd) : [];
+        if (fromBuilder.length > 0) {
+          pendingRevisedFees = fromBuilder.map((line) => ({ ...line, pending: true }));
+        } else {
+          let requestLines = [];
+          try {
+            requestLines =
+              typeof pr.request_lines === 'string'
+                ? JSON.parse(pr.request_lines || '[]')
+                : pr.request_lines || [];
+          } catch {
+            requestLines = [];
+          }
+          pendingRevisedFees = buildOverallConcessionLinesFromPortalLines(requestLines).map(
+            (line) => ({ ...line, pending: true })
+          );
+        }
+      }
+    } catch (pendingErr) {
+      console.error('[getOverallConcessions] Failed to fetch pending fee request lines:', pendingErr?.message || pendingErr);
+    }
+
+    // Merge: approved lines take precedence; pending lines fill in any heads not yet approved.
+    // Key: feeHeadId (or feeHeadCode) + studentYear
+    const keyFor = (line) => {
+      const head = String(line.feeHeadId || line.feeHeadCode || '').trim().toUpperCase();
+      const year = Number(line.studentYear) || 1;
+      return `${head}::${year}`;
+    };
+    const mergedMap = new Map();
+    for (const line of approvedRevisedFees) {
+      const k = keyFor(line);
+      if (k !== '::1') mergedMap.set(k, line);
+    }
+    for (const line of pendingRevisedFees) {
+      const k = keyFor(line);
+      // Only add pending line if no approved line already covers it
+      if (k !== '::1' && !mergedMap.has(k)) mergedMap.set(k, line);
+    }
+    const revisedFees = Array.from(mergedMap.values());
+
+    if (!row && revisedFees.length === 0) {
       return successResponse(res, {
         admissionNumber,
         revisedFees: [],
       });
     }
 
-    let revisedFees = [];
-    try {
-      revisedFees =
-        typeof row.revised_fees === 'string'
-          ? JSON.parse(row.revised_fees || '[]')
-          : Array.isArray(row.revised_fees)
-            ? row.revised_fees
-            : [];
-    } catch {
-      revisedFees = [];
-    }
-
-    const normalizedRevisedFees = normalizeOverallConcessionLinesForStorage(
-      Array.isArray(revisedFees) ? revisedFees : []
-    );
-
     return successResponse(res, {
-      admissionNumber: row.admission_number,
-      pinNo: row.pin_no || '',
-      studentName: row.student_name || '',
-      batch: row.batch || '',
-      course: row.course || '',
-      branch: row.branch || '',
-      revisedFees: normalizedRevisedFees,
-      updatedAt: row.updated_at || null,
+      admissionNumber: row?.admission_number || admissionNumber,
+      pinNo: row?.pin_no || '',
+      studentName: row?.student_name || '',
+      batch: row?.batch || '',
+      course: row?.course || '',
+      branch: row?.branch || '',
+      revisedFees,
+      updatedAt: row?.updated_at || null,
     });
   } catch (error) {
     console.error('Error fetching overall concessions:', error);

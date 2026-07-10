@@ -17,6 +17,107 @@ import {
   buildOverallConcessionLinesFromPortalLines,
   isPersistableBuilderConcessionLine,
 } from '../utils/overallConcessions.util.js';
+import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+
+/**
+ * Mirror a fee request into the Fee Management Mongo OverallConcessionRequest collection.
+ * Creates a PENDING document when one doesn't exist; updates/replaces concessions when one does.
+ * This is fire-and-forget — failures are logged but do not fail the primary SQL save.
+ *
+ * The concessionType stored in Fee Mongo uses 'REVISED' (not 'REVISED_FEE') to match the
+ * existing OverallConcessionRequest schema enum.
+ */
+const syncRequestToFeeManagementMongo = async ({
+  admissionNumber,
+  studentName,
+  pinNo,
+  college,
+  course,
+  branch,
+  batch,
+  studentFeeDetails,
+  requestedBy,
+  requestedByName,
+}) => {
+  try {
+    const conn = await connectFeeManagement();
+
+    // Build concession entries from studentFeeDetails builder lines
+    const linesIn = Array.isArray(studentFeeDetails?.lines) ? studentFeeDetails.lines : [];
+    const concessions = linesIn
+      .filter((line) => isPersistableBuilderConcessionLine(line))
+      .map((line) => ({
+        feeHeadId:      String(line.feeHeadId || '').trim(),
+        feeHeadCode:    String(line.feeHeadCode || '').trim(),
+        studentYear:    Number(line.studentYear) || 1,
+        semester:       line.semester != null ? Number(line.semester) || null : null,
+        amount:         Number(line.amount) || 0,
+        // Fee Mongo schema uses 'REVISED' not 'REVISED_FEE'
+        concessionType: line.concessionType === 'REVISED_FEE' ? 'REVISED' : 'CONCESSION',
+      }))
+      .filter((e) => e.feeHeadId && e.amount > 0);
+
+    if (concessions.length === 0) return;
+
+    const collection = conn.db.collection('overallconcessionrequests');
+
+    // Check for an existing PENDING document for this student
+    const existing = await collection.findOne({ admissionNumber, status: 'PENDING' });
+
+    if (existing) {
+      // Merge: same feeHeadId + studentYear + semester replaces, new entries are added
+      const mergedMap = {};
+      (existing.concessions || []).forEach((e) => {
+        mergedMap[`${e.feeHeadId}_${e.studentYear}_${e.semester ?? 'null'}`] = e;
+      });
+      concessions.forEach((e) => {
+        mergedMap[`${e.feeHeadId}_${e.studentYear}_${e.semester ?? 'null'}`] = e;
+      });
+
+      await collection.updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            concessions:     Object.values(mergedMap),
+            studentName:     studentName || existing.studentName,
+            pinNo:           pinNo || existing.pinNo,
+            batch:           batch || existing.batch,
+            requestedBy:     requestedBy || existing.requestedBy,
+            requestedByName: requestedByName || existing.requestedByName,
+            updatedAt:       new Date(),
+          },
+        }
+      );
+      console.log(`[FeeRequestMongo] Updated PENDING OverallConcessionRequest for ${admissionNumber}`);
+    } else {
+      // Create new PENDING document
+      const now = new Date();
+      await collection.insertOne({
+        admissionNumber,
+        studentName:     studentName || '',
+        pinNo:           pinNo || '-',
+        college:         college || '',
+        course:          course || '',
+        branch:          branch || '',
+        batch:           batch || '',
+        category:        'Regular',
+        concessions,
+        status:          'PENDING',
+        requestedBy:     requestedBy || 'admissions',
+        requestedByName: requestedByName || '',
+        approvedBy:      '',
+        approvedByName:  '',
+        concessionGivenBy: '',
+        rejectionReason: '',
+        createdAt:       now,
+        updatedAt:       now,
+      });
+      console.log(`[FeeRequestMongo] Created PENDING OverallConcessionRequest for ${admissionNumber}`);
+    }
+  } catch (err) {
+    console.error('[FeeRequestMongo] Failed to sync to Fee Management Mongo:', err?.message || err);
+  }
+};
 
 const sanitizeStudentFeeDetailsForDb = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
@@ -340,24 +441,72 @@ export const submitFeeRequest = async (req, res) => {
     }
 
     const admissionNumber = await resolveJoiningAdmissionNumberFromDb(pool, joining);
+
     const syncContext = buildJoiningFeeSyncContext(
       joining,
       studentFeeDetails,
       registrationExtras,
       admissionNumber
     );
-    const syncResult = await buildJoiningStepFourSyncPlan({
-      joiningId,
-      leadId: joining.lead_id,
-      studentFeeDetails,
-      joiningContext: syncContext,
-    });
 
-    const revisedLines = (syncResult?.lines || []).filter((line) => line.isRevised);
+    // Fetch student metadata from secondary DB for the Mongo document
+    let studentPinNo = '';
+    let studentCollege = syncContext?.collegeId || '';
+    try {
+      const secondaryPool = getSecondaryPool();
+      if (admissionNumber) {
+        const [sRows] = await secondaryPool.execute(
+          'SELECT pin_no, college FROM students WHERE admission_number = ? LIMIT 1',
+          [admissionNumber]
+        );
+        if (sRows[0]) {
+          studentPinNo  = sRows[0].pin_no  || '';
+          studentCollege = sRows[0].college || studentCollege;
+        }
+      }
+    } catch (secErr) {
+      console.warn('[submitFeeRequest] Secondary DB lookup skipped:', secErr?.message);
+    }
+
+    // Determine revised lines: first try the catalog sync plan (accurate),
+    // but fall back to raw builder lines when the catalog lookup yields nothing.
+    // This ensures the request is never blocked just because catalog matching fails.
+    let revisedLines = [];
+    try {
+      const syncResult = await buildJoiningStepFourSyncPlan({
+        joiningId,
+        leadId: joining.lead_id,
+        studentFeeDetails,
+        joiningContext: syncContext,
+      });
+      revisedLines = (syncResult?.lines || []).filter((line) => line.isRevised);
+    } catch (syncErr) {
+      console.warn('[submitFeeRequest] buildJoiningStepFourSyncPlan failed, falling back to raw lines:', syncErr?.message);
+    }
+
+    // Fallback: use raw builder lines that have a concession/revised type + amount
+    if (revisedLines.length === 0) {
+      const rawLines = Array.isArray(studentFeeDetails?.lines) ? studentFeeDetails.lines : [];
+      revisedLines = rawLines
+        .filter((line) =>
+          isPersistableBuilderConcessionLine(line) &&
+          (line.concessionType === 'CONCESSION' || line.concessionType === 'REVISED_FEE')
+        )
+        .map((line) => ({
+          feeHeadId:      line.feeHeadId || '',
+          feeHeadCode:    line.feeHeadCode || '',
+          feeHeadName:    line.feeHeadName || '',
+          studentYear:    Number(line.studentYear) || 1,
+          amount:         Number(line.amount) || 0,
+          concessionType: line.concessionType,
+          isRevised:      true,
+        }));
+    }
+
     if (revisedLines.length === 0) {
       return errorResponse(
         res,
-        'No revised fees to submit — revised amounts match the catalog fees',
+        'No revised fees to submit — add at least one concession or revised fee amount in the builder',
         400
       );
     }
@@ -420,6 +569,21 @@ export const submitFeeRequest = async (req, res) => {
       const [updated] = await pool.execute('SELECT * FROM fee_requests WHERE id = ?', [
         existingPending[0].id,
       ]);
+
+      // Mirror into Fee Management Mongo (fire-and-forget)
+      void syncRequestToFeeManagementMongo({
+        admissionNumber,
+        studentName:     joining.student_name || '',
+        pinNo:           studentPinNo,
+        college:         studentCollege,
+        course:          joining.course || '',
+        branch:          joining.branch || '',
+        batch:           payload.batch,
+        studentFeeDetails,
+        requestedBy:     String(req.user?.id || ''),
+        requestedByName: String(req.user?.name || ''),
+      });
+
       return successResponse(res, formatFeeRequestRow(updated[0]), 'Fee request updated', 200);
     }
 
@@ -449,6 +613,21 @@ export const submitFeeRequest = async (req, res) => {
     );
 
     const [created] = await pool.execute('SELECT * FROM fee_requests WHERE id = ?', [id]);
+
+    // Mirror into Fee Management Mongo (fire-and-forget)
+    void syncRequestToFeeManagementMongo({
+      admissionNumber,
+      studentName:     joining.student_name || '',
+      pinNo:           studentPinNo,
+      college:         studentCollege,
+      course:          joining.course || '',
+      branch:          joining.branch || '',
+      batch:           payload.batch,
+      studentFeeDetails,
+      requestedBy:     String(req.user?.id || ''),
+      requestedByName: String(req.user?.name || ''),
+    });
+
     return successResponse(res, formatFeeRequestRow(created[0]), 'Fee request submitted', 201);
   } catch (error) {
     console.error('submitFeeRequest error:', error);
@@ -532,6 +711,26 @@ export const approveFeeRequest = async (req, res) => {
        WHERE id = ?`,
       [req.user.id, reviewerNote || null, id]
     );
+
+    // Update status in Fee Management Mongo (fire-and-forget)
+    try {
+      const conn = await connectFeeManagement();
+      const collection = conn.db.collection('overallconcessionrequests');
+      await collection.updateOne(
+        { admissionNumber: request.admission_number, status: 'PENDING' },
+        {
+          $set: {
+            status: 'APPROVED',
+            approvedBy: String(req.user?.id || ''),
+            approvedByName: String(req.user?.name || ''),
+            updatedAt: new Date(),
+          }
+        }
+      );
+      console.log(`[FeeRequestMongo] Approved OverallConcessionRequest for ${request.admission_number}`);
+    } catch (mongoErr) {
+      console.error('[FeeRequestMongo] Failed to update status to APPROVED in Mongo:', mongoErr?.message || mongoErr);
+    }
 
     // Sync approved concessions to secondary database overall_concessions table
     try {
@@ -633,6 +832,25 @@ export const rejectFeeRequest = async (req, res) => {
        WHERE id = ?`,
       [req.user.id, reason || null, id]
     );
+
+    // Update status in Fee Management Mongo (fire-and-forget)
+    try {
+      const conn = await connectFeeManagement();
+      const collection = conn.db.collection('overallconcessionrequests');
+      await collection.updateOne(
+        { admissionNumber: rows[0].admission_number, status: 'PENDING' },
+        {
+          $set: {
+            status: 'REJECTED',
+            rejectionReason: reason || '',
+            updatedAt: new Date(),
+          }
+        }
+      );
+      console.log(`[FeeRequestMongo] Rejected OverallConcessionRequest for ${rows[0].admission_number}`);
+    } catch (mongoErr) {
+      console.error('[FeeRequestMongo] Failed to update status to REJECTED in Mongo:', mongoErr?.message || mongoErr);
+    }
 
     const [updated] = await pool.execute('SELECT * FROM fee_requests WHERE id = ?', [id]);
     return successResponse(res, formatFeeRequestRow(updated[0]), 'Fee request rejected', 200);

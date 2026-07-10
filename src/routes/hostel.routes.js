@@ -6,6 +6,7 @@ import {
   listHostelCategories,
   listHostelRooms,
   getHostelFee,
+  getHostelStudentDetails,
 } from '../controllers/hostel.controller.js';
 
 const router = express.Router();
@@ -17,5 +18,6 @@ router.get('/hostels', listHostels);
 router.get('/categories', listHostelCategories);
 router.get('/rooms', listHostelRooms);
 router.get('/fee', getHostelFee);
+router.get('/student', getHostelStudentDetails);
 
 export default router;
