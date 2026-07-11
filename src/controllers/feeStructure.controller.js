@@ -5,6 +5,7 @@ import {
 } from '../config-mongo/feeManagement.js';
 import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import { resolveFeePortalBranchLabel } from '../utils/feePortalBranchLabel.util.js';
+import { mapQuotaToFeeCategory } from '../utils/quotaClassification.util.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 
 const { Types: { ObjectId } } = mongoose;
@@ -22,43 +23,8 @@ const toObjectId = (value) => {
   }
 };
 
-const QUOTA_TO_CATEGORY = {
-  convenor: 'CONV',
-  convener: 'CONV',
-  conv: 'CONV',
-  management: 'MANG',
-  mang: 'MANG',
-  spot: 'SPOT',
-  'spot admission': 'SPOT',
-  'lateral entry': 'CONV',
-  'lateral spot': 'SPOT',
-};
-
 const normalize = (value) =>
   typeof value === 'string' ? value.trim() : value === undefined ? '' : String(value);
-
-const mapQuotaToCategory = (quota, studentStatus = null, batch = null) => {
-  const key = normalize(quota).toLowerCase();
-  if (!key) return '';
-
-  const cleanBatch = normalize(batch || '');
-  const isLateral = String(studentStatus || '').trim().toLowerCase() === 'lateral';
-
-  if (isLateral && cleanBatch === '2025') {
-    if (key === 'cq' || key.includes('conv') || key.includes('later')) {
-      return 'LATER';
-    }
-    if (key === 'spot' || key.includes('lspot')) {
-      return 'LSPOT';
-    }
-  }
-
-  if (QUOTA_TO_CATEGORY[key]) return QUOTA_TO_CATEGORY[key];
-  for (const [needle, bucket] of Object.entries(QUOTA_TO_CATEGORY)) {
-    if (key.includes(needle)) return bucket;
-  }
-  return key.toUpperCase();
-};
 
 /** Build a case-insensitive exact match regex for short attribute values like course/branch. */
 const exactIRegex = (value) => {
@@ -190,7 +156,7 @@ export const listFeeStructures = async (req, res) => {
     const studentStatusRaw = normalize(req.query.studentStatus);
     let categoryRaw = normalize(req.query.category);
     if (!categoryRaw && req.query.quota) {
-      categoryRaw = mapQuotaToCategory(req.query.quota, studentStatusRaw, batchRaw);
+      categoryRaw = mapQuotaToFeeCategory(req.query.quota, studentStatusRaw, batchRaw);
     }
 
     if (courseRaw) query.course = exactIRegex(mapCourseLabel(courseRaw));

@@ -4,6 +4,7 @@ import { mapCourseLabel } from '../data/admissionsCourseBranchMap2026.js';
 import { deriveAdmissionSeriesYear } from '../utils/lateralBatch.util.js';
 import { resolveFeePortalBranchLabel } from '../utils/feePortalBranchLabel.util.js';
 import { resolveTransportAcademicYear, normalizeCalendarAcademicYear } from '../utils/transportApplicationNumber.util.js';
+import { mapQuotaToFeeCategory } from '../utils/quotaClassification.util.js';
 import {
   previewJoiningBusSync,
   previewJoiningHostelSync,
@@ -104,43 +105,8 @@ const resolveAccommodationStudentYears = (overrideMap, programTotalYears = DEFAU
   return Array.from({ length: total }, (_, index) => index + 1);
 };
 
-const QUOTA_TO_CATEGORY = {
-  convenor: 'CONV',
-  convener: 'CONV',
-  conv: 'CONV',
-  management: 'MANG',
-  mang: 'MANG',
-  spot: 'SPOT',
-  'spot admission': 'SPOT',
-  'lateral entry': 'CONV',
-  'lateral spot': 'SPOT',
-};
-
 const normalize = (value) =>
   typeof value === 'string' ? value.trim() : value === undefined ? '' : String(value);
-
-const mapQuotaToCategory = (quota, studentStatus = null, batch = null) => {
-  const key = normalize(quota).toLowerCase();
-  if (!key) return '';
-
-  const cleanBatch = normalize(batch || '');
-  const isLateral = String(studentStatus || '').trim().toLowerCase() === 'lateral';
-
-  if (isLateral && cleanBatch === '2025') {
-    if (key === 'cq' || key.includes('conv') || key.includes('later')) {
-      return 'LATER';
-    }
-    if (key === 'spot' || key.includes('lspot')) {
-      return 'LSPOT';
-    }
-  }
-
-  if (QUOTA_TO_CATEGORY[key]) return QUOTA_TO_CATEGORY[key];
-  for (const [needle, bucket] of Object.entries(QUOTA_TO_CATEGORY)) {
-    if (key.includes(needle)) return bucket;
-  }
-  return key.toUpperCase();
-};
 
 const exactIRegex = (value) => {
   const escaped = normalize(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -254,6 +220,10 @@ const enrichWithFeeHead = async (db, structures) => {
   });
 };
 
+/** Fee Mongo mirror is written only when catalog or accommodation rows exist for the student batch. */
+const shouldPersistFeePortalMirror = (catalogRows, accommodationRows) =>
+  catalogRows.length > 0 || accommodationRows.length > 0;
+
 const loadCatalogFeeStructures = async (
   db,
   { course, branch, quota, batch, intakeBatch, admissionNumber, managedBranchId = null, studentStatus = null }
@@ -264,7 +234,7 @@ const loadCatalogFeeStructures = async (
     courseLabel: catalogCourse || course,
     managedBranchId,
   });
-  const category = mapQuotaToCategory(quota, studentStatus, batch);
+  const category = mapQuotaToFeeCategory(quota, studentStatus, batch);
   const requestedBatch = resolveRequestedFeeBatch({ batch, intakeBatch, admissionNumber });
 
   const buildFilter = (batchVal) => {
@@ -285,23 +255,9 @@ const loadCatalogFeeStructures = async (
     return enrichWithFeeHead(db, docs.map((doc) => ({ ...doc, _id: String(doc._id) })));
   };
 
-  let resolvedBatch = requestedBatch;
-  let batchMatchMode = 'exact';
-  let rows = await queryRows(requestedBatch);
-
-  // B.Tech / other programs may have fee rows under a prior intake year (e.g. 2025 vs 2026).
-  if (rows.length === 0 && requestedBatch && /^\d{4}$/.test(requestedBatch)) {
-    for (let offset = 1; offset <= 3; offset++) {
-      const candidate = String(Number(requestedBatch) - offset);
-      const fallbackRows = await queryRows(candidate);
-      if (fallbackRows.length > 0) {
-        rows = fallbackRows;
-        resolvedBatch = candidate;
-        batchMatchMode = 'fallback';
-        break;
-      }
-    }
-  }
+  const resolvedBatch = requestedBatch;
+  const batchMatchMode = 'exact';
+  const rows = await queryRows(requestedBatch);
 
   return {
     rows,
@@ -821,14 +777,19 @@ export async function buildJoiningStepFourSyncPlan({
     intakeBatchYear || batch || ''
   );
 
-  const feePortalDoc =
-    portalLines.length === 0 && !resolvedBatch && !accommodationType
+  const persistFeePortal = shouldPersistFeePortalMirror(catalogRows, accommodationRows);
+
+  const feePortalDoc = !persistFeePortal
       ? {
           skipped: false,
           collection: JOINING_STUDENT_FEE_MONGO_COLLECTION,
           database: 'fee_management',
           operation: 'deleteOne',
           filter: { joiningId },
+          reason:
+            catalogRows.length === 0
+              ? `No feestructures for batch ${catalogResult.catalogLookup.requestedBatch || batch || '—'}; fee mirror not stored`
+              : 'No catalog or accommodation fee rows to persist',
         }
       : {
           skipped: false,
@@ -844,7 +805,7 @@ export async function buildJoiningStepFourSyncPlan({
             course: joiningContext?.course || '',
             branch: joiningContext?.branch || '',
             quota: joiningContext?.quota || '',
-            batch: resolvedBatch,
+            batch: batch || resolvedBatch,
             requestedBatch: batch,
             intakeBatch: intakeBatchYear || null,
             transportAcademicYear: transportSessionYear || null,
@@ -971,7 +932,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
       intakeBatchYear || batch || ''
     );
 
-    if (portalLines.length === 0 && !resolvedBatch && !accommodationType) {
+    if (!shouldPersistFeePortalMirror(catalogRows, accommodationRows)) {
       await coll.deleteOne({ joiningId });
     } else {
       await coll.replaceOne(
@@ -984,7 +945,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
           course: joiningContext?.course || '',
           branch: joiningContext?.branch || '',
           quota: joiningContext?.quota || '',
-          batch: resolvedBatch,
+          batch: batch || resolvedBatch,
           requestedBatch: batch,
           intakeBatch: intakeBatchYear || null,
           transportAcademicYear: transportSessionYear || null,

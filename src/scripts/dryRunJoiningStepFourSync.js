@@ -144,7 +144,19 @@ const loadJoining = async (pool, args) => {
     return rows[0] || null;
   }
   if (args.admissionNumber) {
-    const like = `%${args.admissionNumber}%`;
+    const admissionNumber = String(args.admissionNumber).trim();
+    const [viaAdmission] = await pool.execute(
+      `SELECT j.*
+       FROM admissions a
+       INNER JOIN joinings j ON j.id = a.joining_id
+       WHERE a.admission_number = ?
+       ORDER BY a.updated_at DESC
+       LIMIT 1`,
+      [admissionNumber]
+    );
+    if (viaAdmission.length > 0) return viaAdmission[0];
+
+    const like = `%${admissionNumber}%`;
     const [rows] = await pool.execute(
       `SELECT * FROM joinings
        WHERE lead_data LIKE ?
