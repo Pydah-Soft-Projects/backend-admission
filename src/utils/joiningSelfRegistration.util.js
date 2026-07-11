@@ -19,6 +19,73 @@ export const SQL_JOINING_IS_SELF_REGISTRATION = `(
 
 const DEFAULT_GENERAL_RESERVATION = 'oc';
 
+const STUDENT_PHONE_REG_KEYS = [
+  'student_phone',
+  'phone',
+  'mobile',
+  'phonenumber',
+  'student_mobile',
+  'student_mobileno',
+  'mobile_number',
+  'phone_number',
+  'contact_number',
+  'primary_phone',
+  'student_contact_number',
+];
+
+const FATHER_PHONE_REG_KEYS = [
+  'father_phone',
+  'fatherphone',
+  'father_mobile',
+  'father_mobileno',
+  'parent_phone',
+  'parent_mobile',
+];
+
+const pickFromRegistrationFormData = (registrationFormData, keys) => {
+  if (!registrationFormData || typeof registrationFormData !== 'object') return '';
+  const want = new Set(keys.map((k) => String(k).toLowerCase()));
+  for (const [k, v] of Object.entries(registrationFormData)) {
+    if (!want.has(String(k).toLowerCase())) continue;
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return '';
+};
+
+const normalizePhoneTenDigits = (raw) => {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  if (d.length >= 10) return d.slice(-10);
+  return d;
+};
+
+const resolveSelfRegistrationStudentPhone = (studentInfo, registrationFormData) => {
+  let phone = normalizePhoneTenDigits(studentInfo?.phone);
+  if (phone.length !== 10) {
+    phone = normalizePhoneTenDigits(
+      pickFromRegistrationFormData(registrationFormData, STUDENT_PHONE_REG_KEYS)
+    );
+  }
+  if (phone.length !== 10) {
+    phone = normalizePhoneTenDigits(studentInfo?.preferredMobileNumber);
+  }
+  return phone;
+};
+
+const resolveSelfRegistrationFatherPhone = (studentPhone, parents, registrationFormData) => {
+  let fatherPhone = normalizePhoneTenDigits(parents?.father?.phone);
+  if (fatherPhone.length !== 10) {
+    fatherPhone = normalizePhoneTenDigits(
+      pickFromRegistrationFormData(registrationFormData, FATHER_PHONE_REG_KEYS)
+    );
+  }
+  if (fatherPhone.length !== 10 && studentPhone.length === 10) {
+    fatherPhone = studentPhone;
+  }
+  return fatherPhone;
+};
+
 export const isSelfRegistrationLead = (leadOrSnapshot) => {
   if (!leadOrSnapshot || typeof leadOrSnapshot !== 'object') return false;
   const source = String(leadOrSnapshot.source ?? '').trim();
@@ -53,15 +120,19 @@ export async function createSelfRegistrationLeadAndJoining(pool, payload, userId
   const courseInfo = payload?.courseInfo && typeof payload.courseInfo === 'object' ? payload.courseInfo : {};
   const address = payload?.address && typeof payload.address === 'object' ? payload.address : {};
   const comm = address.communication && typeof address.communication === 'object' ? address.communication : {};
+  const registrationFormData =
+    payload?.registrationFormData && typeof payload.registrationFormData === 'object'
+      ? payload.registrationFormData
+      : {};
 
   const enquiryNumber = await generateEnquiryNumber();
   const leadId = uuidv4();
   const joiningId = uuidv4();
 
   const studentName = String(studentInfo.name ?? '').trim() || 'Not Provided';
-  const studentPhone = String(studentInfo.phone ?? '').trim();
+  const studentPhone = resolveSelfRegistrationStudentPhone(studentInfo, registrationFormData);
   const fatherName = String(parents.father?.name ?? '').trim() || 'Not Provided';
-  const fatherPhone = String(parents.father?.phone ?? '').trim();
+  const fatherPhone = resolveSelfRegistrationFatherPhone(studentPhone, parents, registrationFormData);
   const motherName = String(parents.mother?.name ?? '').trim();
   const courseInterested = String(courseInfo.course ?? '').trim();
   const branch = String(courseInfo.branch ?? '').trim();
@@ -113,11 +184,11 @@ export async function createSelfRegistrationLeadAndJoining(pool, payload, userId
       leadId,
       enquiryNumber,
       studentName,
-      studentPhone || null,
+      studentPhone,
       null,
       fatherName,
       motherName || '',
-      fatherPhone || null,
+      fatherPhone,
       '',
       village,
       '',

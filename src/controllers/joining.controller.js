@@ -55,6 +55,33 @@ const DEFAULT_GENERAL_RESERVATION = 'oc';
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
 
+const normalizeJoiningDocumentStatus = (value) => {
+  const normalized = String(value ?? 'pending').trim().toLowerCase();
+  return normalized === 'received' ? 'received' : 'pending';
+};
+
+/** Ordered SQL values for joinings/admissions `document_*` columns. */
+const joiningDocumentsToSqlParams = (documents) => {
+  const docs = documents && typeof documents === 'object' ? documents : {};
+  return [
+    normalizeJoiningDocumentStatus(docs.ssc),
+    normalizeJoiningDocumentStatus(docs.inter),
+    normalizeJoiningDocumentStatus(docs.ugPgCmm),
+    normalizeJoiningDocumentStatus(docs.transferCertificate),
+    normalizeJoiningDocumentStatus(docs.studyCertificate),
+    normalizeJoiningDocumentStatus(docs.aadhaarCard),
+    normalizeJoiningDocumentStatus(docs.photos),
+    normalizeJoiningDocumentStatus(docs.incomeCertificate),
+    normalizeJoiningDocumentStatus(docs.casteCertificate),
+    normalizeJoiningDocumentStatus(docs.cetRankCard),
+    normalizeJoiningDocumentStatus(docs.cetHallTicket),
+    normalizeJoiningDocumentStatus(docs.allotmentLetter),
+    normalizeJoiningDocumentStatus(docs.joiningReport),
+    normalizeJoiningDocumentStatus(docs.bankPassbook),
+    normalizeJoiningDocumentStatus(docs.rationCard),
+  ];
+};
+
 /** Last 10 digits for Indian mobile numbers. */
 const normalizeMobileDigits = (value) =>
   String(value ?? '')
@@ -2666,6 +2693,8 @@ export const patchJoiningStepTwo = async (req, res) => {
         ? body.registrationFormData
         : {};
     const hasStudentFees = Object.prototype.hasOwnProperty.call(body, 'studentFeeDetails');
+    const hasDocuments =
+      body.documents && typeof body.documents === 'object' && !Array.isArray(body.documents);
 
     const hasTransportPatch =
       patchReg.transport_details &&
@@ -2722,6 +2751,22 @@ export const patchJoiningStepTwo = async (req, res) => {
       await pool.execute(
         `UPDATE joinings SET ${portraitColumnFields.join(', ')}, updated_by = ?, updated_at = NOW() WHERE id = ?`,
         [...portraitColumnParams, req.user.id, joining.id]
+      );
+    }
+
+    if (hasDocuments) {
+      const documentParams = joiningDocumentsToSqlParams(body.documents);
+      await pool.execute(
+        `UPDATE joinings SET
+          document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?,
+          document_transfer_certificate = ?, document_study_certificate = ?,
+          document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?,
+          document_caste_certificate = ?, document_cet_rank_card = ?, document_cet_hall_ticket = ?,
+          document_allotment_letter = ?, document_joining_report = ?, document_bank_passbook = ?,
+          document_ration_card = ?,
+          updated_by = ?, updated_at = NOW()
+        WHERE id = ?`,
+        [...documentParams, req.user.id, joining.id]
       );
     }
 
@@ -2797,6 +2842,22 @@ export const patchJoiningStepTwo = async (req, res) => {
         await pool.execute(
           `UPDATE admissions SET ${admPortraitFields.join(', ')}, updated_by = ?, updated_at = NOW() WHERE id = ?`,
           [...admPortraitParams, req.user.id, adm.id]
+        );
+      }
+
+      if (hasDocuments) {
+        const documentParams = joiningDocumentsToSqlParams(body.documents);
+        await pool.execute(
+          `UPDATE admissions SET
+            document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?,
+            document_transfer_certificate = ?, document_study_certificate = ?,
+            document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?,
+            document_caste_certificate = ?, document_cet_rank_card = ?, document_cet_hall_ticket = ?,
+            document_allotment_letter = ?, document_joining_report = ?, document_bank_passbook = ?,
+            document_ration_card = ?,
+            updated_by = ?, updated_at = NOW()
+          WHERE id = ?`,
+          [...documentParams, req.user.id, adm.id]
         );
       }
 

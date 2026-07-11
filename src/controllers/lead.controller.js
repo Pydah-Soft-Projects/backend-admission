@@ -172,16 +172,6 @@ const buildLeadFilterConditions = (req, alias = 'l') => {
           AND j_stale.status = 'approved'
           AND TRIM(COALESCE(a_stale.admission_number, '')) <> ''
       )`);
-      conditions.push(`NOT EXISTS (
-        SELECT 1
-        FROM leads l_phone_dup
-        INNER JOIN joinings j_phone_dup ON j_phone_dup.lead_id = l_phone_dup.id AND j_phone_dup.status = 'approved'
-        INNER JOIN admissions a_phone_dup ON a_phone_dup.joining_id = j_phone_dup.id
-        WHERE l_phone_dup.id <> ${p}id
-          AND TRIM(COALESCE(${p}phone, '')) <> ''
-          AND l_phone_dup.phone = ${p}phone
-          AND TRIM(COALESCE(a_phone_dup.admission_number, '')) <> ''
-      )`);
     }
   }
   if (callStatus) { conditions.push(`${p}call_status = ?`); params.push(callStatus); }
