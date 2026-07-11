@@ -114,6 +114,21 @@ const clearAdmissionQueryCache = () => {
   admissionQueryCache.clear();
 };
 
+/** Persist DOB as DD-MM-YYYY (same as joinings) whether the client sends YYYY-MM-DD or DD-MM-YYYY. */
+const normalizeStudentDobForStorage = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [year, month, day] = raw.split('-');
+    return `${day}-${month}-${year}`;
+  }
+  const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmy) {
+    return `${dmy[1].padStart(2, '0')}-${dmy[2].padStart(2, '0')}-${dmy[3]}`;
+  }
+  return raw;
+};
+
 const getAdmissionCachedCount = async (pool, sql, params, ttlMs, scopeKey) => {
   const key = `admission-count:${scopeKey}:${sql}:${stableStringify(params)}`;
   const cached = getAdmissionCached(key);
@@ -2154,7 +2169,7 @@ export const updateAdmissionById = async (req, res) => {
       }
       if (payload.studentInfo.dateOfBirth !== undefined) {
         updateFields.push('student_date_of_birth = ?');
-        updateParams.push(payload.studentInfo.dateOfBirth || '');
+        updateParams.push(normalizeStudentDobForStorage(payload.studentInfo.dateOfBirth));
       }
       if (payload.studentInfo.notes !== undefined) {
         updateFields.push('student_notes = ?');
@@ -2435,7 +2450,7 @@ export const updateAdmissionByLead = async (req, res) => {
       }
       if (payload.studentInfo.dateOfBirth !== undefined) {
         updateFields.push('student_date_of_birth = ?');
-        updateParams.push(payload.studentInfo.dateOfBirth || '');
+        updateParams.push(normalizeStudentDobForStorage(payload.studentInfo.dateOfBirth));
       }
       if (payload.studentInfo.notes !== undefined) {
         updateFields.push('student_notes = ?');

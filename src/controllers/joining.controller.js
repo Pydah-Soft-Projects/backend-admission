@@ -63,22 +63,28 @@ const normalizeJoiningDocumentStatus = (value) => {
 /** Ordered SQL values for joinings/admissions `document_*` columns. */
 const joiningDocumentsToSqlParams = (documents) => {
   const docs = documents && typeof documents === 'object' ? documents : {};
+  const read = (primary, alias) =>
+    normalizeJoiningDocumentStatus(
+      docs[primary] !== undefined && docs[primary] !== null && docs[primary] !== ''
+        ? docs[primary]
+        : docs[alias]
+    );
   return [
-    normalizeJoiningDocumentStatus(docs.ssc),
-    normalizeJoiningDocumentStatus(docs.inter),
-    normalizeJoiningDocumentStatus(docs.ugPgCmm),
-    normalizeJoiningDocumentStatus(docs.transferCertificate),
-    normalizeJoiningDocumentStatus(docs.studyCertificate),
-    normalizeJoiningDocumentStatus(docs.aadhaarCard),
-    normalizeJoiningDocumentStatus(docs.photos),
-    normalizeJoiningDocumentStatus(docs.incomeCertificate),
-    normalizeJoiningDocumentStatus(docs.casteCertificate),
-    normalizeJoiningDocumentStatus(docs.cetRankCard),
-    normalizeJoiningDocumentStatus(docs.cetHallTicket),
-    normalizeJoiningDocumentStatus(docs.allotmentLetter),
-    normalizeJoiningDocumentStatus(docs.joiningReport),
-    normalizeJoiningDocumentStatus(docs.bankPassbook),
-    normalizeJoiningDocumentStatus(docs.rationCard),
+    read('ssc', 'ssc'),
+    read('inter', 'inter'),
+    read('ugPgCmm', 'ugOrPgCmm'),
+    read('transferCertificate', 'transferCertificate'),
+    read('studyCertificate', 'studyCertificate'),
+    read('aadhaarCard', 'aadhaarCard'),
+    read('photos', 'photos'),
+    read('incomeCertificate', 'incomeCertificate'),
+    read('casteCertificate', 'casteCertificate'),
+    read('cetRankCard', 'cetRankCard'),
+    read('cetHallTicket', 'cetHallTicket'),
+    read('allotmentLetter', 'allotmentLetter'),
+    read('joiningReport', 'joiningReport'),
+    read('bankPassbook', 'bankPassBook'),
+    read('rationCard', 'rationCard'),
   ];
 };
 
@@ -1748,6 +1754,11 @@ const normalizeJoiningPayload = (payload) => {
       if (/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
         const [year, month, day] = dob.split('-');
         safePayload.studentInfo.dateOfBirth = `${day}-${month}-${year}`;
+      } else {
+        const dmy = String(dob).match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+        if (dmy) {
+          safePayload.studentInfo.dateOfBirth = `${dmy[1].padStart(2, '0')}-${dmy[2].padStart(2, '0')}-${dmy[3]}`;
+        }
       }
     }
   }
@@ -2511,21 +2522,7 @@ export const saveJoiningDraft = async (req, res) => {
         qualificationMeritToSql(qualifications.merit),
         JSON.stringify(qualifications.mediums || []),
         qualifications.otherMediumLabel || '',
-        documents.ssc || 'pending',
-        documents.inter || 'pending',
-        documents.ugPgCmm || 'pending',
-        documents.transferCertificate || 'pending',
-        documents.studyCertificate || 'pending',
-        documents.aadhaarCard || 'pending',
-        documents.photos || 'pending',
-        documents.incomeCertificate || 'pending',
-        documents.casteCertificate || 'pending',
-        documents.cetRankCard || 'pending',
-        documents.cetHallTicket || 'pending',
-        documents.allotmentLetter || 'pending',
-        documents.joiningReport || 'pending',
-        documents.bankPassbook || 'pending',
-        documents.rationCard || 'pending',
+        ...joiningDocumentsToSqlParams(documents),
         reservation.isEws === true ? 1 : 0,
         req.user.id,
         joiningIdToUse,
@@ -2558,6 +2555,33 @@ export const saveJoiningDraft = async (req, res) => {
       studentFeeDetails: sanitizeStudentFeeDetailsForDb(rawStudentFeeFromLeadData),
       registrationExtras: registrationExtrasForSync,
     });
+
+    if (
+      previousStatus === 'approved' &&
+      payload.documents &&
+      typeof payload.documents === 'object' &&
+      !Array.isArray(payload.documents)
+    ) {
+      const [admDocRows] = await pool.execute(
+        'SELECT id FROM admissions WHERE joining_id = ? LIMIT 1',
+        [joiningIdToUse]
+      );
+      if (admDocRows.length > 0) {
+        const documentParams = joiningDocumentsToSqlParams(payload.documents);
+        await pool.execute(
+          `UPDATE admissions SET
+            document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?,
+            document_transfer_certificate = ?, document_study_certificate = ?,
+            document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?,
+            document_caste_certificate = ?, document_cet_rank_card = ?, document_cet_hall_ticket = ?,
+            document_allotment_letter = ?, document_joining_report = ?, document_bank_passbook = ?,
+            document_ration_card = ?,
+            updated_by = ?, updated_at = NOW()
+          WHERE id = ?`,
+          [...documentParams, req.user.id, admDocRows[0].id]
+        );
+      }
+    }
 
     if (payload.reference1 !== undefined) {
       const [admRows] = await pool.execute(
