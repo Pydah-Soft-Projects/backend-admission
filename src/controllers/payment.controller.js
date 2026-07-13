@@ -6,6 +6,7 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { createOrder as cashfreeCreateOrder, getOrder as cashfreeGetOrder } from '../services/cashfree.service.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+import { generateTransactionReceiptNumber } from '../services/receiptSequence.service.js';
 import { normalizeOverallConcessionLinesForStorage } from '../utils/overallConcessions.util.js';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -189,8 +190,6 @@ const toMongoFeeHeadValue = (value) => {
   }
   return raw;
 };
-
-const generateReceiptNumber = () => `REC${Math.floor(100000000 + Math.random() * 900000000)}`;
 
 const normalizeManualPaymentMode = (value) => {
   const raw = String(value || '').trim().toLowerCase();
@@ -496,10 +495,19 @@ export const recordFeeManagementTransaction = async (req, res) => {
       : [[]];
     const collector = users[0] || null;
     const now = new Date();
-    const normalizedReceipt =
+    const conn = await connectFeeManagement();
+    const bankReference =
       receiptNumber != null && String(receiptNumber).trim() !== ''
         ? String(receiptNumber).trim()
-        : generateReceiptNumber();
+        : '';
+    const normalizedReceipt = await generateTransactionReceiptNumber({
+      admissionNumber: studentId,
+      feeHeadId: feeHead,
+      transactionDate: now,
+      admission,
+      joining,
+      feeMgmtDb: conn.db,
+    });
     const normalizedPaymentMode = normalizeManualPaymentMode(paymentMode);
     const normalizedStudentYear =
       studentYear != null && String(studentYear).trim() !== ''
@@ -508,7 +516,6 @@ export const recordFeeManagementTransaction = async (req, res) => {
     const normalizedSemester =
       semester != null && String(semester).trim() !== '' ? String(semester).trim() : null;
 
-    const conn = await connectFeeManagement();
     const doc = {
       studentId,
       studentName: String(admission?.student_name || joining.student_name || '').trim(),
@@ -522,7 +529,7 @@ export const recordFeeManagementTransaction = async (req, res) => {
       semester: normalizedSemester,
       studentYear: normalizedStudentYear,
       receiptNumber: normalizedReceipt,
-      referenceNo: normalizedReceipt,
+      referenceNo: bankReference || normalizedReceipt,
       referenceDate: now,
       collectedBy: req.user?.id ? String(req.user.id) : '',
       collectedByName: String(collector?.name || req.user?.name || '').trim(),
@@ -1735,7 +1742,14 @@ export const verifyRazorpayQR = async (req, res) => {
       for (const t of targets) {
         const feeHeadValue = toMongoFeeHeadValue(t.feeHeadId);
         if (!feeHeadValue) continue;
-        const normalizedReceipt = generateReceiptNumber();
+        const normalizedReceipt = await generateTransactionReceiptNumber({
+          admissionNumber: studentId,
+          feeHeadId: t.feeHeadId,
+          transactionDate: now,
+          admission,
+          joining,
+          feeMgmtDb: conn.db,
+        });
         const doc = {
           studentId,
           studentName: String(admission?.student_name || joining.student_name || '').trim(),
@@ -1762,7 +1776,14 @@ export const verifyRazorpayQR = async (req, res) => {
     } else {
       const feeHeadValue = toMongoFeeHeadValue(metaObj.feeHeadId);
       if (feeHeadValue) {
-        const normalizedReceipt = generateReceiptNumber();
+        const normalizedReceipt = await generateTransactionReceiptNumber({
+          admissionNumber: studentId,
+          feeHeadId: metaObj.feeHeadId,
+          transactionDate: now,
+          admission,
+          joining,
+          feeMgmtDb: conn.db,
+        });
         const doc = {
           studentId,
           studentName: String(admission?.student_name || joining.student_name || '').trim(),
