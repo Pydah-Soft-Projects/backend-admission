@@ -125,6 +125,28 @@ const buildHmsCourseMatchers = async (db, course) => {
   return matchers;
 };
 
+const buildCourseRegexes = (courseName) => {
+  const labels = new Set();
+  const raw = String(courseName || '').trim();
+  if (!raw) return [];
+  labels.add(raw);
+  const mapped = mapCourseLabel(raw);
+  if (mapped) labels.add(mapped);
+  return [...labels].map((label) => new RegExp(`^${escapeRegex(label)}$`, 'i'));
+};
+
+const filterFeeDocsByCourse = (docs, courseName) => {
+  if (!courseName || !Array.isArray(docs) || docs.length === 0) return docs;
+  const labels = new Set(
+    [String(courseName).trim(), mapCourseLabel(courseName)].filter(Boolean).map((l) => l.toLowerCase())
+  );
+  const filtered = docs.filter((doc) => {
+    const course = String(doc.course || '').trim().toLowerCase();
+    return course && labels.has(course);
+  });
+  return filtered;
+};
+
 const findLegacyHostelFeeDocs = async (db, { hostelId, categoryId, academicYear, course }) => {
   const baseQuery = {
     hostel: refMatch(hostelId),
@@ -141,41 +163,44 @@ const findLegacyHostelFeeDocs = async (db, { hostelId, categoryId, academicYear,
     return query;
   };
 
-  const courseRegex = courseName
-    ? new RegExp(`^${escapeRegex(courseName)}$`, 'i')
-    : null;
+  const courseRegexes = buildCourseRegexes(courseName);
 
   const attempts = [];
 
-  if (normalizedYear && courseRegex) {
-    attempts.push(queryWithFilters(normalizedYear, courseRegex));
-  }
-  if (normalizedYear) {
+  if (normalizedYear && courseRegexes.length > 0) {
+    for (const courseRegex of courseRegexes) {
+      attempts.push(queryWithFilters(normalizedYear, courseRegex));
+    }
+  } else if (normalizedYear) {
+    // No course on the student — year-wide category fee is acceptable.
     attempts.push(queryWithFilters(normalizedYear, null));
   }
+
   // When a session year is requested (e.g. 2026-2027 from Step 1), do not fall back to
   // fee rows from other academic years — that surfaces stale test amounts (e.g. ₹10).
   if (!normalizedYear) {
-    if (courseRegex) {
+    for (const courseRegex of courseRegexes) {
       attempts.push(queryWithFilters(null, courseRegex));
     }
-    attempts.push(baseQuery);
+    if (courseRegexes.length === 0) {
+      attempts.push(baseQuery);
+    }
   }
 
   for (const query of attempts) {
     const docs = await db.collection('hostelfeestructures').find(query).toArray();
-    if (docs.length > 0) {
+    const matchedDocs = courseName ? filterFeeDocsByCourse(docs, courseName) : docs;
+    if (matchedDocs.length > 0) {
       const resolved = normalizeAcademicYear(
-        docs.find((doc) => normalizeAcademicYear(doc.academicYear))?.academicYear ||
-          docs[0]?.academicYear ||
+        matchedDocs.find((doc) => normalizeAcademicYear(doc.academicYear))?.academicYear ||
+          matchedDocs[0]?.academicYear ||
           normalizedYear ||
           ''
       );
       return {
-        docs,
+        docs: matchedDocs,
         resolvedAcademicYear: resolved,
-        matchedBy:
-          normalizedYear && resolved && resolved !== normalizedYear ? 'fallback' : 'exact',
+        matchedBy: 'legacy',
       };
     }
   }
@@ -222,11 +247,12 @@ const findHmsFeePortalDocs = async (db, { categoryId, academicYear, course }) =>
 };
 
 const findHostelFeeDocs = async (db, params) => {
-  const legacy = await findLegacyHostelFeeDocs(db, params);
-  if (legacy.docs.length > 0) return legacy;
-
+  // HMS portal `feestructures` is the source of truth for configured course fees.
   const portal = await findHmsFeePortalDocs(db, params);
   if (portal.docs.length > 0) return portal;
+
+  const legacy = await findLegacyHostelFeeDocs(db, params);
+  if (legacy.docs.length > 0) return legacy;
 
   return {
     docs: [],
