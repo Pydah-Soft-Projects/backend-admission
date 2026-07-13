@@ -9,6 +9,7 @@ import {
   peekNextTransportApplicationNumber,
   calendarYearToAcademicYearSession,
 } from '../utils/transportApplicationNumber.util.js';
+import { cancelStudentTransportRequest } from '../services/transportRequestCancellation.service.js';
 
 const getActiveConnection = async () => {
   try {
@@ -176,7 +177,7 @@ export const getStudentTransportRequest = async (req, res) => {
 
     const normalizedAY = academicYear ? calendarYearToAcademicYearSession(academicYear) : null;
 
-    let query = `SELECT id, admission_number, student_name, route_id, route_name, stage_name, bus_id, fare, status, request_date, academic_year, application_number, application_serial 
+    let query = `SELECT id, admission_number, student_name, route_id, route_name, stage_name, bus_id, fare, status, cancellation_reason, request_date, academic_year, application_number, application_serial 
                  FROM transport_requests 
                  WHERE admission_number = ?`;
     const params = [admissionNumber];
@@ -194,5 +195,43 @@ export const getStudentTransportRequest = async (req, res) => {
   } catch (error) {
     console.error('getStudentTransportRequest error:', error);
     return errorResponse(res, error.message || 'Failed to fetch student transport request', 500);
+  }
+};
+
+/** POST /api/transport/requests/cancel — cancel active transport request + deactivate bus fee rows. */
+export const cancelStudentTransportRequestHandler = async (req, res) => {
+  try {
+    const admissionNumber = String(req.body?.admissionNumber || req.body?.admission_number || '').trim();
+    const academicYear = String(req.body?.academicYear || req.body?.academic_year || '').trim();
+    const reason = String(req.body?.reason || req.body?.cancellationReason || '').trim();
+    const requestId = req.body?.requestId != null ? Number(req.body.requestId) : null;
+    const joiningId = String(req.body?.joiningId || req.body?.joining_id || '').trim() || null;
+
+    if (!admissionNumber && !requestId) {
+      return errorResponse(res, 'admissionNumber or requestId is required', 400);
+    }
+    if (!reason) {
+      return errorResponse(res, 'Cancellation reason is required', 400);
+    }
+
+    try {
+      getSecondaryPool();
+    } catch (err) {
+      return errorResponse(res, 'Secondary database is not available', 503);
+    }
+
+    const result = await cancelStudentTransportRequest({
+      admissionNumber: admissionNumber || undefined,
+      academicYear: academicYear || undefined,
+      requestId: Number.isFinite(requestId) ? requestId : undefined,
+      reason,
+      joiningId,
+    });
+
+    return successResponse(res, result);
+  } catch (error) {
+    console.error('cancelStudentTransportRequestHandler error:', error);
+    const status = /not found|already/i.test(String(error.message || '')) ? 400 : 500;
+    return errorResponse(res, error.message || 'Failed to cancel transport request', status);
   }
 };

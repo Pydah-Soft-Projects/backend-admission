@@ -454,6 +454,7 @@ const buildStudentFeeUpsertDocs = ({
           remarks,
           source: 'admissions_crm',
           sourceKey,
+          isActive: true,
           updatedAt: now,
         },
       };
