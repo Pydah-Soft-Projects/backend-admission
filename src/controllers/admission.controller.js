@@ -40,6 +40,8 @@ import {
   SQL_IS_CONV_QUOTA,
   SQL_IS_MANG_QUOTA,
   SQL_IS_SPOT_QUOTA,
+  SQL_IS_LATER_QUOTA,
+  SQL_IS_LSPOT_QUOTA,
 } from '../utils/quotaClassification.util.js';
 import {
   isDirectReference,
@@ -149,6 +151,9 @@ const SQL_IS_MERIT_NO = 'qualification_merit = 0';
 /** Abstract Merit column — active admissions only (excludes withdrawn and cancelled). */
 const SQL_ABSTRACT_MERIT_YES = `${SQL_IS_MERIT_YES} AND ${SQL_IS_ACTIVE_ADMISSION}`;
 const SQL_ABSTRACT_MERIT_NO = `${SQL_IS_MERIT_NO} AND ${SQL_IS_ACTIVE_ADMISSION}`;
+/** Abstract display only: lateral entry → Convenor; lateral spot → Management (no DB / quota changes). */
+const SQL_ABSTRACT_CQ_ADMITTED = `(${SQL_IS_CONV_QUOTA} OR ${SQL_IS_LATER_QUOTA})`;
+const SQL_ABSTRACT_MQ_ADMITTED = `(${SQL_IS_MANG_QUOTA} OR ${SQL_IS_LSPOT_QUOTA})`;
 
 const parseBranchMetadataObject = (metadata) => {
   if (!metadata) return null;
@@ -2773,10 +2778,10 @@ export const getAdmissionStats = async (req, res) => {
         MAX(branch) as branchName,
         COUNT(CASE WHEN ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as totalAdmissions,
         COUNT(CASE WHEN ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as totalCancelled,
-        COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as cqAdmitted,
-        COUNT(CASE WHEN ${SQL_IS_CONV_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as cqCancelled,
-        COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as mqAdmitted,
-        COUNT(CASE WHEN ${SQL_IS_MANG_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as mqCancelled,
+        COUNT(CASE WHEN ${SQL_ABSTRACT_CQ_ADMITTED} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as cqAdmitted,
+        COUNT(CASE WHEN ${SQL_ABSTRACT_CQ_ADMITTED} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as cqCancelled,
+        COUNT(CASE WHEN ${SQL_ABSTRACT_MQ_ADMITTED} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as mqAdmitted,
+        COUNT(CASE WHEN ${SQL_ABSTRACT_MQ_ADMITTED} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as mqCancelled,
         COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_ACTIVE_ADMISSION} THEN 1 END) as spotAdmitted,
         COUNT(CASE WHEN ${SQL_IS_SPOT_QUOTA} AND ${SQL_IS_CANCELLED_ADMISSION} THEN 1 END) as spotCancelled,
         COUNT(CASE WHEN ${SQL_ABSTRACT_MERIT_YES} THEN 1 END) as meritYes,
