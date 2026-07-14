@@ -83,6 +83,7 @@ export async function syncJoiningBusToTransportMongo({ joiningId, leadId, joinin
     feeHeadCode: 'TRN01',
     feeHeadName: 'Bus Fee',
     source: 'admissions_crm',
+    isActive: true,
     updatedAt: new Date(),
   };
 

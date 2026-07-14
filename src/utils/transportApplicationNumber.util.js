@@ -162,11 +162,63 @@ async function ensureTransportApplicationCounterRow(connection, academicYear, co
     [academicYear, college, course]
   );
 
+  const counterSerial = Number(counterRows[0]?.last_serial || 0);
+  const requestsMaxSerial = await getMaxTransportApplicationSerialFromRequests(
+    connection,
+    academicYear,
+    college,
+    course
+  );
+  const lastSerial = Math.max(counterSerial, requestsMaxSerial);
+
+  if (lastSerial > counterSerial) {
+    await connection.query(
+      `UPDATE transport_application_counters
+       SET last_serial = ?
+       WHERE academic_year = ? AND college_code = ? AND course_code = ?`,
+      [lastSerial, academicYear, college, course]
+    );
+  }
+
   return {
     collegeCode: college,
     courseCode: course,
-    lastSerial: Number(counterRows[0]?.last_serial || 0),
+    lastSerial,
   };
+}
+
+/** Highest assigned serial already stored on transport_requests for this AY + college + course. */
+export async function getMaxTransportApplicationSerialFromRequests(
+  mysqlPool,
+  academicYear,
+  collegeCode,
+  courseCode
+) {
+  const college = normalizeTransportCodePart(collegeCode);
+  const course = normalizeTransportCodePart(courseCode);
+
+  const [rows] = await mysqlPool.query(
+    `SELECT application_number, application_serial
+     FROM transport_requests
+     WHERE academic_year = ?
+       AND application_number IS NOT NULL
+       AND TRIM(application_number) != ''`,
+    [academicYear]
+  );
+
+  let maxSerial = 0;
+  for (const row of rows) {
+    if (!transportApplicationScopeMatches(row.application_number, college, course)) continue;
+    const parsed = parseTransportApplicationNumber(row.application_number);
+    const serial =
+      row.application_serial != null && Number.isFinite(Number(row.application_serial))
+        ? Number(row.application_serial)
+        : parsed?.serial;
+    if (Number.isFinite(serial) && serial > maxSerial) {
+      maxSerial = serial;
+    }
+  }
+  return maxSerial;
 }
 
 export async function assignTransportApplicationNumber(
@@ -263,7 +315,14 @@ export async function peekNextTransportApplicationNumber(
     [academicYear, college, course]
   );
 
-  const nextSerial = Number(counterRows[0]?.last_serial || 0) + 1;
+  const counterSerial = Number(counterRows[0]?.last_serial || 0);
+  const requestsMaxSerial = await getMaxTransportApplicationSerialFromRequests(
+    mysqlPool,
+    academicYear,
+    college,
+    course
+  );
+  const nextSerial = Math.max(counterSerial, requestsMaxSerial) + 1;
 
   return {
     application_number: formatTransportApplicationNumber(college, course, nextSerial),

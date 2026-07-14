@@ -150,7 +150,8 @@ const buildAccommodationCatalogRows = (transportDetails, overrideMap, feeHeads, 
   if (
     transportDetails.accommodationType === 'hostel' &&
     transportDetails.hostelId &&
-    transportDetails.categoryId
+    transportDetails.categoryId &&
+    (transportDetails.roomId || transportDetails.roomNumber)
   ) {
     const overrideIds = [...overrideMap.keys()].filter(isHostelStructureId);
     const yearsFromOverrides = overrideIds
@@ -453,6 +454,7 @@ const buildStudentFeeUpsertDocs = ({
           remarks,
           source: 'admissions_crm',
           sourceKey,
+          isActive: true,
           updatedAt: now,
         },
       };
