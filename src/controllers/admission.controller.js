@@ -606,6 +606,8 @@ const syncLinkedJoiningCourseInfo = async (pool, joiningId, courseInfo, userId) 
     courseInfo.courseId,
     courseInfo.branchId
   );
+  const managedCourseId = normalizeManagedIdForDb(courseInfo.courseId);
+  const managedBranchId = normalizeManagedIdForDb(courseInfo.branchId);
   await pool.execute(
     `UPDATE joinings SET
       course_id = ?,
@@ -615,20 +617,120 @@ const syncLinkedJoiningCourseInfo = async (pool, joiningId, courseInfo, userId) 
       course = ?,
       branch = ?,
       quota = COALESCE(?, quota),
+      lead_data = JSON_SET(
+        COALESCE(CASE WHEN JSON_VALID(lead_data) THEN lead_data ELSE JSON_OBJECT() END, JSON_OBJECT()),
+        '$._joiningManagedCourseId', ?,
+        '$._joiningManagedBranchId', ?
+      ),
       updated_by = ?,
       updated_at = NOW()
     WHERE id = ?`,
     [
       fkCourseId,
       fkBranchId,
-      normalizeManagedIdForDb(courseInfo.courseId),
-      normalizeManagedIdForDb(courseInfo.branchId),
+      managedCourseId,
+      managedBranchId,
       courseInfo.course || '',
       courseInfo.branch || '',
       courseInfo.quota !== undefined ? courseInfo.quota || '' : null,
+      managedCourseId,
+      managedBranchId,
       userId || null,
       joiningId,
     ]
+  );
+};
+
+/**
+ * Keep registration college fields in sync with the managed course's secondary college.
+ * Without this, Update Admission can change course/branch while college_id in
+ * `_joiningRegistrationExtras` stays on the previous campus — Edit Application then shows the old college.
+ */
+const persistCollegeExtrasFromManagedCourse = async (
+  pool,
+  admissionId,
+  joiningId,
+  managedCourseId,
+  userId
+) => {
+  const courseKey = normalizeManagedIdForDb(managedCourseId);
+  if (!courseKey) return;
+
+  let collegeId = null;
+  let collegeName = '';
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [courseRows] = await secondaryPool.execute(
+      'SELECT college_id FROM courses WHERE id = ? LIMIT 1',
+      [courseKey]
+    );
+    if (!courseRows.length || courseRows[0].college_id == null) return;
+    collegeId = String(courseRows[0].college_id).trim();
+    if (!collegeId) return;
+    const [collegeRows] = await secondaryPool.execute(
+      'SELECT name FROM colleges WHERE id = ? LIMIT 1',
+      [collegeId]
+    );
+    collegeName = String(collegeRows[0]?.name || '').trim();
+  } catch (err) {
+    console.warn(
+      'persistCollegeExtrasFromManagedCourse: secondary lookup failed:',
+      err?.message || err
+    );
+    return;
+  }
+
+  const patchExtras = (prevExtras) => ({
+    ...(prevExtras && typeof prevExtras === 'object' ? prevExtras : {}),
+    college_id: collegeId,
+    collegeId,
+    school_or_college_id: collegeId,
+    schoolOrCollegeId: collegeId,
+    school_or_college_name: collegeName,
+    college: collegeName,
+  });
+
+  const [admRows] = await pool.execute(
+    'SELECT id, lead_data FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  if (admRows.length) {
+    let admLd =
+      typeof admRows[0].lead_data === 'string'
+        ? JSON.parse(admRows[0].lead_data || '{}')
+        : admRows[0].lead_data || {};
+    if (!admLd || typeof admLd !== 'object') admLd = {};
+    const nextLd = {
+      ...admLd,
+      _joiningRegistrationExtras: patchExtras(admLd._joiningRegistrationExtras),
+    };
+    await pool.execute(
+      `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+      [JSON.stringify(nextLd), userId || null, admissionId]
+    );
+  }
+
+  if (!joiningId) return;
+  const [joiningRows] = await pool.execute(
+    'SELECT id, lead_data, managed_course_id, managed_branch_id FROM joinings WHERE id = ? LIMIT 1',
+    [joiningId]
+  );
+  if (!joiningRows.length) return;
+  let jLd =
+    typeof joiningRows[0].lead_data === 'string'
+      ? JSON.parse(joiningRows[0].lead_data || '{}')
+      : joiningRows[0].lead_data || {};
+  if (!jLd || typeof jLd !== 'object') jLd = {};
+  const jNextLd = {
+    ...jLd,
+    _joiningManagedCourseId:
+      normalizeManagedIdForDb(joiningRows[0].managed_course_id) || courseKey,
+    _joiningManagedBranchId: normalizeManagedIdForDb(joiningRows[0].managed_branch_id),
+    _joiningRegistrationExtras: patchExtras(jLd._joiningRegistrationExtras),
+  };
+  await pool.execute(
+    `UPDATE joinings SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(jNextLd), userId || null, joiningId]
   );
 };
 
@@ -653,6 +755,34 @@ export const persistAdmissionCourseBranchUpdate = async (
   await persistAdmissionManagedIdsInLeadData(pool, admissionId, courseInfo);
   if (joiningId) {
     await syncLinkedJoiningCourseInfo(pool, joiningId, courseInfo, userId);
+  }
+  await persistCollegeExtrasFromManagedCourse(
+    pool,
+    admissionId,
+    joiningId,
+    courseInfo.courseId,
+    userId
+  );
+
+  // Keep CRM lead interest in sync so lists / edit-application fallbacks are not stale.
+  const [admLead] = await pool.execute(
+    'SELECT lead_id FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  const leadId = admLead[0]?.lead_id;
+  if (leadId) {
+    const courseName = String(courseInfo.course || '').trim();
+    const branchName = String(courseInfo.branch || '').trim();
+    const courseInterested =
+      courseName && branchName
+        ? `${courseName} - ${branchName}`
+        : courseName || branchName || null;
+    if (courseInterested) {
+      await pool.execute(
+        `UPDATE leads SET course_interested = ?, updated_at = NOW() WHERE id = ?`,
+        [courseInterested, leadId]
+      );
+    }
   }
 };
 
