@@ -57,6 +57,34 @@ function pickFromRegistrationFormData(registrationFormData, keys) {
   return '';
 }
 
+/**
+ * Intact portrait data URLs keep lowercase `data:image/...;base64,/9j/...`.
+ * Some rows were saved with a full toUpperCase() pass (`DATA:IMAGE.../9J/...`),
+ * which corrupts base64 and breaks image decode. Prefer intact copies when merging.
+ */
+export function isIntactPortraitDataUrl(value) {
+  const s = String(value ?? '').trim();
+  return /^data:image\/[a-z0-9.+-]+;base64,\/9j\//.test(s);
+}
+
+export function isUppercasedCorruptPortraitDataUrl(value) {
+  const s = String(value ?? '').trim();
+  return /^DATA:IMAGE\//.test(s) && s.includes('/9J/');
+}
+
+/**
+ * Prefer an intact JPEG data URL among candidates.
+ * Never fall back to uppercased-corrupt DATA:IMAGE/.../9J/ payloads (they break decode
+ * and can overwrite good secondary photos during sync).
+ */
+export function preferIntactPortraitPhoto(...candidates) {
+  const list = candidates.map((c) => String(c ?? '').trim()).filter(Boolean);
+  const intact = list.find((s) => isIntactPortraitDataUrl(s));
+  if (intact) return intact;
+  const nonCorrupt = list.find((s) => !isUppercasedCorruptPortraitDataUrl(s));
+  return nonCorrupt || '';
+}
+
 /** Resolve student / father / mother portrait values from registration extras. */
 export function extractPortraitPhotosFromRegistrationFormData(registrationFormData) {
   const studentRaw = pickFromRegistrationFormData(registrationFormData, STUDENT_PHOTO_REG_KEYS);

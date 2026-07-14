@@ -18,7 +18,7 @@ import {
   resolveSecondaryYearOfStudy,
 } from './lateralBatch.util.js';
 import { classifyAdmissionQuotaCategory } from './quotaClassification.util.js';
-import { extractPortraitPhotosFromRegistrationFormData } from './joiningParentPhotos.util.js';
+import { extractPortraitPhotosFromRegistrationFormData, preferIntactPortraitPhoto } from './joiningParentPhotos.util.js';
 import {
   assignStudentRollNumber,
   isRollEligibleAdmissionNumber,
@@ -757,17 +757,20 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
 
     const portraitsFromReg = extractPortraitPhotosFromRegistrationFormData(registrationExtras);
     const studentPhotoExtracted =
-      portraitsFromReg.studentPhoto ||
-      admissionData?.studentInfo?.photo ||
-      null;
+      preferIntactPortraitPhoto(
+        admissionData?.studentInfo?.photo,
+        portraitsFromReg.studentPhoto
+      ) || null;
     const fatherPhotoExtracted =
-      portraitsFromReg.fatherPhoto ||
-      admissionData?.parents?.father?.photo ||
-      null;
+      preferIntactPortraitPhoto(
+        admissionData?.parents?.father?.photo,
+        portraitsFromReg.fatherPhoto
+      ) || null;
     const motherPhotoExtracted =
-      portraitsFromReg.motherPhoto ||
-      admissionData?.parents?.mother?.photo ||
-      null;
+      preferIntactPortraitPhoto(
+        admissionData?.parents?.mother?.photo,
+        portraitsFromReg.motherPhoto
+      ) || null;
 
     const preferredMobileForSecondary = (() => {
       const preferred = String(admissionData.studentInfo?.preferredMobileNumber ?? '')

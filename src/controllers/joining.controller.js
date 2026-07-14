@@ -18,6 +18,7 @@ import {
   MOTHER_PHOTO_REG_KEYS,
   STUDENT_PHOTO_REG_KEYS,
   extractPortraitPhotosFromRegistrationFormData,
+  preferIntactPortraitPhoto,
 } from '../utils/joiningParentPhotos.util.js';
 import {
   communicationAddressFromSqlRow,
@@ -926,19 +927,18 @@ const formatJoining = async (joiningData, pool, options = {}) => {
   const colFatherPhoto = String(joiningData.father_photo || '').trim();
   const colMotherPhoto = String(joiningData.mother_photo || '').trim();
   const colStudentPhoto = String(joiningData.student_photo || '').trim();
-  const fatherPortrait = (fromRegFatherPhoto || colFatherPhoto || '').trim();
-  const motherPortrait = (fromRegMotherPhoto || colMotherPhoto || '').trim();
-  const studentPortrait = (fromRegStudentPhoto || colStudentPhoto || '').trim();
-  if (colFatherPhoto && !fromRegFatherPhoto) {
-    registrationFormData = { ...registrationFormData, father_photo: colFatherPhoto };
+  // Prefer intact column/data-url copies over uppercased-corrupt extras.
+  const fatherPortrait = preferIntactPortraitPhoto(colFatherPhoto, fromRegFatherPhoto);
+  const motherPortrait = preferIntactPortraitPhoto(colMotherPhoto, fromRegMotherPhoto);
+  const studentPortrait = preferIntactPortraitPhoto(colStudentPhoto, fromRegStudentPhoto);
+  if (fatherPortrait && fatherPortrait !== fromRegFatherPhoto) {
+    registrationFormData = { ...registrationFormData, father_photo: fatherPortrait };
   }
-  if (colMotherPhoto && !fromRegMotherPhoto) {
-    registrationFormData = { ...registrationFormData, mother_photo: colMotherPhoto };
+  if (motherPortrait && motherPortrait !== fromRegMotherPhoto) {
+    registrationFormData = { ...registrationFormData, mother_photo: motherPortrait };
   }
-  // Ensure student_photo from the dedicated column is always available in registrationFormData
-  // so the frontend photo slot shows the saved image on reload.
-  if (colStudentPhoto && !fromRegStudentPhoto) {
-    registrationFormData = { ...registrationFormData, student_photo: colStudentPhoto };
+  if (studentPortrait && studentPortrait !== fromRegStudentPhoto) {
+    registrationFormData = { ...registrationFormData, student_photo: studentPortrait };
   }
 
   let resolvedBranch = joiningData.branch || '';
