@@ -33,6 +33,8 @@ const isVillageColumn = (h) => h.includes('village') || h === 'vill' || h.includ
 
 const isMandalColumn = (h) => h.includes('mandal') || h.includes('mandalam');
 
+const isStreetColumn = (h) => h.includes('street') || h.includes('address') || h.includes('streetname');
+
 /**
  * @desc    Stage Excel rows: Enquiry Number, Name, village, mandal → lead_location_staging
  * @route   POST /api/leads/bulk-group-update
@@ -58,6 +60,7 @@ export const bulkUpdateLeadGroups = async (req, res) => {
     let nameIdx = 0;
     let villageIdx = 0;
     let mandalIdx = 0;
+    let streetIdx = 0;
     let headerRowNumber = 0;
     let batch = [];
     let count = 0;
@@ -75,6 +78,7 @@ export const bulkUpdateLeadGroups = async (req, res) => {
       nameIdx = 0;
       villageIdx = 0;
       mandalIdx = 0;
+      streetIdx = 0;
       headerRowNumber = 0;
 
       for await (const row of worksheetReader) {
@@ -85,6 +89,7 @@ export const bulkUpdateLeadGroups = async (req, res) => {
             if (isNameColumn(h)) nameIdx = colNumber;
             if (isVillageColumn(h)) villageIdx = colNumber;
             if (isMandalColumn(h)) mandalIdx = colNumber;
+            if (isStreetColumn(h)) streetIdx = colNumber;
           });
           if (nameIdx && villageIdx && mandalIdx) {
             headerRowNumber = row.number;
@@ -105,17 +110,18 @@ export const bulkUpdateLeadGroups = async (req, res) => {
         const name = cellStr(row.getCell(nameIdx).value);
         const village = cellStr(row.getCell(villageIdx).value);
         const mandal = cellStr(row.getCell(mandalIdx).value);
+        const street = streetIdx > 0 ? cellStr(row.getCell(streetIdx).value) : '';
 
-        if (!enquiry && !name && !village && !mandal) continue;
+        if (!enquiry && !name && !village && !mandal && !street) continue;
         if (!name) continue; // Enquiry is now optional
 
-        batch.push([enquiry, name, village || null, mandal || null]);
+        batch.push([enquiry, name, village || null, mandal || null, street || null]);
         count++;
 
         if (batch.length >= BATCH_SIZE) {
-          const placeholders = batch.map(() => '(?, ?, ?, ?)').join(',');
+          const placeholders = batch.map(() => '(?, ?, ?, ?, ?)').join(',');
           await pool.execute(
-            `INSERT INTO ${STAGING_TABLE} (enquiry_number, name, village, mandal) VALUES ${placeholders}`,
+            `INSERT INTO ${STAGING_TABLE} (enquiry_number, name, village, mandal, street) VALUES ${placeholders}`,
             batch.flat()
           );
           batch = [];
@@ -124,9 +130,9 @@ export const bulkUpdateLeadGroups = async (req, res) => {
     }
 
     if (batch.length > 0) {
-      const placeholders = batch.map(() => '(?, ?, ?, ?)').join(',');
+      const placeholders = batch.map(() => '(?, ?, ?, ?, ?)').join(',');
       await pool.execute(
-        `INSERT INTO ${STAGING_TABLE} (enquiry_number, name, village, mandal) VALUES ${placeholders}`,
+        `INSERT INTO ${STAGING_TABLE} (enquiry_number, name, village, mandal, street) VALUES ${placeholders}`,
         batch.flat()
       );
     }
@@ -176,16 +182,19 @@ export const executeLeadGroupSync = async (req, res) => {
         s.name AS excelName,
         s.village AS excelVillage,
         s.mandal AS excelMandal,
+        s.street AS excelStreet,
         l.id AS leadId,
         l.enquiry_number AS leadEnquiryNumber,
         l.name AS leadName,
         l.village AS leadVillage,
         l.mandal AS leadMandal,
+        l.address AS leadAddress,
         l.needs_manual_update AS needsManualUpdate,
         CASE
           WHEN l.id IS NULL THEN 'not_found'
           WHEN TRIM(COALESCE(s.village, '')) = TRIM(COALESCE(l.village, ''))
-           AND TRIM(COALESCE(s.mandal, '')) = TRIM(COALESCE(l.mandal, '')) THEN 'matches'
+           AND TRIM(COALESCE(s.mandal, '')) = TRIM(COALESCE(l.mandal, ''))
+           AND TRIM(COALESCE(s.street, '')) = TRIM(COALESCE(l.address, '')) THEN 'matches'
           ELSE 'needs_update'
         END AS comparisonStatus
       FROM ${STAGING_TABLE} s
@@ -226,6 +235,7 @@ export const executeLeadGroupSync = async (req, res) => {
       )
       WHERE TRIM(COALESCE(s.village, '')) <> TRIM(COALESCE(l.village, ''))
          OR TRIM(COALESCE(s.mandal, '')) <> TRIM(COALESCE(l.mandal, ''))
+         OR TRIM(COALESCE(s.street, '')) <> TRIM(COALESCE(l.address, ''))
       `
     );
 
@@ -241,6 +251,7 @@ export const executeLeadGroupSync = async (req, res) => {
       )
       WHERE TRIM(COALESCE(s.village, '')) = TRIM(COALESCE(l.village, ''))
         AND TRIM(COALESCE(s.mandal, '')) = TRIM(COALESCE(l.mandal, ''))
+        AND TRIM(COALESCE(s.street, '')) = TRIM(COALESCE(l.address, ''))
       `
     );
 
@@ -257,11 +268,13 @@ export const executeLeadGroupSync = async (req, res) => {
       excelName: r.excelName,
       excelVillage: r.excelVillage,
       excelMandal: r.excelMandal,
+      excelStreet: r.excelStreet,
       leadId: r.leadId || null,
       leadEnquiryNumber: r.leadEnquiryNumber || null,
       leadName: r.leadName || null,
       leadVillage: r.leadVillage ?? null,
       leadMandal: r.leadMandal ?? null,
+      leadAddress: r.leadAddress ?? null,
       needsManualUpdate:
         r.needsManualUpdate === 1 || r.needsManualUpdate === true
           ? 1
@@ -328,7 +341,7 @@ export const getStagedRows = async (req, res) => {
         ? [[]]
         : await pool.query(
             `
-      SELECT id, enquiry_number AS enquiryNumber, name, village, mandal, created_at AS createdAt
+      SELECT id, enquiry_number AS enquiryNumber, name, village, mandal, street, created_at AS createdAt
       FROM ${STAGING_TABLE}
       ORDER BY id
       LIMIT ?
@@ -342,6 +355,7 @@ export const getStagedRows = async (req, res) => {
       name: r.name,
       village: r.village ?? null,
       mandal: r.mandal ?? null,
+      street: r.street ?? null,
       createdAt: r.createdAt,
     }));
 

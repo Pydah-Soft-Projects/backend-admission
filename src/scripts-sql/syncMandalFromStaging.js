@@ -73,7 +73,7 @@ const stripMandalSuffix = (s) =>
     ? ''
     : String(s).trim().replace(/\s+(mandal|mandalam|mndl\.?)\s*$/i, '').trim();
 
-const needsManualIs2 = (v) => Number(v) === 2;
+const needsManualIs1Or2 = (v) => Number(v) === 1 || Number(v) === 2;
 
 async function loadLocationMaster(pool) {
   const [statesRows] = await pool.execute('SELECT id, name FROM states WHERE is_active = 1');
@@ -214,12 +214,21 @@ function buildStateMandalNormMap(sId, master) {
   return normToCanon;
 }
 
+const mapStagingMandalAliases = (text) => {
+  if (!text) return '';
+  let val = String(text).trim().toLowerCase();
+  val = val.replace(/rajahmundry/g, 'rajamahendravaram');
+  val = val.replace(/\((urban|rural)\)/g, '$1');
+  return val.replace(/\s+/g, ' ').trim();
+};
+
 /**
  * Tier 1 strict → tier 2 looser fuzzy (lead district only) → tier 3 optional state-wide fuzzy.
  */
 function resolveStagingMandalWithFallbacks(stagingMandalText, leadDistrict, leadState, master) {
+  const mappedText = mapStagingMandalAliases(stagingMandalText);
   const strictName = resolveStagingMandalStrict(
-    stagingMandalText,
+    mappedText,
     leadDistrict,
     leadState,
     master,
@@ -237,7 +246,7 @@ function resolveStagingMandalWithFallbacks(stagingMandalText, leadDistrict, lead
   if (dMatch) {
     const looseHit = tryMandalMap(
       mandalsByDistrictId.get(dMatch.id),
-      stagingMandalText,
+      mappedText,
       FUZZY_LOOSE,
       true
     );
@@ -247,7 +256,7 @@ function resolveStagingMandalWithFallbacks(stagingMandalText, leadDistrict, lead
   if (STATE_WIDE_FUZZY) {
     const normToCanon = buildStateMandalNormMap(sId, master);
     if (normToCanon.size === 0) return { name: null, tier: null };
-    const nMandal = norm(stagingMandalText);
+    const nMandal = norm(mappedText);
     const sMandal = stripMandalSuffix(nMandal) || nMandal;
     const candidates = [...normToCanon.keys()];
     const bestNormKey = findBestMatch(sMandal, candidates, STATE_FUZZY_MIN);
@@ -264,7 +273,7 @@ function buildWithClause() {
   return {
     sql: `
 WITH stg AS (
-  SELECT id AS staging_id, enquiry_number, name, TRIM(mandal) AS new_mandal
+  SELECT id AS staging_id, enquiry_number, name, TRIM(mandal) AS new_mandal, TRIM(street) AS new_street
   FROM ${STAGING}
   WHERE TRIM(COALESCE(mandal, '')) <> ''
 ),
@@ -274,6 +283,7 @@ ranked AS (
     TRIM(l.enquiry_number) AS enq,
     TRIM(l.name) AS nm,
     l.mandal AS old_mandal,
+    l.address AS lead_address,
     l.needs_manual_update,
     l.district AS lead_district,
     l.state AS lead_state,
@@ -283,7 +293,8 @@ ranked AS (
     ) AS rn
   FROM leads l
   WHERE 1 = 1
-  ${districtSql}
+    AND l.source LIKE '%eapcet%'
+    ${districtSql}
 )`,
     params: ALL_DISTRICTS ? [] : [DISTRICT_FILTER],
   };
@@ -306,8 +317,8 @@ async function main() {
       console.warn('SYNC_MANDAL_ALL_DISTRICTS=1 — matching all leads in ranked CTE (heavy).\n');
     } else {
       console.log(`Lead rank restricted to district: "${DISTRICT_FILTER}"\n`);
-      const [dCount] = await conn.query(`SELECT COUNT(*) AS c FROM leads WHERE district = ?`, [DISTRICT_FILTER]);
-      console.log(`Leads in this district: ${Number(dCount[0]?.c ?? 0).toLocaleString()}\n`);
+      const [dCount] = await conn.query(`SELECT COUNT(*) AS c FROM leads WHERE district = ? AND source LIKE '%eapcet%'`, [DISTRICT_FILTER]);
+      console.log(`Leads in this district (source: eapcet): ${Number(dCount[0]?.c ?? 0).toLocaleString()}\n`);
     }
 
     console.log('Loading master states / districts / mandals…');
@@ -334,8 +345,10 @@ SELECT
   stg.enquiry_number,
   stg.name,
   stg.new_mandal,
+  stg.new_street,
   r.lead_id,
   r.old_mandal,
+  r.lead_address,
   r.needs_manual_update,
   r.lead_district,
   r.lead_state
@@ -368,7 +381,7 @@ ORDER BY stg.staging_id
     const label = DRY_RUN ? '[DRY]' : '[LIVE]';
 
     if (!QUIET && rows.length) {
-      console.log('— Resolved rows (needs_manual_update=2; staging → master mandal) —\n');
+      console.log('— Resolved rows (needs_manual_update IN (1, 2); staging → master mandal) —\n');
     }
 
     for (const row of rows) {
@@ -376,7 +389,7 @@ ORDER BY stg.staging_id
         notFound++;
         continue;
       }
-      if (!needsManualIs2(row.needs_manual_update)) {
+      if (!needsManualIs1Or2(row.needs_manual_update)) {
         skipWrongFlag++;
         continue;
       }
@@ -410,14 +423,26 @@ ORDER BY stg.staging_id
         continue;
       }
 
-      const oldTrim = String(row.old_mandal ?? '').trim();
-      if (oldTrim === String(resolved).trim()) {
+      const oldMandalTrim = String(row.old_mandal ?? '').trim();
+      const oldAddressTrim = String(row.lead_address ?? '').trim();
+      const newStreetTrim = String(row.new_street ?? '').trim();
+
+      const mandalMatches = oldMandalTrim === String(resolved).trim();
+      const streetMatches = !newStreetTrim || oldAddressTrim === newStreetTrim;
+
+      if (mandalMatches && streetMatches) {
         skipSameMandal++;
         continue;
       }
 
       if (tier && tierCounts[tier] != null) tierCounts[tier]++;
-      toApply.push({ id: row.lead_id, mandal: resolved, row, tier });
+      toApply.push({
+        id: row.lead_id,
+        mandal: resolved,
+        street: newStreetTrim || oldAddressTrim,
+        row,
+        tier,
+      });
     }
 
     for (const { id, mandal, row, tier } of toApply) {
@@ -445,7 +470,7 @@ ORDER BY stg.staging_id
     }
     console.log(`\nWithin those ${rows.length.toLocaleString()} staging row(s) with mandal:`);
     console.log(`  No matching lead: ${notFound}`);
-    console.log(`  Matched lead, needs_manual_update ≠ 2 (skipped): ${skipWrongFlag}`);
+    console.log(`  Matched lead, needs_manual_update NOT IN (1, 2) (skipped): ${skipWrongFlag}`);
     console.log(`  Matched, master = current lead mandal already (skipped): ${skipSameMandal}`);
     console.log(`  Matched, could not map staging mandal to master: ${noMasterMandal}`);
     console.log(`  Will UPDATE (master mandal + clear flag): ${toApply.length}`);
@@ -528,11 +553,15 @@ ORDER BY stg.staging_id
         try {
           const ids = [];
           const mandalCases = [];
+          const addressCases = [];
     
-          for (const { id, mandal } of chunk) {
+          for (const { id, mandal, street } of chunk) {
             ids.push(id);
             mandalCases.push(
               `WHEN id = ${conn.escape(id)} THEN ${conn.escape(mandal)}`
+            );
+            addressCases.push(
+              `WHEN id = ${conn.escape(id)} THEN ${conn.escape(street || '')}`
             );
           }
     
@@ -542,9 +571,12 @@ ORDER BY stg.staging_id
               mandal = CASE
                 ${mandalCases.join('\n')}
               END,
+              address = CASE
+                ${addressCases.join('\n')}
+              END,
               needs_manual_update = 0
             WHERE id IN (${ids.map((id) => conn.escape(id)).join(',')})
-            AND needs_manual_update = 2
+            AND needs_manual_update IN (1, 2)
           `;
     
           const [res] = await conn.query(updateSql);

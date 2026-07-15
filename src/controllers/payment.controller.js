@@ -223,6 +223,7 @@ const serializeFeeMongoTransaction = (doc, feeHeadDetails = null) => ({
   depositedToAccount: doc.depositedToAccount || '',
   proceedingId: doc.proceedingId ? String(doc.proceedingId) : '',
   concessionRequestId: doc.concessionRequestId ? String(doc.concessionRequestId) : '',
+  status: doc.status === 'cancelled' ? 'cancelled' : 'success',
   createdAt: doc.createdAt || null,
   updatedAt: doc.updatedAt || null,
 });
@@ -698,6 +699,77 @@ export const listTransactions = async (req, res) => {
       ORDER BY pt.created_at DESC`,
       params
     );
+
+    // Sync with Fee Management MongoDB if any transaction is linked to an admission_number
+    const admissionNumbers = [
+      ...new Set(
+        transactions
+          .map((t) => String(t.admission_number || '').trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    if (admissionNumbers.length > 0) {
+      try {
+        const conn = await connectFeeManagement();
+        const mongoTxns = await conn.db
+          .collection('transactions')
+          .find({ studentId: { $in: admissionNumbers } })
+          .toArray();
+
+        const mongoStatusMap = new Map();
+        for (const mTx of mongoTxns) {
+          const status = String(mTx.status || 'active').trim().toLowerCase();
+          if (mTx.receiptNumber) {
+            mongoStatusMap.set(String(mTx.receiptNumber).trim().toLowerCase(), status);
+          }
+          if (mTx.referenceNo) {
+            mongoStatusMap.set(String(mTx.referenceNo).trim().toLowerCase(), status);
+          }
+        }
+
+        for (const t of transactions) {
+          if (t.status === 'failed') continue;
+
+          const refId = String(t.reference_id || '').trim().toLowerCase();
+          let meta = {};
+          try {
+            meta = typeof t.meta === 'string' ? JSON.parse(t.meta) : t.meta || {};
+          } catch {}
+          const receiptNum = String(meta.receiptNumber || '').trim().toLowerCase();
+
+          let isCancelledInMongo = false;
+          if (refId && mongoStatusMap.get(refId) === 'cancelled') {
+            isCancelledInMongo = true;
+          }
+          if (receiptNum && mongoStatusMap.get(receiptNum) === 'cancelled') {
+            isCancelledInMongo = true;
+          }
+
+          if (isCancelledInMongo) {
+            // Update SQL to failed
+            await pool.execute(
+              "UPDATE payment_transactions SET status = 'failed', updated_at = NOW() WHERE id = ?",
+              [t.id]
+            );
+            // Subtract from payment summary
+            await updatePaymentSummary({
+              joiningId: t.joining_id,
+              admissionId: t.admission_id,
+              leadId: t.lead_id,
+              courseId: t.course_id,
+              branchId: t.branch_id,
+              amount: -Number(t.amount),
+              currency: t.currency || 'INR',
+            });
+            // Update return status
+            t.status = 'cancelled';
+          }
+        }
+      } catch (err) {
+        console.error('Error syncing SQL transaction status with Mongo:', err);
+      }
+    }
 
     // Format transactions
     const formattedTransactions = transactions.map((t) => {

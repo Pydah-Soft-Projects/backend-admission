@@ -1076,6 +1076,7 @@ CREATE TABLE IF NOT EXISTS lead_location_staging (
     name VARCHAR(255) NOT NULL,
     village VARCHAR(512) NULL,
     mandal VARCHAR(512) NULL,
+    street VARCHAR(512) NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_lead_loc_stg_enquiry (enquiry_number),
     INDEX idx_lead_loc_stg_name (name(128))
