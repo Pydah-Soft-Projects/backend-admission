@@ -18,6 +18,7 @@ import {
   verifyCashfreePayment,
   createRazorpayQR,
   verifyRazorpayQR,
+  getFeeManagementGlobalAccounts,
 } from '../controllers/payment.controller.js';
 import { protect, isSuperAdmin } from '../middleware/auth.middleware.js';
 
@@ -39,6 +40,7 @@ router.get('/transactions', listTransactions);
 router.get('/overall-concessions', getOverallConcessions);
 router.get('/fee-management/transactions', listFeeManagementTransactions);
 router.post('/fee-management/transactions', recordFeeManagementTransaction);
+router.get('/fee-management/global-accounts', getFeeManagementGlobalAccounts);
 router.post('/cash', recordCashPayment);
 router.post('/cashfree/order', createCashfreeOrder);
 router.post('/cashfree/verify', verifyCashfreePayment);

@@ -444,6 +444,8 @@ export const recordFeeManagementTransaction = async (req, res) => {
       remarks,
       semester,
       studentYear,
+      paymentConfigId,
+      depositedToAccount,
     } = req.body || {};
 
     if (!joiningId) {
@@ -539,6 +541,16 @@ export const recordFeeManagementTransaction = async (req, res) => {
       updatedAt: now,
     };
 
+    if (paymentConfigId) {
+      const configIdVal = toMongoFeeHeadValue(paymentConfigId);
+      if (configIdVal) {
+        doc.paymentConfigId = configIdVal;
+      }
+    }
+    if (depositedToAccount) {
+      doc.depositedToAccount = String(depositedToAccount).trim();
+    }
+
     const result = await conn.db.collection('transactions').insertOne(doc);
 
     return successResponse(
@@ -547,6 +559,7 @@ export const recordFeeManagementTransaction = async (req, res) => {
         _id: String(result.insertedId),
         ...doc,
         feeHead: String(feeHeadValue),
+        paymentConfigId: doc.paymentConfigId ? String(doc.paymentConfigId) : undefined,
       },
       'Fee payment transaction recorded',
       201
@@ -1902,6 +1915,21 @@ export const verifyRazorpayQR = async (req, res) => {
   } catch (error) {
     console.error('Error verifying Razorpay payment:', error);
     return errorResponse(res, error.message || 'Failed to verify payment', 500);
+  }
+};
+
+export const getFeeManagementGlobalAccounts = async (req, res) => {
+  try {
+    const conn = await connectFeeManagement();
+    const globalAccounts = await conn.db
+      .collection('paymentconfigs')
+      .find({ is_global: true, is_active: true })
+      .toArray();
+
+    return successResponse(res, globalAccounts, 'Global accounts fetched successfully');
+  } catch (error) {
+    console.error('Error fetching global accounts:', error);
+    return errorResponse(res, error.message || 'Failed to fetch global accounts', 500);
   }
 };
 
