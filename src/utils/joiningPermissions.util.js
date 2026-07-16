@@ -15,10 +15,14 @@ export const isLegacyJoiningWrite = (entry) => {
   );
 };
 
-/** Reference edits are restricted to Super Admin only (not grantable to other roles). */
 export const canJoiningEditReference = (user) => {
   if (!user) return false;
-  return user.roleName === 'Super Admin';
+  if (user.roleName === 'Super Admin') return true;
+  if (user.roleName !== 'Sub Super Admin') return false;
+  const entry = getJoiningPermission(user);
+  if (!entry?.access || entry.permission !== 'write') return false;
+  if (isLegacyJoiningWrite(entry)) return true;
+  return Boolean(entry.editReference);
 };
 
 export const canJoiningEditAdmission = (user, targetCollegeId = undefined) => {

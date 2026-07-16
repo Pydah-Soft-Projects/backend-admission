@@ -532,7 +532,7 @@ const sanitizePermissions = (permissions = {}) => {
       entry.admissionTabSource = Boolean(value.admissionTabSource);
       entry.admissionTabDateWise = Boolean(value.admissionTabDateWise);
       if (permission === 'write') {
-        entry.editReference = false;
+        entry.editReference = Boolean(value.editReference);
         entry.editAdmission = Boolean(value.editAdmission);
         entry.approveFeeRequest = Boolean(value.approveFeeRequest);
       }
