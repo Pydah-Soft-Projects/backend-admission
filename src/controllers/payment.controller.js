@@ -193,7 +193,7 @@ const toMongoFeeHeadValue = (value) => {
 
 const normalizeManualPaymentMode = (value) => {
   const raw = String(value || '').trim().toLowerCase();
-  if (raw === 'bank' || raw === 'net banking') return 'Bank';
+  if (raw === 'bank' || raw === 'net banking' || raw === 'upi') return 'UPI';
   return 'Cash';
 };
 
@@ -545,6 +545,18 @@ export const recordFeeManagementTransaction = async (req, res) => {
       const configIdVal = toMongoFeeHeadValue(paymentConfigId);
       if (configIdVal) {
         doc.paymentConfigId = configIdVal;
+        if (!depositedToAccount) {
+          try {
+            const configDoc = await conn.db
+              .collection('paymentconfigs')
+              .findOne({ _id: configIdVal });
+            if (configDoc && configDoc.account_name) {
+              doc.depositedToAccount = configDoc.account_name;
+            }
+          } catch (err) {
+            console.error('Error fetching account details from Mongo config:', err);
+          }
+        }
       }
     }
     if (depositedToAccount) {
