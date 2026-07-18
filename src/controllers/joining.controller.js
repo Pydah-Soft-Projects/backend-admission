@@ -2348,7 +2348,7 @@ export const saveJoiningDraft = async (req, res) => {
       };
     }
 
-    if (payload.reference1 !== undefined && !(lead && isSelfRegistrationLead(lead))) {
+    if (payload.reference1 !== undefined) {
       const ref = String(payload.reference1 ?? '').trim();
       finalPayload.leadData = {
         ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
@@ -2377,8 +2377,9 @@ export const saveJoiningDraft = async (req, res) => {
           [ref, lead.id]
         );
       }
-    } else if (lead && isSelfRegistrationLead(lead) && finalPayload.leadData && typeof finalPayload.leadData === 'object') {
-      delete finalPayload.leadData.reference1;
+    }
+    // Self-registration leads keep their source even when a reference is attached.
+    if (lead && isSelfRegistrationLead(lead) && finalPayload.leadData && typeof finalPayload.leadData === 'object') {
       finalPayload.leadData.source = SELF_REGISTRATION_SOURCE;
     }
 

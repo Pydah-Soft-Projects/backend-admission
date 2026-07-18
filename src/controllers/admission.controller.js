@@ -1754,6 +1754,7 @@ export const listAdmissions = async (req, res) => {
       branchId,
       courseName,
       branchName,
+      source,
     } = req.query;
 
     const pool = getPool();
@@ -1806,12 +1807,42 @@ export const listAdmissions = async (req, res) => {
       params.push(String(endDate).slice(0, 10));
     }
 
+    // Lead source filtering — matches stored lead source (leads row or admission snapshot).
+    // Uses EXISTS instead of a JOIN so the ORDER BY only sorts slim admissions rows
+    // (joining leads pulls large JSON columns into the filesort → ER_OUT_OF_SORTMEMORY).
+    const sourceFilter = String(source ?? '').trim();
+    if (sourceFilter) {
+      const isSelfRegistrationSource = sourceFilter.toLowerCase() === 'self registration';
+      const leadMatchers = [`TRIM(COALESCE(l.source, '')) = ?`];
+      const snapshotMatchers = [
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.source')), '')) = ?`,
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.utmSource')), '')) = ?`,
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.leadSource')), '')) = ?`,
+      ];
+      if (isSelfRegistrationSource) {
+        leadMatchers.push(
+          `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.createdFrom')), '')) = 'self_registration'`
+        );
+        snapshotMatchers.push(
+          `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.createdFrom')), '')) = 'self_registration'`
+        );
+      }
+      conditions.push(`(
+        EXISTS (
+          SELECT 1 FROM leads l
+          WHERE l.id = a.lead_id AND (${leadMatchers.join(' OR ')})
+        )
+        OR ${snapshotMatchers.join(' OR ')}
+      )`);
+      params.push(sourceFilter, sourceFilter, sourceFilter, sourceFilter);
+    }
+
     const hasSearch = appendAdmissionListSearchCondition(conditions, params, search);
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const fromClause = 'FROM admissions a';
 
-    if (hasSearch) {
+    if (hasSearch || sourceFilter) {
       await pool.execute('SET SESSION sort_buffer_size = 4194304');
     }
 
@@ -1825,12 +1856,19 @@ export const listAdmissions = async (req, res) => {
     );
 
     // Phase 1: paginate ids only — no lead join unless search needs it; no wide row payload in sort.
-    const [idRowsResult] = await pool.execute(
-      `SELECT a.id ${fromClause} ${whereClause}
-       ORDER BY a.admission_number DESC, a.updated_at DESC
-       LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`,
-      params
-    );
+    // When JSON conditions are present (source filter), evaluate them inside a materialized
+    // derived table (NO_MERGE): MySQL 8 packs JSON columns referenced in a sorted query into
+    // the filesort rows, and `lead_data` (base64 photos) overflows any sort buffer.
+    const idQuery = sourceFilter
+      ? `SELECT /*+ NO_MERGE(src) */ a.id
+         FROM admissions a
+         JOIN (SELECT a.id ${fromClause} ${whereClause}) src ON src.id = a.id
+         ORDER BY a.admission_number DESC, a.updated_at DESC
+         LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`
+      : `SELECT a.id ${fromClause} ${whereClause}
+         ORDER BY a.admission_number DESC, a.updated_at DESC
+         LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`;
+    const [idRowsResult] = await pool.execute(idQuery, params);
     const idRows = idRowsResult;
 
     let admissions = [];
@@ -3857,6 +3895,7 @@ export const exportAdmissions = async (req, res) => {
       branchId,
       courseName,
       branchName,
+      source,
     } = req.query;
 
     const conditions = [];
@@ -3918,9 +3957,48 @@ export const exportAdmissions = async (req, res) => {
       params.push(searchTerm, searchTerm, searchTerm, phoneTerm);
     }
 
+    // Lead source filtering — same matching rules as listAdmissions (EXISTS keeps the
+    // sorted rowset slim; joining leads overflows the session sort buffer).
+    const exportSourceFilter = String(source ?? '').trim();
+    if (exportSourceFilter) {
+      const isSelfRegistrationSource = exportSourceFilter.toLowerCase() === 'self registration';
+      const leadMatchers = [`TRIM(COALESCE(l.source, '')) = ?`];
+      const snapshotMatchers = [
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.source')), '')) = ?`,
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.utmSource')), '')) = ?`,
+        `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.leadSource')), '')) = ?`,
+      ];
+      if (isSelfRegistrationSource) {
+        leadMatchers.push(
+          `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.createdFrom')), '')) = 'self_registration'`
+        );
+        snapshotMatchers.push(
+          `TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.createdFrom')), '')) = 'self_registration'`
+        );
+      }
+      conditions.push(`(
+        EXISTS (
+          SELECT 1 FROM leads l
+          WHERE l.id = a.lead_id AND (${leadMatchers.join(' OR ')})
+        )
+        OR ${snapshotMatchers.join(' OR ')}
+      )`);
+      params.push(exportSourceFilter, exportSourceFilter, exportSourceFilter, exportSourceFilter);
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const query = `
+    // With the source filter, JSON conditions are evaluated in a materialized derived
+    // table so the sorted outer query never references `lead_data` in its WHERE clause
+    // (MySQL 8 packs referenced JSON into filesort rows → out of sort memory).
+    const query = exportSourceFilter
+      ? `
+      SELECT /*+ NO_MERGE(src) */ a.*
+      FROM admissions a
+      JOIN (SELECT a.id FROM admissions a ${whereClause}) src ON src.id = a.id
+      ORDER BY a.admission_number DESC, a.updated_at DESC
+    `
+      : `
       SELECT a.* 
       FROM admissions a
       ${whereClause}
