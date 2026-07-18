@@ -864,6 +864,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
   leadId = null,
   studentFeeDetails = null,
   joiningContext = null,
+  user = null,
 }) {
   if (!joiningId || typeof joiningId !== 'string') return { lines: [] };
 
@@ -980,6 +981,7 @@ export async function syncJoiningStudentFeeDetailsToFeeMongo({
     leadId,
     joiningContext,
     portalLines,
+    user,
   });
 
   return { lines: portalLines, studentFees: studentFeesResult };

@@ -352,6 +352,7 @@ export async function syncJoiningAccommodationToExternalDbs({
   leadId,
   joiningContext,
   portalLines,
+  user = null,
 }) {
   if (!joiningId) return;
 
@@ -360,7 +361,7 @@ export async function syncJoiningAccommodationToExternalDbs({
 
   try {
     if (accommodationType === 'bus') {
-      await syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext });
+      await syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext, user });
       await syncJoiningBusToTransportMongo({
         joiningId,
         leadId,

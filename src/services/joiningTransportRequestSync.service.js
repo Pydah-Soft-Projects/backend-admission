@@ -40,7 +40,7 @@ async function findTransportRequestForYear(pool, admissionNumber, academicYear) 
  * Upsert an approved student transport request in student_database.transport_requests
  * and assign a per-academic-year application number (0001, 0002, …).
  */
-export async function syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext }) {
+export async function syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext, user = null }) {
   let pool;
   try {
     pool = getSecondaryPool();
@@ -80,6 +80,9 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
     transport.busId || transport.busNumber || transport.bus_id || ''
   ).trim() || null;
 
+  const raisedBy = user?.name ? String(user.name).trim() : 'admissions_crm';
+  const raisedById = user?.empNo != null && !Number.isNaN(Number(user.empNo)) ? Number(user.empNo) : null;
+
   const { collegeCode, courseCode } = await resolveTransportApplicationCodesForJoining(
     pool,
     joiningContext
@@ -94,9 +97,9 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
     await pool.execute(
       `UPDATE transport_requests
        SET student_name = ?, route_id = ?, route_name = ?, stage_name = ?, fare = ?,
-           bus_id = ?, academic_year = ?, updated_at = NOW()
+           bus_id = ?, academic_year = ?, raised_by = ?, raised_by_id = ?, updated_at = NOW()
        WHERE id = ?`,
-      [studentName, routeId, routeName, stageName, fare, busId, academicYear, existing.id]
+      [studentName, routeId, routeName, stageName, fare, busId, academicYear, raisedBy, raisedById, existing.id]
     );
     return {
       skipped: false,
@@ -127,7 +130,7 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
       `INSERT INTO transport_requests
        (admission_number, student_name, route_id, route_name, stage_name, fare, bus_id,
         raised_by, raised_by_id, status, year_of_study, academic_year, request_date, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'admissions_crm', ?, 'pending', ?, ?, NOW(), NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NOW(), NOW())`,
       [
         admissionNumber,
         studentName,
@@ -136,7 +139,8 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
         stageName,
         fare,
         busId,
-        joiningId || null,
+        raisedBy,
+        raisedById,
         yearOfStudy,
         academicYear,
       ]
@@ -146,9 +150,9 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
     await pool.execute(
       `UPDATE transport_requests
        SET student_name = ?, route_id = ?, route_name = ?, stage_name = ?, fare = ?,
-           bus_id = ?, academic_year = ?, updated_at = NOW()
+           bus_id = ?, academic_year = ?, raised_by = ?, raised_by_id = ?, updated_at = NOW()
        WHERE id = ?`,
-      [studentName, routeId, routeName, stageName, fare, busId, academicYear, requestId]
+      [studentName, routeId, routeName, stageName, fare, busId, academicYear, raisedBy, raisedById, requestId]
     );
   }
 

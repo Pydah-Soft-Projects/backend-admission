@@ -305,6 +305,7 @@ const runJoiningFeePortalSync = async ({
   leadId,
   studentFeeDetails,
   registrationExtras,
+  user = null,
 }) => {
   const [rows] = await pool.execute(
     `SELECT course, branch, quota, lead_id, lead_data, student_name, student_phone, student_gender, father_phone, managed_course_id
@@ -345,6 +346,7 @@ const runJoiningFeePortalSync = async ({
       registrationExtras,
       admissionNumber
     ),
+    user,
   });
 
   // Revised fees (CONCESSION / REVISED_FEE lines) must go through the fee-request
@@ -2554,6 +2556,7 @@ export const saveJoiningDraft = async (req, res) => {
       leadId: resolvedLeadIdForFeeMirror,
       studentFeeDetails: sanitizeStudentFeeDetailsForDb(rawStudentFeeFromLeadData),
       registrationExtras: registrationExtrasForSync,
+      user: req.user,
     });
 
     if (
@@ -2811,6 +2814,7 @@ export const patchJoiningStepTwo = async (req, res) => {
         leadId: resolvedLeadIdForFeeMirror,
         studentFeeDetails: feesForSync,
         registrationExtras: mergedExtras,
+        user: req.user,
       });
     }
 

@@ -35,7 +35,7 @@ export const protect = async (req, res, next) => {
 
       // Get user from SQL database
       const [users] = await pool.execute(
-        'SELECT id, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
+        'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ?',
         [decoded.id]
       );
 
@@ -52,6 +52,8 @@ export const protect = async (req, res, next) => {
       req.user = {
         id: userData.id,
         _id: userData.id, // Keep _id for backward compatibility
+        hrmsId: userData.hrms_id,
+        empNo: userData.emp_no,
         name: userData.name,
         email: userData.email,
         roleName: userData.role_name,
