@@ -18,7 +18,6 @@ export const isLegacyJoiningWrite = (entry) => {
 export const canJoiningEditReference = (user) => {
   if (!user) return false;
   if (user.roleName === 'Super Admin') return true;
-  if (user.roleName !== 'Sub Super Admin') return false;
   const entry = getJoiningPermission(user);
   if (!entry?.access || entry.permission !== 'write') return false;
   if (isLegacyJoiningWrite(entry)) return true;
@@ -28,7 +27,6 @@ export const canJoiningEditReference = (user) => {
 export const canJoiningEditAdmission = (user, targetCollegeId = undefined) => {
   if (!user) return false;
   if (user.roleName === 'Super Admin') return true;
-  if (user.roleName !== 'Sub Super Admin') return false;
   const entry = getJoiningPermission(user);
   if (!entry?.access || entry.permission !== 'write') return false;
   if (isLegacyJoiningWrite(entry)) return true;
@@ -49,7 +47,6 @@ export const canJoiningEditAdmission = (user, targetCollegeId = undefined) => {
 export const canSubmitFeeRequest = (user) => {
   if (!user) return false;
   if (user.roleName === 'Super Admin') return true;
-  if (user.roleName !== 'Sub Super Admin') return false;
   const entry = getJoiningPermission(user);
   return Boolean(entry?.access && entry.permission === 'write');
 };
@@ -58,7 +55,6 @@ export const canSubmitFeeRequest = (user) => {
 export const canApproveFeeRequest = (user) => {
   if (!user) return false;
   if (user.roleName === 'Super Admin') return true;
-  if (user.roleName !== 'Sub Super Admin') return false;
   const entry = getJoiningPermission(user);
   if (!entry?.access || entry.permission !== 'write') return false;
   if (isLegacyJoiningWrite(entry)) return true;

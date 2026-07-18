@@ -215,9 +215,6 @@ export const requireJoiningEditReference = (req, res, next) => {
   if (!req.user) {
     return errorResponse(res, 'Not authenticated', 401);
   }
-  if (!hasElevatedAdminPrivileges(req.user.roleName)) {
-    return errorResponse(res, 'Access denied. Super Admin only', 403);
-  }
   if (canJoiningEditReference(req.user)) {
     return next();
   }
@@ -228,9 +225,6 @@ export const requireJoiningEditReference = (req, res, next) => {
 export const requireJoiningEditAdmission = async (req, res, next) => {
   if (!req.user) {
     return errorResponse(res, 'Not authenticated', 401);
-  }
-  if (!hasElevatedAdminPrivileges(req.user.roleName)) {
-    return errorResponse(res, 'Access denied. Super Admin only', 403);
   }
 
   try {
