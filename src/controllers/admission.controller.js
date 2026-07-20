@@ -1622,15 +1622,16 @@ const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
     for (const relative of payload.address.relatives) {
       const relativeId = uuidv4();
       await pool.execute(
-        `INSERT INTO admission_relatives (id, admission_id, name, relationship, phone, state, door_street, landmark,
+        `INSERT INTO admission_relatives (id, admission_id, name, relationship, phone, is_guardian, state, door_street, landmark,
          village_city, mandal, district, pin_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           relativeId,
           admissionId,
           relative.name || '',
           relative.relationship || '',
           relative.phone || '',
+          relative.isGuardian ? 1 : 0,
           relative.state || '',
           relative.doorOrStreet || '',
           relative.landmark || '',
