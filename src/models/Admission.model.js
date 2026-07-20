@@ -90,11 +90,13 @@ const admissionSchema = new Schema(
         name: { type: String, trim: true, default: '' },
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
+        occupation: { type: String, trim: true, default: '' },
       },
       mother: {
         name: { type: String, trim: true, default: '' },
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
+        occupation: { type: String, trim: true, default: '' },
       },
     },
     reservation: {

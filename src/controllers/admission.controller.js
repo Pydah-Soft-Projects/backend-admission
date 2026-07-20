@@ -1205,12 +1205,14 @@ export const formatAdmission = async (admissionData, pool) => {
         phone: admissionData.father_phone || '',
         aadhaarNumber: admissionData.father_aadhaar_number || '',
         photo: fatherPortrait,
+        occupation: admissionData.father_occupation || '',
       },
       mother: {
         name: admissionData.mother_name || '',
         phone: admissionData.mother_phone || '',
         aadhaarNumber: admissionData.mother_aadhaar_number || '',
         photo: motherPortrait,
+        occupation: admissionData.mother_occupation || '',
       },
     },
     reservation: {
@@ -2411,6 +2413,10 @@ export const updateAdmissionById = async (req, res) => {
           const p = String(payload.parents.father.photo || '').trim();
           updateParams.push(p || null);
         }
+        if (payload.parents.father.occupation !== undefined) {
+          updateFields.push('father_occupation = ?');
+          updateParams.push(payload.parents.father.occupation || '');
+        }
       }
       if (payload.parents.mother !== undefined) {
         if (payload.parents.mother.name !== undefined) {
@@ -2429,6 +2435,10 @@ export const updateAdmissionById = async (req, res) => {
           updateFields.push('mother_photo = ?');
           const p = String(payload.parents.mother.photo || '').trim();
           updateParams.push(p || null);
+        }
+        if (payload.parents.mother.occupation !== undefined) {
+          updateFields.push('mother_occupation = ?');
+          updateParams.push(payload.parents.mother.occupation || '');
         }
       }
     }
@@ -2692,6 +2702,10 @@ export const updateAdmissionByLead = async (req, res) => {
           const p = String(payload.parents.father.photo || '').trim();
           updateParams.push(p || null);
         }
+        if (payload.parents.father.occupation !== undefined) {
+          updateFields.push('father_occupation = ?');
+          updateParams.push(payload.parents.father.occupation || '');
+        }
       }
       if (payload.parents.mother !== undefined) {
         if (payload.parents.mother.name !== undefined) {
@@ -2710,6 +2724,10 @@ export const updateAdmissionByLead = async (req, res) => {
           updateFields.push('mother_photo = ?');
           const p = String(payload.parents.mother.photo || '').trim();
           updateParams.push(p || null);
+        }
+        if (payload.parents.mother.occupation !== undefined) {
+          updateFields.push('mother_occupation = ?');
+          updateParams.push(payload.parents.mother.occupation || '');
         }
       }
     }

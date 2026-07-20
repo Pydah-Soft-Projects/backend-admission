@@ -70,12 +70,14 @@ const joiningSchema = new Schema(
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
         photo: { type: String, default: '' },
+        occupation: { type: String, trim: true, default: '' },
       },
       mother: {
         name: { type: String, trim: true, default: '' },
         phone: { type: String, trim: true, default: '' },
         aadhaarNumber: createEncryptedStringField(),
         photo: { type: String, default: '' },
+        occupation: { type: String, trim: true, default: '' },
       },
     },
     reservation: {
