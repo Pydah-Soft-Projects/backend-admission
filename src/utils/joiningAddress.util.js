@@ -84,6 +84,7 @@ export const relativeAddressFromSqlRow = (rel) => ({
   name: rel?.name || '',
   relationship: rel?.relationship || '',
   phone: rel?.phone || '',
+  isGuardian: Boolean(rel?.is_guardian),
   state: normalizeAddressFieldForStorage(rel?.state),
   doorOrStreet: normalizeAddressFieldForStorage(rel?.door_street),
   landmark: normalizeAddressFieldForStorage(rel?.landmark),

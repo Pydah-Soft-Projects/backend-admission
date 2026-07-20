@@ -38,6 +38,10 @@ import {
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 import {
+  buildTuitionFeeSummariesByAdmissionNumbers,
+  fetchTuitionPaidByAdmissionNumbers,
+} from '../utils/tuitionPaid.util.js';
+import {
   SQL_IS_CONV_QUOTA,
   SQL_IS_MANG_QUOTA,
   SQL_IS_SPOT_QUOTA,
@@ -49,6 +53,11 @@ import {
   JOINING_FORM_DIRECT_SOURCE,
   JOINING_FORM_DEFAULT_SOURCE,
 } from '../utils/joiningFormSource.util.js';
+import {
+  getCertificateItemsForLevel,
+  loadCertificateConfigRoot,
+  pendingImportantDocumentLabels,
+} from '../utils/certificateConfig.util.js';
 
 const normCourseBranchLabel = (value) =>
   String(value ?? '')
@@ -1613,15 +1622,16 @@ const saveAdmissionRelatedTables = async (pool, admissionId, payload) => {
     for (const relative of payload.address.relatives) {
       const relativeId = uuidv4();
       await pool.execute(
-        `INSERT INTO admission_relatives (id, admission_id, name, relationship, phone, state, door_street, landmark,
+        `INSERT INTO admission_relatives (id, admission_id, name, relationship, phone, is_guardian, state, door_street, landmark,
          village_city, mandal, district, pin_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           relativeId,
           admissionId,
           relative.name || '',
           relative.relationship || '',
           relative.phone || '',
+          relative.isGuardian ? 1 : 0,
           relative.state || '',
           relative.doorOrStreet || '',
           relative.landmark || '',
@@ -1911,7 +1921,21 @@ export const listAdmissions = async (req, res) => {
       );
     }
 
-    const formattedAdmissions = admissions.map(formatAdmissionListItem);
+    const tuitionPaidByAdmissionNumber = await fetchTuitionPaidByAdmissionNumbers(
+      admissions.map((row) => row.admission_number)
+    );
+    const formattedAdmissions = admissions.map((row) => {
+      const item = formatAdmissionListItem(row);
+      const tuitionPaid =
+        tuitionPaidByAdmissionNumber.get(String(row.admission_number || '').trim()) ?? 0;
+      return {
+        ...item,
+        paymentSummary: {
+          ...item.paymentSummary,
+          tuitionPaid,
+        },
+      };
+    });
 
     return successResponse(
       res,
@@ -4101,6 +4125,601 @@ export const exportAdmissions = async (req, res) => {
     console.error('Error exporting admissions:', error);
     if (!res.headersSent) {
       return errorResponse(res, error.message || 'Failed to export admissions', 500);
+    }
+  }
+};
+
+/** "Other Documents to Submit" checklist (excludes Important Documents / certificate checklist). */
+const OTHER_DOCUMENT_FIELDS_ALWAYS = [
+  { column: 'document_aadhaar_card', label: 'Aadhaar Card' },
+  { column: 'document_photos', label: 'Photos (5)' },
+  { column: 'document_income_certificate', label: 'Income Certificate' },
+  { column: 'document_caste_certificate', label: 'Caste Certificate' },
+  { column: 'document_bank_passbook', label: 'Bank Pass Book' },
+  { column: 'document_ration_card', label: 'Ration Card' },
+];
+
+/** CET / allotment docs — hidden for Management quota (same as joining other-documents checklist). */
+const OTHER_DOCUMENT_FIELDS_NON_MGMT = [
+  { column: 'document_cet_rank_card', label: 'CET Rank Card' },
+  { column: 'document_cet_hall_ticket', label: 'CET Hall Ticket' },
+  { column: 'document_allotment_letter', label: 'Allotment Letter' },
+  { column: 'document_joining_report', label: 'Joining Report' },
+];
+
+const OTHER_DOCUMENT_FIELDS_ALL = [
+  ...OTHER_DOCUMENT_FIELDS_ALWAYS,
+  ...OTHER_DOCUMENT_FIELDS_NON_MGMT,
+];
+
+const PENDING_CERTIFICATES_SAMPLE_LIMIT = 10;
+
+/** Mirrors frontend `isManagementQuotaLabel` for other-documents visibility. */
+const isManagementQuotaForOtherDocs = (quota) => {
+  const u = String(quota ?? '')
+    .trim()
+    .toUpperCase();
+  if (!u) return false;
+  if (u === 'MANG' || u === 'MANAGEMENT') return true;
+  if (u.includes('MANAGEMENT')) return true;
+  return u.includes('MANG') && !u.includes('CONV');
+};
+
+const pendingOtherDocumentLabelsFromRow = (row) => {
+  const hideCet = isManagementQuotaForOtherDocs(row?.quota);
+  return OTHER_DOCUMENT_FIELDS_ALL.filter((f) => {
+    if (hideCet && OTHER_DOCUMENT_FIELDS_NON_MGMT.some((x) => x.column === f.column)) {
+      return false;
+    }
+    return String(row?.[f.column] ?? 'pending').toLowerCase() === 'pending';
+  }).map((f) => f.label);
+};
+
+const otherDocumentsCompleteFromRow = (row) => pendingOtherDocumentLabelsFromRow(row).length === 0;
+
+const parseJsonMaybe = (raw) => {
+  if (raw == null) return null;
+  if (typeof raw === 'object' && !Array.isArray(raw) && !Buffer.isBuffer(raw)) return raw;
+  if (Buffer.isBuffer(raw)) {
+    try {
+      return JSON.parse(raw.toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t || t === 'null') return null;
+    try {
+      return JSON.parse(t);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const resolveProgramLevelFromAdmissionRow = (row) => {
+  const candidates = [
+    row?.program_level,
+    row?.extras_program_level,
+    row?.extras_programLevel,
+    row?.extras_course_level,
+  ];
+  for (const raw of candidates) {
+    const value = String(raw ?? '').trim();
+    if (value && value !== 'null') return value;
+  }
+  return '';
+};
+
+/** Base filters aligned with abstract / student-info list — active admissions only. */
+const buildPendingCertificatesBaseFilters = async (query) => {
+  const {
+    collegeId,
+    courseId,
+    courseName,
+    branchId,
+    branchName,
+    startDate,
+    endDate,
+    quota,
+  } = query;
+  const conditions = ['a.status = ?'];
+  const params = ['active'];
+
+  const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
+  appendManagedCollegeCourseFilter(
+    conditions,
+    params,
+    SQL_A_EFF_COURSE_ID,
+    collegeCourseIds
+  );
+
+  if (startDate) {
+    conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) >= ?`);
+    params.push(String(startDate).slice(0, 10));
+  }
+
+  if (endDate) {
+    conditions.push(`DATE(${SQL_A_EFFECTIVE_ADMISSION_DATE}) <= ?`);
+    params.push(String(endDate).slice(0, 10));
+  }
+
+  if (courseId || courseName) {
+    if (courseId && courseName) {
+      conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
+      params.push(courseId, courseName);
+    } else {
+      conditions.push(`(${SQL_A_EFF_COURSE_ID} = ? OR a.course = ?)`);
+      const val = courseId || courseName;
+      params.push(val, val);
+    }
+  }
+
+  if (branchId || branchName) {
+    if (branchId && branchName) {
+      conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
+      params.push(branchId, branchName);
+    } else {
+      conditions.push(`(${SQL_A_EFF_BRANCH_ID} = ? OR a.branch = ?)`);
+      const val = branchId || branchName;
+      params.push(val, val);
+    }
+  }
+
+  const quotaFilter = String(quota ?? '').trim();
+  if (quotaFilter) {
+    conditions.push('LOWER(TRIM(COALESCE(a.quota, \'\'))) = LOWER(?)');
+    params.push(quotaFilter);
+  }
+
+  return {
+    whereClause: `WHERE ${conditions.join(' AND ')}`,
+    params,
+  };
+};
+
+const formatPendingDocumentsRow = (row, certRoot) => {
+  const otherPending = pendingOtherDocumentLabelsFromRow(row);
+  const programLevel = resolveProgramLevelFromAdmissionRow(row);
+  const items = getCertificateItemsForLevel(certRoot, programLevel);
+  const checklistRaw = parseJsonMaybe(row?.certificate_checklist);
+  const importantPending = pendingImportantDocumentLabels({
+    checklistRaw,
+    items,
+  });
+  const importantHasPending = importantPending.length > 0;
+  const importantComplete = !importantHasPending;
+  // List / export / “Pending” sample are driven by Other Documents only.
+  const otherComplete = otherDocumentsCompleteFromRow(row);
+  const isPending = otherPending.length > 0;
+  const isCompleted = otherComplete;
+
+  return {
+    id: row.id,
+    admissionNumber: row.admission_number || '',
+    studentName: row.student_name || '',
+    parentMobile: row.father_phone || '',
+    studentMobile: row.student_phone || '',
+    quota: row.quota || '',
+    course: row.course || '',
+    branch: row.branch || '',
+    programLevel,
+    importantDocumentsPending: importantPending,
+    otherDocumentsPending: otherPending,
+    importantDocumentsPendingText:
+      importantPending.length > 0 ? importantPending.join(', ') : 'Completed',
+    otherDocumentsPendingText:
+      otherPending.length > 0 ? otherPending.join(', ') : 'Completed',
+    pendingCertificates: otherPending,
+    pendingCertificatesText: otherPending.length > 0 ? otherPending.join(', ') : 'Completed',
+    importantComplete,
+    importantHasPending: importantPending.length > 0,
+    isPending,
+    isCompleted,
+  };
+};
+
+/**
+ * Load filtered admissions and evaluate Important + Other Documents separately.
+ *
+ * Total students = all admissions matching college/course/quota/status filters.
+ * Sample list + Excel = students with Other Documents still pending.
+ *
+ * Two-phase fetch (same pattern as listAdmissions): ORDER BY ids without JSON, then
+ * load detail rows by PK without ORDER BY. MySQL 8 packs `lead_data` JSON into filesort
+ * rows and overflows sort_buffer when JSON_EXTRACT is combined with ORDER BY.
+ */
+const evaluatePendingDocuments = async (query) => {
+  const pool = getPool();
+  const { whereClause, params } = await buildPendingCertificatesBaseFilters(query);
+  const certRoot = await loadCertificateConfigRoot();
+
+  // Phase 1: sorted ids only — no lead_data / JSON in the sort.
+  const [idRows] = await pool.execute(
+    `SELECT a.id
+     FROM admissions a
+     ${whereClause}
+     ORDER BY a.admission_number DESC, a.updated_at DESC`,
+    params
+  );
+
+  const emptyStats = {
+    totalStudents: 0,
+    pendingStudents: 0,
+    completedStudents: 0,
+    importantReceivedStudents: 0,
+    importantPendingStudents: 0,
+    otherPendingStudents: 0,
+    otherCompletedStudents: 0,
+  };
+
+  if (!idRows.length) {
+    return { stats: emptyStats, pendingRows: [] };
+  }
+
+  const orderedIds = idRows.map((row) => row.id);
+  const orderIndex = new Map(orderedIds.map((id, index) => [String(id), index]));
+  const detailRows = [];
+  const CHUNK = 400;
+
+  // Phase 2: fetch detail + JSON extracts by primary key (no ORDER BY).
+  for (let i = 0; i < orderedIds.length; i += CHUNK) {
+    const chunkIds = orderedIds.slice(i, i + CHUNK);
+    const inMarks = chunkIds.map(() => '?').join(',');
+    const [pageRows] = await pool.execute(
+      `SELECT a.id, a.admission_number, a.student_name, a.student_phone, a.father_phone,
+              a.quota, a.course, a.branch,
+              a.document_aadhaar_card, a.document_photos,
+              a.document_income_certificate, a.document_caste_certificate,
+              a.document_cet_rank_card, a.document_cet_hall_ticket,
+              a.document_allotment_letter, a.document_joining_report,
+              a.document_bank_passbook, a.document_ration_card,
+              JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningProgramLevel')) AS program_level,
+              JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.program_level')) AS extras_program_level,
+              JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.programLevel')) AS extras_programLevel,
+              JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.course_level')) AS extras_course_level,
+              JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.certificate_checklist') AS certificate_checklist
+       FROM admissions a
+       WHERE a.id IN (${inMarks})`,
+      chunkIds
+    );
+    detailRows.push(...pageRows);
+  }
+
+  detailRows.sort(
+    (a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0)
+  );
+
+  const evaluated = detailRows.map((row) => formatPendingDocumentsRow(row, certRoot));
+  const totalStudents = evaluated.length;
+  const importantReceivedStudents = evaluated.filter((r) => r.importantComplete).length;
+  const importantPendingStudents = evaluated.filter((r) => r.importantHasPending).length;
+  const otherPendingStudents = evaluated.filter((r) => r.isPending).length;
+  const otherCompletedStudents = evaluated.filter((r) => r.isCompleted).length;
+  const pendingRows = evaluated.filter((r) => r.isPending);
+
+  return {
+    stats: {
+      totalStudents,
+      /** @deprecated alias — other-docs pending (sample list size). */
+      pendingStudents: otherPendingStudents,
+      /** @deprecated alias — other-docs completed. */
+      completedStudents: otherCompletedStudents,
+      importantReceivedStudents,
+      importantPendingStudents,
+      otherPendingStudents,
+      otherCompletedStudents,
+    },
+    pendingRows,
+  };
+};
+
+const fetchPendingCertificateRows = async (query, { limit } = {}) => {
+  const { pendingRows } = await evaluatePendingDocuments(query);
+  if (Number.isFinite(Number(limit)) && Number(limit) > 0) {
+    return pendingRows.slice(0, Math.floor(Number(limit)));
+  }
+  return pendingRows;
+};
+
+const fetchPendingCertificateStats = async (query) => {
+  const { stats } = await evaluatePendingDocuments(query);
+  return stats;
+};
+
+/** List students with pending Other Documents (Important shown as Completed when done). */
+export const listPendingCertificates = async (req, res) => {
+  try {
+    const { stats, pendingRows } = await evaluatePendingDocuments(req.query);
+    const rows = pendingRows.slice(0, PENDING_CERTIFICATES_SAMPLE_LIMIT);
+    return successResponse(
+      res,
+      {
+        rows,
+        sampleLimit: PENDING_CERTIFICATES_SAMPLE_LIMIT,
+        stats,
+        total: stats.pendingStudents,
+      },
+      'Pending other documents retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error listing pending certificates:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to list pending certificates',
+      error.statusCode || 500
+    );
+  }
+};
+
+const PENDING_FEES_SAMPLE_LIMIT = 10;
+
+const formatPendingFeeRow = (row, tuitionSummary) => {
+  const summary = tuitionSummary || {
+    payable: 0,
+    paid: 0,
+    pending: 0,
+    hasFeeEntry: false,
+    feeStatus: 'no_entry',
+    displayAmount: 0,
+    displayLabel: 'Pending',
+  };
+  const isUnpaid = summary.feeStatus === 'unpaid';
+
+  return {
+    id: row.id,
+    admissionNumber: row.admission_number || '',
+    studentName: row.student_name || '',
+    parentMobile: row.father_phone || '',
+    studentMobile: row.student_phone || '',
+    quota: row.quota || '',
+    course: row.course || '',
+    branch: row.branch || '',
+    tuitionPayable: summary.payable,
+    tuitionPaid: summary.paid,
+    tuitionPending: summary.pending,
+    hasFeeEntry: summary.hasFeeEntry,
+    feeStatus: summary.feeStatus,
+    displayAmount: summary.displayAmount,
+    displayLabel: summary.displayLabel,
+    feeStatusText: summary.displayLabel,
+    feeAmountText: !summary.hasFeeEntry
+      ? 'Pending — 0'
+      : summary.feeStatus === 'paid'
+        ? `Paid — ${summary.paid}`
+        : `Unpaid — ${summary.pending > 0 ? summary.pending : summary.payable}`,
+    isPending: isUnpaid,
+    isPaid: summary.feeStatus === 'paid',
+    isNoEntry: summary.feeStatus === 'no_entry',
+  };
+};
+
+/**
+ * Evaluate tuition fee (TUI01) status for filtered active admissions.
+ * Sample list + export = students with unpaid tuition balance.
+ */
+const evaluatePendingFees = async (query) => {
+  const pool = getPool();
+  const { whereClause, params } = await buildPendingCertificatesBaseFilters(query);
+
+  const [idRows] = await pool.execute(
+    `SELECT a.id
+     FROM admissions a
+     ${whereClause}
+     ORDER BY a.admission_number DESC, a.updated_at DESC`,
+    params
+  );
+
+  const emptyStats = {
+    totalStudents: 0,
+    tuitionPaidStudents: 0,
+    tuitionUnpaidStudents: 0,
+    tuitionNoEntryStudents: 0,
+    pendingStudents: 0,
+  };
+
+  if (!idRows.length) {
+    return { stats: emptyStats, pendingRows: [] };
+  }
+
+  const orderedIds = idRows.map((row) => row.id);
+  const orderIndex = new Map(orderedIds.map((id, index) => [String(id), index]));
+  const detailRows = [];
+  const CHUNK = 400;
+
+  for (let i = 0; i < orderedIds.length; i += CHUNK) {
+    const chunkIds = orderedIds.slice(i, i + CHUNK);
+    const inMarks = chunkIds.map(() => '?').join(',');
+    const [pageRows] = await pool.execute(
+      `SELECT a.id, a.admission_number, a.student_name, a.student_phone, a.father_phone,
+              a.quota, a.course, a.branch
+       FROM admissions a
+       WHERE a.id IN (${inMarks})`,
+      chunkIds
+    );
+    detailRows.push(...pageRows);
+  }
+
+  detailRows.sort(
+    (a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0)
+  );
+
+  const tuitionSummaries = await buildTuitionFeeSummariesByAdmissionNumbers(
+    detailRows.map((row) => row.admission_number)
+  );
+
+  const evaluated = detailRows.map((row) =>
+    formatPendingFeeRow(row, tuitionSummaries.get(String(row.admission_number || '').trim()))
+  );
+
+  const totalStudents = evaluated.length;
+  const tuitionPaidStudents = evaluated.filter((r) => r.isPaid).length;
+  const tuitionUnpaidStudents = evaluated.filter((r) => r.isPending).length;
+  const tuitionNoEntryStudents = evaluated.filter((r) => r.isNoEntry).length;
+  const pendingRows = evaluated.filter((r) => r.isPending);
+
+  return {
+    stats: {
+      totalStudents,
+      tuitionPaidStudents,
+      tuitionUnpaidStudents,
+      tuitionNoEntryStudents,
+      pendingStudents: tuitionUnpaidStudents,
+    },
+    pendingRows,
+  };
+};
+
+/** List students with unpaid tuition fee (TUI01). */
+export const listPendingFees = async (req, res) => {
+  try {
+    const { stats, pendingRows } = await evaluatePendingFees(req.query);
+    const rows = pendingRows.slice(0, PENDING_FEES_SAMPLE_LIMIT);
+    return successResponse(
+      res,
+      {
+        rows,
+        sampleLimit: PENDING_FEES_SAMPLE_LIMIT,
+        stats,
+        total: stats.pendingStudents,
+      },
+      'Pending tuition fees retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error listing pending fees:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to list pending fees',
+      error.statusCode || 500
+    );
+  }
+};
+
+/** Excel export — students with unpaid tuition fee (TUI01). */
+export const exportPendingFees = async (req, res) => {
+  try {
+    const { pendingRows } = await evaluatePendingFees(req.query);
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Pending Fees');
+    worksheet.columns = [
+      { header: 'S. No.', key: 'sno', width: 8 },
+      { header: 'Student Name', key: 'studentName', width: 25 },
+      { header: 'Admission No', key: 'admissionNumber', width: 15 },
+      { header: 'Course', key: 'course', width: 20 },
+      { header: 'Branch', key: 'branch', width: 20 },
+      { header: 'Parent Mobile No', key: 'parentMobile', width: 16 },
+      { header: 'Student Mobile No', key: 'studentMobile', width: 16 },
+      { header: 'Quota', key: 'quota', width: 15 },
+      { header: 'Tuition Payable', key: 'tuitionPayable', width: 16 },
+      { header: 'Tuition Paid', key: 'tuitionPaid', width: 16 },
+      { header: 'Tuition Pending', key: 'tuitionPending', width: 16 },
+      { header: 'Fee Status', key: 'feeStatusText', width: 14 },
+      { header: 'Amount', key: 'feeAmountText', width: 18 },
+    ];
+
+    pendingRows.forEach((row, index) => {
+      worksheet.addRow({
+        sno: index + 1,
+        studentName: row.studentName,
+        admissionNumber: row.admissionNumber,
+        course: row.course,
+        branch: row.branch,
+        parentMobile: row.parentMobile,
+        studentMobile: row.studentMobile,
+        quota: row.quota,
+        tuitionPayable: row.tuitionPayable,
+        tuitionPaid: row.tuitionPaid,
+        tuitionPending: row.tuitionPending,
+        feeStatusText: row.feeStatusText,
+        feeAmountText: row.feeAmountText,
+      });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' },
+    };
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', 'attachment; filename=pending_fees.xlsx');
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Error exporting pending fees:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export pending fees', 500);
+    }
+  }
+};
+
+/** Excel export — students with other documents pending; includes Important Documents status. */
+export const exportPendingCertificates = async (req, res) => {
+  try {
+    const rows = await fetchPendingCertificateRows(req.query);
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Pending Documents');
+    worksheet.columns = [
+      { header: 'S. No.', key: 'sno', width: 8 },
+      { header: 'Student Name', key: 'studentName', width: 25 },
+      { header: 'Admission No', key: 'admissionNumber', width: 15 },
+      { header: 'Course', key: 'course', width: 20 },
+      { header: 'Branch', key: 'branch', width: 20 },
+      { header: 'Parent Mobile No', key: 'parentMobile', width: 16 },
+      { header: 'Student Mobile No', key: 'studentMobile', width: 16 },
+      { header: 'Quota', key: 'quota', width: 15 },
+      { header: 'Important Documents', key: 'importantDocumentsPendingText', width: 45 },
+      { header: 'Other Documents Pending', key: 'otherDocumentsPendingText', width: 55 },
+    ];
+
+    rows.forEach((row, index) => {
+      worksheet.addRow({
+        sno: index + 1,
+        studentName: row.studentName,
+        admissionNumber: row.admissionNumber,
+        course: row.course,
+        branch: row.branch,
+        parentMobile: row.parentMobile,
+        studentMobile: row.studentMobile,
+        quota: row.quota,
+        importantDocumentsPendingText: row.importantDocumentsPendingText,
+        otherDocumentsPendingText: row.otherDocumentsPendingText,
+      });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' },
+    };
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=pending_documents.xlsx'
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Error exporting pending certificates:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export pending certificates', 500);
     }
   }
 };

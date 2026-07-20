@@ -1842,15 +1842,16 @@ const saveJoiningRelatedTables = async (pool, joiningId, payload) => {
     for (const relative of payload.address.relatives) {
       const relativeId = uuidv4();
       await pool.execute(
-        `INSERT INTO joining_relatives (id, joining_id, name, relationship, phone, state, door_street, landmark,
+        `INSERT INTO joining_relatives (id, joining_id, name, relationship, phone, is_guardian, state, door_street, landmark,
          village_city, mandal, district, pin_code, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
         [
           relativeId,
           joiningId,
           relative.name || '',
           relative.relationship || '',
           relative.phone || '',
+          relative.isGuardian ? 1 : 0,
           relative.state || '',
           relative.doorOrStreet || '',
           relative.landmark || '',

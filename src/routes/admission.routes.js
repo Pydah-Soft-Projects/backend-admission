@@ -26,6 +26,10 @@ import {
   hideDistinctReferenceName,
   upsertAdmissionBranchIntake,
   exportAdmissions,
+  listPendingCertificates,
+  exportPendingCertificates,
+  listPendingFees,
+  exportPendingFees,
   sendAdmissionConfirmationSmsById,
 } from '../controllers/admission.controller.js';
 
@@ -45,6 +49,10 @@ router.get('/stats/by-date', getAdmissionStatsByDate);
 router.get('/stats', getAdmissionStats);
 router.put('/branch-intake', isSuperAdmin, upsertAdmissionBranchIntake);
 router.get('/export', isSuperAdmin, exportAdmissions);
+router.get('/pending-certificates/export', exportPendingCertificates);
+router.get('/pending-certificates', listPendingCertificates);
+router.get('/pending-fees/export', exportPendingFees);
+router.get('/pending-fees', listPendingFees);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);
 router.get('/joining/:joiningId', getAdmissionByJoiningId);

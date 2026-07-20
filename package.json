@@ -29,6 +29,7 @@
     "migrate:parent-portrait-columns": "node src/scripts-sql/runParentPortraitColumnsMigration.js",
     "migrate:student-photo-columns": "node src/scripts-sql/runStudentPhotoColumnsMigration.js",
     "migrate:relative-phone": "node src/scripts-sql/runRelativePhoneMigration.js",
+    "migrate:relative-is-guardian": "node src/scripts-sql/runRelativeIsGuardianMigration.js",
     "migrate:joining-address": "node src/scripts-sql/runJoiningAddressMigrations.js",
     "db:sync-managed-ids-verify-secondary": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js",
     "db:sync-managed-ids-verify-secondary:dry": "node src/scripts/syncManagedCourseBranchIdsAndVerifySecondary.js --dry-run",
