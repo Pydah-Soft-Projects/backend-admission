@@ -37,6 +37,27 @@ const refMatch = (value) => {
 };
 
 /**
+ * HMS `users.rollNumber` has a unique index in production.
+ * Many admission-time records do not yet have a real roll number, so we must
+ * generate a stable non-empty fallback to avoid duplicate `null` key errors.
+ */
+const resolveHostelRollNumber = ({ joiningContext, existing, admissionNumber, joiningId }) => {
+  const explicit = String(joiningContext?.rollNumber || '').trim();
+  if (explicit) return explicit;
+
+  const fromExisting = String(existing?.rollNumber || '').trim();
+  if (fromExisting) return fromExisting;
+
+  const adm = String(admissionNumber || '').trim();
+  if (adm) return `ADM-${adm}`;
+
+  const join = String(joiningId || '').trim();
+  if (join) return `JOIN-${join}`;
+
+  return undefined;
+};
+
+/**
  * Mirror bus selection into the Transport MongoDB (`studentfees` collection).
  */
 export async function syncJoiningBusToTransportMongo({ joiningId, leadId, joiningContext, busLines }) {
@@ -127,6 +148,12 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
   );
 
   const existing = await users.findOne(lookupKey);
+  const resolvedRollNumber = resolveHostelRollNumber({
+    joiningContext,
+    existing,
+    admissionNumber,
+    joiningId,
+  });
 
   const hostelIdAssignment = await assignHostelStudentId(db, {
     hostelObjectId: transport.hostelId,
@@ -161,7 +188,7 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
   const baseDoc = {
     name: joiningContext.studentName || '',
     admissionNumber: admissionNumber || undefined,
-    rollNumber: joiningContext.rollNumber || existing?.rollNumber || undefined,
+    rollNumber: resolvedRollNumber,
     joiningId,
     leadId: leadId || null,
     role: 'student',
@@ -208,7 +235,7 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     await upsertHostelRoomOccupancyHistory(db, {
       studentUserId: userId,
       studentName: joiningContext.studentName || '',
-      rollNumber: joiningContext.rollNumber || '',
+      rollNumber: resolvedRollNumber || '',
       course: joiningContext.course || '',
       branch: joiningContext.branch || '',
       yearOfStudy: studentYear,
@@ -307,6 +334,9 @@ export function previewJoiningHostelSync({ joiningId, leadId, joiningContext, po
     genderRaw.startsWith('f') ? 'Female' : genderRaw.startsWith('m') ? 'Male' : joiningContext.studentGender || '';
 
   const admissionNumber = String(joiningContext.admissionNumber || '').trim();
+  const previewRollNumber =
+    String(joiningContext.rollNumber || '').trim() ||
+    (admissionNumber ? `ADM-${admissionNumber}` : String(joiningId || '').trim() ? `JOIN-${joiningId}` : undefined);
   const transportSessionYear = resolveTransportAcademicYear(
     transport,
     joiningContext?.intakeBatch || joiningContext?.batch || ''
@@ -321,6 +351,7 @@ export function previewJoiningHostelSync({ joiningId, leadId, joiningContext, po
     document: {
       name: joiningContext.studentName || '',
       admissionNumber: admissionNumber || undefined,
+      rollNumber: previewRollNumber,
       joiningId,
       leadId: leadId || null,
       role: 'student',
