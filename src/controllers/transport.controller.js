@@ -39,12 +39,101 @@ const formatStage = (stage) => ({
 const formatBusSummary = (doc) => ({
   _id: String(doc._id),
   busNumber: doc.busNumber || '',
-  capacity: doc.capacity ?? null,
+  capacity: doc.capacity ?? 40,
   type: doc.type || '',
   driverName: doc.driverName || '',
   status: doc.status || '',
   assignedRouteId: doc.assignedRouteId || '',
 });
+
+const getBusOccupancyMap = async (db, busNumbers = [], routeIds = []) => {
+  const busStudentsMap = {};
+  const routeStudentsMap = {};
+
+  const addRequestToMap = (busId, routeId, key) => {
+    if (busId) {
+      if (!busStudentsMap[busId]) busStudentsMap[busId] = new Set();
+      busStudentsMap[busId].add(key);
+    }
+    if (routeId) {
+      if (!routeStudentsMap[routeId]) routeStudentsMap[routeId] = new Set();
+      routeStudentsMap[routeId].add(key);
+    }
+  };
+
+  if (db) {
+    try {
+      const mongoOr = [];
+      if (busNumbers.length > 0) mongoOr.push({ bus_id: { $in: busNumbers } });
+      if (routeIds.length > 0) mongoOr.push({ route_id: { $in: routeIds } });
+
+      if (mongoOr.length > 0) {
+        const mongoReqs = await db
+          .collection('transport_requests')
+          .find({
+            status: { $in: ['pending', 'approved'] },
+            $or: mongoOr,
+          })
+          .project({ bus_id: 1, route_id: 1, admission_number: 1, employee_id: 1 })
+          .toArray();
+
+        for (const req of mongoReqs) {
+          const key = String(req.admission_number || req.employee_id || req._id).trim();
+          if (key) {
+            addRequestToMap(req.bus_id, req.route_id, key);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[getBusOccupancyMap] Mongo query warning:', err?.message || err);
+    }
+  }
+
+  try {
+    const pool = getSecondaryPool();
+    if (pool) {
+      const sqlWhere = [];
+      const sqlParams = [];
+      if (busNumbers.length > 0) {
+        const placeholders = busNumbers.map(() => '?').join(',');
+        sqlWhere.push(`bus_id IN (${placeholders})`);
+        sqlParams.push(...busNumbers);
+      }
+      if (routeIds.length > 0) {
+        const placeholders = routeIds.map(() => '?').join(',');
+        sqlWhere.push(`route_id IN (${placeholders})`);
+        sqlParams.push(...routeIds);
+      }
+
+      if (sqlWhere.length > 0) {
+        const [rows] = await pool.execute(
+          `SELECT bus_id, route_id, admission_number, employee_id, id FROM transport_requests WHERE status IN ('pending', 'approved') AND (${sqlWhere.join(' OR ')})`,
+          sqlParams
+        );
+        for (const r of rows) {
+          const key = String(r.admission_number || r.employee_id || r.id).trim();
+          if (key) {
+            addRequestToMap(r.bus_id, r.route_id, key);
+          }
+        }
+      }
+    }
+  } catch {
+    // Secondary DB optional
+  }
+
+  const busCountMap = {};
+  for (const [busId, set] of Object.entries(busStudentsMap)) {
+    busCountMap[busId] = set.size;
+  }
+
+  const routeCountMap = {};
+  for (const [routeId, set] of Object.entries(routeStudentsMap)) {
+    routeCountMap[routeId] = set.size;
+  }
+
+  return { busCountMap, routeCountMap };
+};
 
 /** GET /api/transport/routes — list bus routes from the transport database. */
 export const listTransportRoutes = async (_req, res) => {
@@ -65,9 +154,51 @@ export const listTransportRoutes = async (_req, res) => {
       .sort({ routeName: 1 })
       .toArray();
 
+    const routeIds = routes.map((r) => r.routeId).filter(Boolean);
+    const buses = await db
+      .collection('buses')
+      .find({ assignedRouteId: { $in: routeIds } })
+      .project({ busNumber: 1, capacity: 1, assignedRouteId: 1 })
+      .toArray();
+
+    const busNumbers = buses.map((b) => b.busNumber).filter(Boolean);
+    const { busCountMap, routeCountMap } = await getBusOccupancyMap(db, busNumbers, routeIds);
+
+    const busesByRoute = {};
+    for (const b of buses) {
+      if (!b.assignedRouteId) continue;
+      if (!busesByRoute[b.assignedRouteId]) busesByRoute[b.assignedRouteId] = [];
+      busesByRoute[b.assignedRouteId].push(b);
+    }
+
+    const formattedRoutes = routes.map((r) => {
+      const summary = formatRouteSummary(r);
+      const assignedBuses = busesByRoute[r.routeId] || [];
+      let totalCapacity = 0;
+      let totalFilled = 0;
+      if (assignedBuses.length > 0) {
+        for (const b of assignedBuses) {
+          const cap = Number(b.capacity) || 40;
+          const filled = busCountMap[b.busNumber] || 0;
+          totalCapacity += cap;
+          totalFilled += filled;
+        }
+      } else {
+        totalCapacity = 40;
+        totalFilled = routeCountMap[r.routeId] || 0;
+      }
+      const seatsAvailable = Math.max(0, totalCapacity - totalFilled);
+      return {
+        ...summary,
+        capacity: totalCapacity,
+        seatsFilled: totalFilled,
+        seatsAvailable,
+      };
+    });
+
     return successResponse(res, {
-      data: routes.map(formatRouteSummary),
-      total: routes.length,
+      data: formattedRoutes,
+      total: formattedRoutes.length,
     });
   } catch (error) {
     console.error('listTransportRoutes error:', error);
@@ -107,12 +238,42 @@ export const getTransportRouteDetail = async (req, res) => {
       .sort({ busNumber: 1 })
       .toArray();
 
+    const busNumbers = buses.map((b) => b.busNumber).filter(Boolean);
+    const { busCountMap, routeCountMap } = await getBusOccupancyMap(db, busNumbers, [route.routeId]);
+
+    let totalCapacity = 0;
+    let totalSeatsFilled = 0;
+
+    const formattedBuses = buses.map((b) => {
+      const cap = Number(b.capacity) || 40;
+      const filled = busCountMap[b.busNumber] ?? (routeCountMap[route.routeId] || 0);
+      const available = Math.max(0, cap - filled);
+      totalCapacity += cap;
+      totalSeatsFilled += filled;
+      return {
+        ...formatBusSummary(b),
+        capacity: cap,
+        seatsFilled: filled,
+        seatsAvailable: available,
+      };
+    });
+
+    if (buses.length === 0) {
+      totalCapacity = 40;
+      totalSeatsFilled = routeCountMap[route.routeId] || 0;
+    }
+
+    const totalSeatsAvailable = Math.max(0, totalCapacity - totalSeatsFilled);
+
     return successResponse(res, {
       data: {
         ...formatRouteSummary(route),
+        capacity: totalCapacity,
+        seatsFilled: totalSeatsFilled,
+        seatsAvailable: totalSeatsAvailable,
         estimatedTime: route.estimatedTime || '',
         stages: (Array.isArray(route.stages) ? route.stages : []).map(formatStage),
-        buses: buses.map(formatBusSummary),
+        buses: formattedBuses,
       },
     });
   } catch (error) {
@@ -168,30 +329,65 @@ export const getStudentTransportRequest = async (req, res) => {
       return errorResponse(res, 'admissionNumber is required', 400);
     }
 
+    const normalizedAY = academicYear ? calendarYearToAcademicYearSession(academicYear) : null;
+    const admNo = String(admissionNumber).trim();
+
+    try {
+      const conn = await getActiveConnection();
+      const coll = conn.db.collection('transport_requests');
+      let mongoDoc = null;
+      if (normalizedAY) {
+        mongoDoc = await coll.findOne({
+          admission_number: admNo,
+          $or: [{ academic_year: normalizedAY }, { academic_year: academicYear }],
+        }, { sort: { request_date: -1, updated_at: -1 } });
+      }
+      if (!mongoDoc) {
+        mongoDoc = await coll.findOne({ admission_number: admNo }, { sort: { request_date: -1, updated_at: -1 } });
+      }
+
+      if (mongoDoc) {
+        return successResponse(res, {
+          id: String(mongoDoc._id),
+          admission_number: mongoDoc.admission_number,
+          student_name: mongoDoc.student_name,
+          route_id: mongoDoc.route_id,
+          route_name: mongoDoc.route_name,
+          stage_name: mongoDoc.stage_name,
+          bus_id: mongoDoc.bus_id,
+          fare: mongoDoc.fare,
+          status: mongoDoc.status,
+          cancellation_reason: mongoDoc.cancellation_reason || null,
+          request_date: mongoDoc.request_date,
+          academic_year: mongoDoc.academic_year,
+          application_number: mongoDoc.application_number,
+          application_serial: mongoDoc.application_serial,
+        });
+      }
+    } catch (mongoErr) {
+      console.warn('[getStudentTransportRequest] Mongo query error:', mongoErr?.message || mongoErr);
+    }
+
     let pool;
     try {
       pool = getSecondaryPool();
-    } catch (err) {
-      return errorResponse(res, 'Secondary database is not available', 503);
+      let query = `SELECT id, admission_number, student_name, route_id, route_name, stage_name, bus_id, fare, status, cancellation_reason, request_date, academic_year, application_number, application_serial 
+                   FROM transport_requests 
+                   WHERE admission_number = ?`;
+      const params = [admNo];
+
+      if (normalizedAY) {
+        query += ' AND academic_year = ?';
+        params.push(normalizedAY);
+      }
+
+      query += ' ORDER BY request_date DESC LIMIT 1';
+
+      const [rows] = await pool.execute(query, params);
+      return successResponse(res, rows[0] || null);
+    } catch {
+      return successResponse(res, null);
     }
-
-    const normalizedAY = academicYear ? calendarYearToAcademicYearSession(academicYear) : null;
-
-    let query = `SELECT id, admission_number, student_name, route_id, route_name, stage_name, bus_id, fare, status, cancellation_reason, request_date, academic_year, application_number, application_serial 
-                 FROM transport_requests 
-                 WHERE admission_number = ?`;
-    const params = [admissionNumber];
-
-    if (normalizedAY) {
-      query += ' AND academic_year = ?';
-      params.push(normalizedAY);
-    }
-
-    query += ' ORDER BY request_date DESC LIMIT 1';
-
-    const [rows] = await pool.execute(query, params);
-
-    return successResponse(res, rows[0] || null);
   } catch (error) {
     console.error('getStudentTransportRequest error:', error);
     return errorResponse(res, error.message || 'Failed to fetch student transport request', 500);

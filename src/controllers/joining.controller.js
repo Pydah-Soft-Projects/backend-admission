@@ -2561,11 +2561,18 @@ export const saveJoiningDraft = async (req, res) => {
       Object.prototype.hasOwnProperty.call(finalPayload.leadData, '_joiningStudentFeeDetails')
         ? finalPayload.leadData._joiningStudentFeeDetails
         : null;
-    const registrationExtrasForSync =
-      finalPayload.leadData?._joiningRegistrationExtras &&
-      typeof finalPayload.leadData._joiningRegistrationExtras === 'object'
-        ? finalPayload.leadData._joiningRegistrationExtras
-        : {};
+    const fullTransportFromReq =
+      body.transportDetails && typeof body.transportDetails === 'object'
+        ? body.transportDetails
+        : body.registrationFormData?.transport_details && typeof body.registrationFormData.transport_details === 'object'
+          ? body.registrationFormData.transport_details
+          : null;
+
+    const registrationExtrasForSync = {
+      ...(finalPayload.leadData?._joiningRegistrationExtras || {}),
+      ...(fullTransportFromReq ? { transport_details: fullTransportFromReq } : {}),
+    };
+
     await runJoiningFeePortalSync({
       pool,
       joiningId: joiningIdToUse,
@@ -2754,6 +2761,23 @@ export const patchJoiningStepTwo = async (req, res) => {
         : {};
     const mergedExtras = { ...prevExtras, ...patchReg };
 
+    if (mergedExtras.transport_details && typeof mergedExtras.transport_details === 'object') {
+      const type = String(mergedExtras.transport_details.accommodationType || '').toLowerCase();
+      let accommodationType = undefined;
+      if (type === 'bus' || mergedExtras.transport_details.routeId != null) accommodationType = 'bus';
+      else if (type === 'hostel' || mergedExtras.transport_details.hostelId != null) accommodationType = 'hostel';
+      else if (type === 'none') accommodationType = 'none';
+
+      if (accommodationType) {
+        mergedExtras.transport_details = {
+          accommodationType,
+          ...(mergedExtras.transport_details.academicYear ? { academicYear: String(mergedExtras.transport_details.academicYear) } : {}),
+        };
+      } else {
+        delete mergedExtras.transport_details;
+      }
+    }
+
     const nextLd = {
       ...ld,
       ...(Object.keys(mergedExtras).length > 0 ? { _joiningRegistrationExtras: mergedExtras } : {}),
@@ -2818,18 +2842,31 @@ export const patchJoiningStepTwo = async (req, res) => {
         ? String(joining.lead_id).trim()
         : null;
 
-    if (hasStudentFees || hasTransportPatch) {
+    if (hasStudentFees || hasTransportPatch || body.transportDetails) {
       const feesForSync =
         rawFees ||
         (nextLd._joiningStudentFeeDetails
           ? sanitizeStudentFeeDetailsForDb(nextLd._joiningStudentFeeDetails)
           : null);
+
+      const fullTransportFromReq =
+        body.transportDetails && typeof body.transportDetails === 'object'
+          ? body.transportDetails
+          : patchReg.transport_details && typeof patchReg.transport_details === 'object'
+            ? patchReg.transport_details
+            : null;
+
+      const extrasForSync = {
+        ...mergedExtras,
+        ...(fullTransportFromReq ? { transport_details: fullTransportFromReq } : {}),
+      };
+
       await runJoiningFeePortalSync({
         pool,
         joiningId: joining.id,
         leadId: resolvedLeadIdForFeeMirror,
         studentFeeDetails: feesForSync,
-        registrationExtras: mergedExtras,
+        registrationExtras: extrasForSync,
         user: req.user,
       });
     }

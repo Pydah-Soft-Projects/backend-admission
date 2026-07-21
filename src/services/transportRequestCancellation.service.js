@@ -114,6 +114,40 @@ async function deactivateTransportMongoBusMirror({ joiningId, admissionNumber, r
   };
 }
 
+async function deactivateTransportMongoRequests({ admissionNumber, academicYear, reason }) {
+  const uri = process.env.TRANSPORT_MONGO_URI?.trim();
+  if (!uri) return { skipped: true, reason: 'TRANSPORT_MONGO_URI not set' };
+
+  try {
+    const conn = await connectTransport();
+    const coll = conn.db.collection('transport_requests');
+    const now = new Date();
+    const admNo = String(admissionNumber || '').trim();
+    if (!admNo) return { skipped: true, reason: 'admissionNumber required' };
+
+    const filter = { admission_number: admNo };
+    if (academicYear) {
+      filter.academic_year = academicYear;
+    }
+
+    const result = await coll.updateMany(filter, {
+      $set: {
+        status: 'cancelled',
+        cancellation_reason: String(reason || '').trim() || undefined,
+        updated_at: now,
+      },
+    });
+
+    return {
+      skipped: false,
+      matchedCount: result.matchedCount || 0,
+      modifiedCount: result.modifiedCount || 0,
+    };
+  } catch (err) {
+    return { skipped: true, error: err?.message || err };
+  }
+}
+
 /**
  * Cancel an active transport_requests row and deactivate linked bus fee ledger rows.
  */
@@ -129,12 +163,40 @@ export async function cancelStudentTransportRequest({
     throw new Error('Cancellation reason is required');
   }
 
-  const pool = getSecondaryPool();
-  const row = await findTransportRequestRow(pool, {
-    admissionNumber,
-    academicYear,
-    requestId,
-  });
+  let row = null;
+  let pool = null;
+  try {
+    pool = getSecondaryPool();
+    row = await findTransportRequestRow(pool, {
+      admissionNumber,
+      academicYear,
+      requestId,
+    });
+  } catch {
+    /* mysql optional */
+  }
+
+  // Also check Mongo if MySQL row not found
+  if (!row && admissionNumber) {
+    try {
+      const conn = await connectTransport();
+      const coll = conn.db.collection('transport_requests');
+      const filter = { admission_number: String(admissionNumber).trim() };
+      if (academicYear) filter.academic_year = academicYear;
+      const mongoRow = await coll.findOne(filter, { sort: { request_date: -1 } });
+      if (mongoRow) {
+        row = {
+          id: String(mongoRow._id),
+          admission_number: mongoRow.admission_number,
+          academic_year: mongoRow.academic_year,
+          status: mongoRow.status,
+          application_number: mongoRow.application_number,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   if (!row) {
     throw new Error('No active transport request found to cancel');
@@ -148,14 +210,16 @@ export async function cancelStudentTransportRequest({
   const resolvedAdmission = String(row.admission_number || admissionNumber || '').trim();
   const resolvedAy = row.academic_year || calendarYearToAcademicYearSession(academicYear);
 
-  await pool.execute(
-    `UPDATE transport_requests
-     SET status = 'cancelled',
-         cancellation_reason = ?,
-         updated_at = NOW()
-     WHERE id = ?`,
-    [trimmedReason, row.id]
-  );
+  if (pool && Number.isFinite(Number(row.id))) {
+    await pool.execute(
+      `UPDATE transport_requests
+       SET status = 'cancelled',
+           cancellation_reason = ?,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [trimmedReason, row.id]
+    ).catch(() => {});
+  }
 
   const feeResult = await deactivateBusStudentFeesInFeeManagement({
     admissionNumber: resolvedAdmission,
@@ -169,6 +233,12 @@ export async function cancelStudentTransportRequest({
     reason: trimmedReason,
   });
 
+  const transportRequestsMongoResult = await deactivateTransportMongoRequests({
+    admissionNumber: resolvedAdmission,
+    academicYear: resolvedAy,
+    reason: trimmedReason,
+  });
+
   return {
     requestId: row.id,
     admissionNumber: resolvedAdmission,
@@ -178,5 +248,6 @@ export async function cancelStudentTransportRequest({
     cancellationReason: trimmedReason,
     feeManagement: feeResult,
     transportMongo: transportMongoResult,
+    transportRequestsMongo: transportRequestsMongoResult,
   };
 }
