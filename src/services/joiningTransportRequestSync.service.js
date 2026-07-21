@@ -1,4 +1,5 @@
 import { getPool as getSecondaryPool } from '../config-sql/database-secondary.js';
+import { connectTransport } from '../config-mongo/transport.js';
 import {
   assignTransportApplicationNumber,
   resolveTransportAcademicYear,
@@ -37,23 +38,10 @@ async function findTransportRequestForYear(pool, admissionNumber, academicYear) 
 }
 
 /**
- * Upsert an approved student transport request in student_database.transport_requests
+ * Upsert an approved student transport request in Transport MongoDB `transport_requests` collection
  * and assign a per-academic-year application number (0001, 0002, …).
  */
 export async function syncJoiningBusToTransportRequestMysql({ joiningId, joiningContext, user = null }) {
-  let pool;
-  try {
-    pool = getSecondaryPool();
-  } catch (err) {
-    console.warn('[joiningTransportRequestSync] Secondary DB unavailable:', err?.message || err);
-    return { skipped: true, reason: 'Secondary DB unavailable' };
-  }
-
-  const hasTable = await secondaryHasTransportRequestsTable(pool);
-  if (!hasTable) {
-    return { skipped: true, reason: 'transport_requests table not found' };
-  }
-
   const transport = joiningContext?.transportDetails;
   if (!transport || transport.accommodationType !== 'bus') {
     return { skipped: true, reason: 'No bus accommodation on joining' };
@@ -83,110 +71,114 @@ export async function syncJoiningBusToTransportRequestMysql({ joiningId, joining
   const raisedBy = user?.name ? String(user.name).trim() : 'admissions_crm';
   const raisedById = user?.empNo != null && !Number.isNaN(Number(user.empNo)) ? Number(user.empNo) : null;
 
-  const { collegeCode, courseCode } = await resolveTransportApplicationCodesForJoining(
-    pool,
-    joiningContext
-  );
+  let pool = null;
+  try {
+    pool = getSecondaryPool();
+  } catch {
+    /* secondary db optional */
+  }
 
-  const existing = await findTransportRequestForYear(pool, admissionNumber, academicYear);
-  const existingNumberMatchesScope =
-    existing?.application_number &&
-    transportApplicationScopeMatches(existing.application_number, collegeCode, courseCode);
+  let collegeCode = 'PCE';
+  let courseCode = 'BTECH';
+  if (pool) {
+    try {
+      const codes = await resolveTransportApplicationCodesForJoining(pool, joiningContext);
+      collegeCode = codes.collegeCode || collegeCode;
+      courseCode = codes.courseCode || courseCode;
+    } catch {
+      /* ignore */
+    }
+  }
 
-  if (existing?.status === 'approved' && existingNumberMatchesScope) {
-    await pool.execute(
-      `UPDATE transport_requests
-       SET student_name = ?, route_id = ?, route_name = ?, stage_name = ?, fare = ?,
-           bus_id = ?, academic_year = ?, raised_by = ?, raised_by_id = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [studentName, routeId, routeName, stageName, fare, busId, academicYear, raisedBy, raisedById, existing.id]
-    );
-    return {
-      skipped: false,
-      operation: 'update',
-      requestId: existing.id,
-      admissionNumber,
+  let application = null;
+  let mongoConn = null;
+  try {
+    mongoConn = await connectTransport();
+    const mongoColl = mongoConn.db.collection('transport_requests');
+    const filter = { admission_number: admissionNumber, academic_year: academicYear };
+    const existingMongo = await mongoColl.findOne(filter);
+
+    application = await assignTransportApplicationNumber(
+      pool,
       academicYear,
-      college_code: collegeCode,
-      course_code: courseCode,
+      collegeCode,
+      courseCode,
+      existingMongo?.application_number || null,
+      existingMongo?.application_serial || null
+    );
+
+    const now = new Date();
+    const doc = {
+      joining_id: joiningId || null,
+      admission_number: admissionNumber,
+      student_name: studentName,
+      route_id: routeId,
+      route_name: routeName,
+      stage_name: stageName,
+      fare,
       bus_id: busId,
-      application_number: existing.application_number,
-      application_serial: existing.application_serial,
-      joiningId,
+      academic_year: academicYear,
+      application_college_code: collegeCode,
+      application_course_code: courseCode,
+      application_number: application.application_number,
+      application_serial: application.application_serial,
+      status: 'approved',
+      raised_by: raisedBy,
+      raised_by_id: raisedById,
+      request_date: existingMongo?.request_date || now,
+      updated_at: now,
     };
+
+    await mongoColl.replaceOne(filter, doc, { upsert: true });
+    console.log(`[joiningTransportRequestSync] Successfully upserted Transport Mongo request ${application.application_number} for ${admissionNumber}`);
+  } catch (mongoErr) {
+    console.error('[joiningTransportRequestSync] Mongo transport_requests error:', mongoErr?.message || mongoErr);
   }
 
-  let requestId = existing?.id || null;
+  // Secondary MySQL sync if pool is available
+  let requestId = null;
+  if (pool) {
+    try {
+      const hasTable = await secondaryHasTransportRequestsTable(pool);
+      if (hasTable) {
+        const existing = await findTransportRequestForYear(pool, admissionNumber, academicYear);
+        requestId = existing?.id || null;
+        if (!requestId) {
+          const [studentRows] = await pool.execute(
+            'SELECT current_year FROM students WHERE admission_number = ? OR admission_no = ? LIMIT 1',
+            [admissionNumber, admissionNumber]
+          );
+          const yearOfStudy = studentRows[0]?.current_year != null ? Number(studentRows[0].current_year) : 1;
 
-  if (!requestId) {
-    const [studentRows] = await pool.execute(
-      'SELECT current_year FROM students WHERE admission_number = ? OR admission_no = ? LIMIT 1',
-      [admissionNumber, admissionNumber]
-    );
-    const yearOfStudy =
-      studentRows[0]?.current_year != null ? Number(studentRows[0].current_year) : 1;
-
-    const [insertResult] = await pool.execute(
-      `INSERT INTO transport_requests
-       (admission_number, student_name, route_id, route_name, stage_name, fare, bus_id,
-        raised_by, raised_by_id, status, year_of_study, academic_year, request_date, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NOW(), NOW())`,
-      [
-        admissionNumber,
-        studentName,
-        routeId,
-        routeName,
-        stageName,
-        fare,
-        busId,
-        raisedBy,
-        raisedById,
-        yearOfStudy,
-        academicYear,
-      ]
-    );
-    requestId = insertResult.insertId;
-  } else {
-    await pool.execute(
-      `UPDATE transport_requests
-       SET student_name = ?, route_id = ?, route_name = ?, stage_name = ?, fare = ?,
-           bus_id = ?, academic_year = ?, raised_by = ?, raised_by_id = ?, updated_at = NOW()
-       WHERE id = ?`,
-      [studentName, routeId, routeName, stageName, fare, busId, academicYear, raisedBy, raisedById, requestId]
-    );
+          const [insertResult] = await pool.execute(
+            `INSERT INTO transport_requests
+             (admission_number, student_name, route_id, route_name, stage_name, fare, bus_id,
+              raised_by, raised_by_id, status, year_of_study, academic_year, application_number, application_serial, request_date, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, NOW(), NOW())`,
+            [admissionNumber, studentName, routeId, routeName, stageName, fare, busId, raisedBy, raisedById, yearOfStudy, academicYear, application?.application_number || null, application?.application_serial || null]
+          );
+          requestId = insertResult.insertId;
+        } else {
+          await pool.execute(
+            `UPDATE transport_requests
+             SET student_name = ?, route_id = ?, route_name = ?, stage_name = ?, fare = ?,
+                 bus_id = ?, academic_year = ?, status = 'approved', application_number = ?, application_serial = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [studentName, routeId, routeName, stageName, fare, busId, academicYear, application?.application_number || null, application?.application_serial || null, requestId]
+          );
+        }
+      }
+    } catch (sqlErr) {
+      console.warn('[joiningTransportRequestSync] Secondary MySQL sync warning:', sqlErr?.message || sqlErr);
+    }
   }
-
-  const application = await assignTransportApplicationNumber(
-    pool,
-    academicYear,
-    collegeCode,
-    courseCode,
-    existingNumberMatchesScope ? existing.application_number : null,
-    existingNumberMatchesScope ? (existing?.application_serial ?? null) : null
-  );
-
-  await pool.execute(
-    `UPDATE transport_requests
-     SET status = 'approved',
-         bus_id = ?,
-         application_number = ?,
-         application_serial = ?,
-         updated_at = NOW()
-     WHERE id = ?`,
-    [busId, application.application_number, application.application_serial, requestId]
-  );
 
   return {
     skipped: false,
-    operation: existing ? 'approve-update' : 'insert-approve',
-    requestId,
     admissionNumber,
     academicYear,
-    college_code: collegeCode,
-    course_code: courseCode,
-    bus_id: busId,
-    application_number: application.application_number,
-    application_serial: application.application_serial,
+    application_number: application?.application_number || null,
+    application_serial: application?.application_serial || null,
     joiningId,
   };
 }

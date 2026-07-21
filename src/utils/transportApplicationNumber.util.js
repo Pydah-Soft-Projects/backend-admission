@@ -5,6 +5,7 @@
  */
 
 import { getTableColumnSet } from './secondarySchema.util.js';
+import { connectTransport } from '../config-mongo/transport.js';
 
 const CODE_FALLBACK = 'UNK';
 
@@ -221,6 +222,50 @@ export async function getMaxTransportApplicationSerialFromRequests(
   return maxSerial;
 }
 
+/** Highest assigned serial from Transport MongoDB `transport_requests` collection. */
+export async function getMaxTransportApplicationSerialFromMongo(
+  academicYear,
+  collegeCode,
+  courseCode
+) {
+  const college = normalizeTransportCodePart(collegeCode);
+  const course = normalizeTransportCodePart(courseCode);
+
+  try {
+    const conn = await connectTransport();
+    const db = conn.db;
+    const coll = db.collection('transport_requests');
+
+    const docs = await coll
+      .find({
+        academic_year: academicYear,
+        $or: [
+          { application_college_code: college, application_course_code: course },
+          { application_number: new RegExp(`^${college}-${course}-`, 'i') },
+        ],
+      })
+      .sort({ application_serial: -1 })
+      .limit(10)
+      .toArray();
+
+    let maxSerial = 0;
+    for (const doc of docs) {
+      let serial = doc.application_serial;
+      if (serial == null || !Number.isFinite(Number(serial))) {
+        const parsed = parseTransportApplicationNumber(doc.application_number);
+        serial = parsed?.serial;
+      }
+      if (Number.isFinite(Number(serial)) && Number(serial) > maxSerial) {
+        maxSerial = Number(serial);
+      }
+    }
+    return maxSerial;
+  } catch (err) {
+    console.warn('[getMaxTransportApplicationSerialFromMongo] Error querying Transport Mongo:', err?.message || err);
+    return 0;
+  }
+}
+
 export async function assignTransportApplicationNumber(
   mysqlPool,
   academicYear,
@@ -252,43 +297,58 @@ export async function assignTransportApplicationNumber(
     };
   }
 
-  const connection = await mysqlPool.getConnection();
-  try {
-    await connection.beginTransaction();
+  const college = normalizeTransportCodePart(collegeCode);
+  const course = normalizeTransportCodePart(courseCode);
+  const mongoMaxSerial = await getMaxTransportApplicationSerialFromMongo(
+    academicYear,
+    college,
+    course
+  );
 
-    const counter = await ensureTransportApplicationCounterRow(
-      connection,
-      academicYear,
-      collegeCode,
-      courseCode
-    );
-    const nextSerial = counter.lastSerial + 1;
+  let nextSerial = mongoMaxSerial + 1;
 
-    await connection.query(
-      `UPDATE transport_application_counters
-       SET last_serial = ?
-       WHERE academic_year = ? AND college_code = ? AND course_code = ?`,
-      [nextSerial, academicYear, counter.collegeCode, counter.courseCode]
-    );
+  if (mysqlPool) {
+    let connection;
+    try {
+      connection = await mysqlPool.getConnection();
+      await connection.beginTransaction();
 
-    await connection.commit();
+      const counter = await ensureTransportApplicationCounterRow(
+        connection,
+        academicYear,
+        collegeCode,
+        courseCode
+      );
+      
+      const highestBase = Math.max(counter.lastSerial, mongoMaxSerial);
+      nextSerial = highestBase + 1;
 
-    return {
-      application_number: formatTransportApplicationNumber(
-        counter.collegeCode,
-        counter.courseCode,
-        nextSerial
-      ),
-      application_serial: nextSerial,
-      college_code: counter.collegeCode,
-      course_code: counter.courseCode,
-    };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
-  } finally {
-    connection.release();
+      await connection.query(
+        `UPDATE transport_application_counters
+         SET last_serial = ?
+         WHERE academic_year = ? AND college_code = ? AND course_code = ?`,
+        [nextSerial, academicYear, counter.collegeCode, counter.courseCode]
+      );
+
+      await connection.commit();
+    } catch (err) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.warn('[assignTransportApplicationNumber] MySQL counter sync failed, using Mongo serial:', err?.message || err);
+    } finally {
+      if (connection) connection.release();
+    }
   }
+
+  return {
+    application_number: formatTransportApplicationNumber(
+      college,
+      course,
+      nextSerial
+    ),
+    application_serial: nextSerial,
+    college_code: college,
+    course_code: course,
+  };
 }
 
 /** Read-only preview of the next serial for an academic year + college + course. */
@@ -308,21 +368,37 @@ export async function peekNextTransportApplicationNumber(
   const college = normalizeTransportCodePart(collegeCode);
   const course = normalizeTransportCodePart(courseCode);
 
-  const [counterRows] = await mysqlPool.query(
-    `SELECT last_serial FROM transport_application_counters
-     WHERE academic_year = ? AND college_code = ? AND course_code = ?
-     LIMIT 1`,
-    [academicYear, college, course]
-  );
+  let counterSerial = 0;
+  let requestsMaxSerial = 0;
 
-  const counterSerial = Number(counterRows[0]?.last_serial || 0);
-  const requestsMaxSerial = await getMaxTransportApplicationSerialFromRequests(
-    mysqlPool,
+  if (mysqlPool) {
+    try {
+      const [counterRows] = await mysqlPool.query(
+        `SELECT last_serial FROM transport_application_counters
+         WHERE academic_year = ? AND college_code = ? AND course_code = ?
+         LIMIT 1`,
+        [academicYear, college, course]
+      );
+      counterSerial = Number(counterRows[0]?.last_serial || 0);
+      requestsMaxSerial = await getMaxTransportApplicationSerialFromRequests(
+        mysqlPool,
+        academicYear,
+        college,
+        course
+      );
+    } catch {
+      /* ignore mysql errors */
+    }
+  }
+
+  const mongoMaxSerial = await getMaxTransportApplicationSerialFromMongo(
     academicYear,
     college,
     course
   );
-  const nextSerial = Math.max(counterSerial, requestsMaxSerial) + 1;
+
+  const maxSerial = Math.max(counterSerial, requestsMaxSerial, mongoMaxSerial);
+  const nextSerial = maxSerial + 1;
 
   return {
     application_number: formatTransportApplicationNumber(college, course, nextSerial),

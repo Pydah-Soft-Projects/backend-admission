@@ -511,7 +511,13 @@ export const submitFeeRequest = async (req, res) => {
       );
     }
 
-    const transportDetails = registrationExtras.transport_details || null;
+    const transportDetails =
+      req.body?.transportDetails && typeof req.body.transportDetails === 'object'
+        ? req.body.transportDetails
+        : req.body?.registrationFormData?.transport_details && typeof req.body.registrationFormData.transport_details === 'object'
+          ? req.body.registrationFormData.transport_details
+          : registrationExtras.transport_details || null;
+
     const accommodationType =
       transportDetails && typeof transportDetails === 'object'
         ? transportDetails.accommodationType || null
