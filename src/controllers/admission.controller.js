@@ -39,6 +39,7 @@ import {
 } from '../utils/joiningAddress.util.js';
 import {
   buildTuitionFeeSummariesByAdmissionNumbers,
+  fetchPaidByAdmissionNumbersForStudentYear,
   fetchTuitionPaidByAdmissionNumbers,
 } from '../utils/tuitionPaid.util.js';
 import {
@@ -1923,18 +1924,18 @@ export const listAdmissions = async (req, res) => {
       );
     }
 
-    const tuitionPaidByAdmissionNumber = await fetchTuitionPaidByAdmissionNumbers(
+    const yearOnePaidByAdmissionNumber = await fetchPaidByAdmissionNumbersForStudentYear(
       admissions.map((row) => row.admission_number)
     );
     const formattedAdmissions = admissions.map((row) => {
       const item = formatAdmissionListItem(row);
-      const tuitionPaid =
-        tuitionPaidByAdmissionNumber.get(String(row.admission_number || '').trim()) ?? 0;
+      const yearOnePaid =
+        yearOnePaidByAdmissionNumber.get(String(row.admission_number || '').trim()) ?? 0;
       return {
         ...item,
         paymentSummary: {
           ...item.paymentSummary,
-          tuitionPaid,
+          yearOnePaid,
         },
       };
     });

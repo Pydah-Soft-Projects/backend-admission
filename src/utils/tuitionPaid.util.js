@@ -5,6 +5,9 @@ import { connectFeeManagement } from '../config-mongo/feeManagement.js';
 export const TUI_FEE_HEAD_ID = '6996e24c2e1678e398839187';
 export const TUI_FEE_HEAD_CODE = 'TUI01';
 
+/** Special Fee head included with tuition in the Student Info Paid amount. */
+export const SPECIAL_FEE_HEAD_CODE = 'OTH1';
+
 /** Admissions desk reports use Year 1 tuition only. */
 export const TUI_STUDENT_YEAR = 1;
 
@@ -30,6 +33,84 @@ const studentYearMatchFilter = (studentYear = TUI_STUDENT_YEAR) => {
   if (Number.isFinite(numeric)) values.unshift(numeric);
   return { $in: [...new Set(values)] };
 };
+
+/**
+ * Sum payments across exactly the two Student Info fee heads for a student year:
+ * Tuition (TUI01) + Special Fee (OTH1). Application, school, other, transport,
+ * hostel, and every other fee head are intentionally excluded.
+ *
+ * @param {string[]} admissionNumbers
+ * @param {number} [studentYear=1]
+ * @returns {Promise<Map<string, number>>}
+ */
+export async function fetchPaidByAdmissionNumbersForStudentYear(
+  admissionNumbers,
+  studentYear = TUI_STUDENT_YEAR
+) {
+  const ids = [
+    ...new Set(
+      (Array.isArray(admissionNumbers) ? admissionNumbers : [])
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    ),
+  ];
+  const result = new Map();
+  if (ids.length === 0) return result;
+
+  try {
+    const conn = await connectFeeManagement();
+    // Resolve OTH1 from the fee-head master instead of hard-coding an environment-specific
+    // ObjectId. Transactions normally store feeHead as that master row's ObjectId/string.
+    const includedCodes = [TUI_FEE_HEAD_CODE, SPECIAL_FEE_HEAD_CODE];
+    const codeMatchers = includedCodes.map(
+      (code) => new RegExp(`^${code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+    );
+    const specialHeads = await conn.db
+      .collection('feeheads')
+      .find({
+        $or: [
+          { code: { $in: codeMatchers } },
+          { feeHeadCode: { $in: codeMatchers } },
+        ],
+      })
+      .project({ _id: 1 })
+      .toArray();
+    const includedHeadIds = [
+      TUI_FEE_HEAD_ID,
+      ...specialHeads.map((head) => String(head._id || '').trim()).filter(Boolean),
+    ];
+    const includedFeeHeadValues = [
+      ...new Set(includedHeadIds.flatMap((id) => feeHeadMatchValues(id))),
+    ];
+    const docs = await conn.db
+      .collection('transactions')
+      .find({
+        studentId: { $in: ids },
+        studentYear: studentYearMatchFilter(studentYear),
+        $or: [
+          { feeHead: { $in: includedFeeHeadValues } },
+          { feeHeadId: { $in: includedHeadIds } },
+          { feeHeadCode: { $in: codeMatchers } },
+        ],
+      })
+      .project({ studentId: 1, amount: 1, transactionType: 1, status: 1 })
+      .toArray();
+
+    for (const doc of docs) {
+      if (String(doc.status || '').toLowerCase() === 'cancelled') continue;
+      const amount = Number(doc.amount) || 0;
+      if (amount <= 0) continue;
+      const multiplier = doc.transactionType === 'CREDIT' ? -1 : 1;
+      const studentId = String(doc.studentId || '').trim();
+      if (!studentId) continue;
+      result.set(studentId, (result.get(studentId) || 0) + amount * multiplier);
+    }
+  } catch (error) {
+    console.error('[fetchPaidByAdmissionNumbersForStudentYear]', error?.message || error);
+  }
+
+  return result;
+}
 
 const emptyTuitionSummary = () => ({
   payable: 0,
