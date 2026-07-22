@@ -336,16 +336,40 @@ const runJoiningFeePortalSync = async ({
     }
   }
 
+  let collegeCode = '';
+  let courseCode = '';
+  const resolvedCollegeId = registrationExtras?.collegeId ?? registrationExtras?.college_id ?? registrationExtras?.school_or_college_id ?? registrationExtras?.schoolOrCollegeId ?? null;
+  const resolvedManagedCourseId = joiningRow.managed_course_id ?? registrationExtras?.managedCourseId ?? registrationExtras?.managed_course_id ?? null;
+
+  try {
+    const { resolveTransportApplicationCodes } = await import('../utils/transportApplicationNumber.util.js');
+    const { getPool: getSecondaryPool } = await import('../config-sql/database-secondary.js');
+    const secPool = getSecondaryPool();
+    const resolvedCodes = await resolveTransportApplicationCodes(secPool, {
+      managedCourseId: resolvedManagedCourseId,
+      collegeId: resolvedCollegeId,
+      courseName: joiningRow.course,
+    });
+    if (resolvedCodes.collegeCode) collegeCode = resolvedCodes.collegeCode;
+    if (resolvedCodes.courseCode) courseCode = resolvedCodes.courseCode;
+  } catch (err) {
+    console.warn('[runJoiningFeePortalSync] failed resolving college/course codes:', err);
+  }
+
   const feeSyncResult = await syncJoiningStudentFeeDetailsToFeeMongo({
     joiningId,
     leadId: leadId || joiningRow.lead_id || null,
     studentFeeDetails,
-    joiningContext: buildJoiningFeeSyncContext(
-      joiningRow,
-      studentFeeDetails,
-      registrationExtras,
-      admissionNumber
-    ),
+    joiningContext: {
+      ...buildJoiningFeeSyncContext(
+        joiningRow,
+        studentFeeDetails,
+        registrationExtras,
+        admissionNumber
+      ),
+      collegeCode,
+      courseCode,
+    },
     user,
   });
 
