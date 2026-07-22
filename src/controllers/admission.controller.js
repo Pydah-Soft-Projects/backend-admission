@@ -38,7 +38,7 @@ import {
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 import {
-  buildTuitionFeeSummariesByAdmissionNumbers,
+  buildTuitionAndOtherFeeSummariesByAdmissionNumbers,
   fetchPaidByAdmissionNumbersForStudentYear,
   fetchTuitionPaidByAdmissionNumbers,
 } from '../utils/tuitionPaid.util.js';
@@ -4175,17 +4175,41 @@ const PENDING_LIST_DEFAULT_LIMIT = 20;
 const PENDING_LIST_MAX_LIMIT = 500;
 
 const parsePendingListPagination = (query = {}) => {
+  const allFlag = String(query.all ?? '').trim().toLowerCase();
+  const limitRaw = String(query.limit ?? '').trim().toLowerCase();
+  const returnAll =
+    allFlag === '1' ||
+    allFlag === 'true' ||
+    allFlag === 'yes' ||
+    limitRaw === 'all' ||
+    limitRaw === '0';
+
+  if (returnAll) {
+    return { page: 1, limit: null, returnAll: true };
+  }
+
   const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1);
   const rawLimit = parseInt(String(query.limit ?? String(PENDING_LIST_DEFAULT_LIMIT)), 10);
   const limit = Math.min(
     PENDING_LIST_MAX_LIMIT,
     Math.max(1, Number.isFinite(rawLimit) ? rawLimit : PENDING_LIST_DEFAULT_LIMIT)
   );
-  return { page, limit };
+  return { page, limit, returnAll: false };
 };
 
-const paginatePendingRows = (allRows, page, limit) => {
+const paginatePendingRows = (allRows, page, limit, returnAll = false) => {
   const total = Array.isArray(allRows) ? allRows.length : 0;
+  if (returnAll || limit == null) {
+    return {
+      rows: allRows || [],
+      pagination: {
+        page: 1,
+        pages: 1,
+        limit: total,
+        total,
+      },
+    };
+  }
   const pages = Math.max(1, Math.ceil(total / limit) || 1);
   const safePage = Math.min(Math.max(1, page), pages);
   const start = (safePage - 1) * limit;
@@ -4478,9 +4502,9 @@ const fetchPendingCertificateStats = async (query) => {
 /** List students with pending Other Documents (Important shown as Completed when done). */
 export const listPendingCertificates = async (req, res) => {
   try {
-    const { page, limit } = parsePendingListPagination(req.query);
+    const { page, limit, returnAll } = parsePendingListPagination(req.query);
     const { stats, pendingRows } = await evaluatePendingDocuments(req.query);
-    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit);
+    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit, returnAll);
     return successResponse(
       res,
       {
@@ -4502,8 +4526,8 @@ export const listPendingCertificates = async (req, res) => {
   }
 };
 
-const formatPendingFeeRow = (row, tuitionSummary) => {
-  const summary = tuitionSummary || {
+const formatPendingFeeRow = (row, feeSummary) => {
+  const summary = feeSummary || {
     payable: 0,
     paid: 0,
     pending: 0,
@@ -4511,6 +4535,20 @@ const formatPendingFeeRow = (row, tuitionSummary) => {
     feeStatus: 'no_entry',
     displayAmount: 0,
     displayLabel: 'Pending',
+    tuition: { payable: 0, paid: 0, pending: 0, hasFeeEntry: false },
+    other: { payable: 0, paid: 0, pending: 0, hasFeeEntry: false },
+  };
+  const tuition = summary.tuition || {
+    payable: 0,
+    paid: 0,
+    pending: 0,
+    hasFeeEntry: false,
+  };
+  const other = summary.other || {
+    payable: 0,
+    paid: 0,
+    pending: 0,
+    hasFeeEntry: false,
   };
   const isUnpaid = summary.feeStatus === 'unpaid';
 
@@ -4523,9 +4561,21 @@ const formatPendingFeeRow = (row, tuitionSummary) => {
     quota: row.quota || '',
     course: row.course || '',
     branch: row.branch || '',
-    tuitionPayable: summary.payable,
-    tuitionPaid: summary.paid,
-    tuitionPending: summary.pending,
+    // Combined Step 4 totals (Tuition + Other/Special)
+    totalPayable: summary.payable,
+    totalPaid: summary.paid,
+    totalPending: summary.pending,
+    // Per-head Year 1 amounts
+    tuitionPayable: tuition.payable,
+    tuitionPaid: tuition.paid,
+    tuitionPending: tuition.pending,
+    otherPayable: other.payable,
+    otherPaid: other.paid,
+    otherPending: other.pending,
+    // Legacy aliases — combined totals (kept for older UI fields)
+    payable: summary.payable,
+    paid: summary.paid,
+    pending: summary.pending,
     hasFeeEntry: summary.hasFeeEntry,
     feeStatus: summary.feeStatus,
     displayAmount: summary.displayAmount,
@@ -4543,8 +4593,9 @@ const formatPendingFeeRow = (row, tuitionSummary) => {
 };
 
 /**
- * Evaluate tuition fee (TUI01) status for filtered active admissions.
- * Sample list + export = students with unpaid tuition balance.
+ * Evaluate Year-1 Tuition (TUI01) + Other/Special (OTH1) fee status for filtered
+ * active admissions — same heads as Step 4 admission view-details (excluding transport).
+ * List + export = students who still have a remaining balance (payable − paid > 0).
  */
 const evaluatePendingFees = async (query) => {
   const pool = getPool();
@@ -4592,12 +4643,12 @@ const evaluatePendingFees = async (query) => {
     (a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0)
   );
 
-  const tuitionSummaries = await buildTuitionFeeSummariesByAdmissionNumbers(
+  const feeSummaries = await buildTuitionAndOtherFeeSummariesByAdmissionNumbers(
     detailRows.map((row) => row.admission_number)
   );
 
   const evaluated = detailRows.map((row) =>
-    formatPendingFeeRow(row, tuitionSummaries.get(String(row.admission_number || '').trim()))
+    formatPendingFeeRow(row, feeSummaries.get(String(row.admission_number || '').trim()))
   );
 
   const totalStudents = evaluated.length;
@@ -4618,12 +4669,12 @@ const evaluatePendingFees = async (query) => {
   };
 };
 
-/** List students with unpaid tuition fee (TUI01). */
+/** List students with unpaid Year-1 Tuition + Other/Special fee. */
 export const listPendingFees = async (req, res) => {
   try {
-    const { page, limit } = parsePendingListPagination(req.query);
+    const { page, limit, returnAll } = parsePendingListPagination(req.query);
     const { stats, pendingRows } = await evaluatePendingFees(req.query);
-    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit);
+    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit, returnAll);
     return successResponse(
       res,
       {
@@ -4632,7 +4683,7 @@ export const listPendingFees = async (req, res) => {
         stats,
         total: pagination.total,
       },
-      'Pending tuition fees retrieved successfully',
+      'Pending tuition and other fees retrieved successfully',
       200
     );
   } catch (error) {
@@ -4645,7 +4696,7 @@ export const listPendingFees = async (req, res) => {
   }
 };
 
-/** Excel export — students with unpaid tuition fee (TUI01). */
+/** Excel export — students with unpaid Year-1 Tuition + Other/Special fee. */
 export const exportPendingFees = async (req, res) => {
   try {
     const { pendingRows } = await evaluatePendingFees(req.query);
@@ -4664,6 +4715,12 @@ export const exportPendingFees = async (req, res) => {
       { header: 'Tuition Payable', key: 'tuitionPayable', width: 16 },
       { header: 'Tuition Paid', key: 'tuitionPaid', width: 16 },
       { header: 'Tuition Pending', key: 'tuitionPending', width: 16 },
+      { header: 'Other Payable', key: 'otherPayable', width: 16 },
+      { header: 'Other Paid', key: 'otherPaid', width: 16 },
+      { header: 'Other Pending', key: 'otherPending', width: 16 },
+      { header: 'Total Payable', key: 'totalPayable', width: 16 },
+      { header: 'Total Paid', key: 'totalPaid', width: 16 },
+      { header: 'Total Pending', key: 'totalPending', width: 16 },
       { header: 'Fee Status', key: 'feeStatusText', width: 14 },
       { header: 'Amount', key: 'feeAmountText', width: 18 },
     ];
@@ -4681,6 +4738,12 @@ export const exportPendingFees = async (req, res) => {
         tuitionPayable: row.tuitionPayable,
         tuitionPaid: row.tuitionPaid,
         tuitionPending: row.tuitionPending,
+        otherPayable: row.otherPayable,
+        otherPaid: row.otherPaid,
+        otherPending: row.otherPending,
+        totalPayable: row.totalPayable,
+        totalPaid: row.totalPaid,
+        totalPending: row.totalPending,
         feeStatusText: row.feeStatusText,
         feeAmountText: row.feeAmountText,
       });
