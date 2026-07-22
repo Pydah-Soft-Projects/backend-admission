@@ -2562,10 +2562,11 @@ export const saveJoiningDraft = async (req, res) => {
         ? finalPayload.leadData._joiningStudentFeeDetails
         : null;
     const fullTransportFromReq =
-      body.transportDetails && typeof body.transportDetails === 'object'
-        ? body.transportDetails
-        : body.registrationFormData?.transport_details && typeof body.registrationFormData.transport_details === 'object'
-          ? body.registrationFormData.transport_details
+      payload.transportDetails && typeof payload.transportDetails === 'object'
+        ? payload.transportDetails
+        : payload.registrationFormData?.transport_details &&
+            typeof payload.registrationFormData.transport_details === 'object'
+          ? payload.registrationFormData.transport_details
           : null;
 
     const registrationExtrasForSync = {
