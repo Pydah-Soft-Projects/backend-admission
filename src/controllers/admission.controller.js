@@ -4614,6 +4614,7 @@ const evaluatePendingFees = async (query) => {
     tuitionPaidStudents: 0,
     tuitionUnpaidStudents: 0,
     tuitionNoEntryStudents: 0,
+    tuitionFullySettledStudents: 0,
     pendingStudents: 0,
   };
 
@@ -4652,9 +4653,11 @@ const evaluatePendingFees = async (query) => {
   );
 
   const totalStudents = evaluated.length;
-  const tuitionPaidStudents = evaluated.filter((r) => r.isPaid).length;
+  // Fee paid = any payment recorded on tuition + other (not only fully settled).
+  const tuitionPaidStudents = evaluated.filter((r) => Number(r.totalPaid || 0) > 0.5).length;
   const tuitionUnpaidStudents = evaluated.filter((r) => r.isPending).length;
   const tuitionNoEntryStudents = evaluated.filter((r) => r.isNoEntry).length;
+  const tuitionFullySettledStudents = evaluated.filter((r) => r.isPaid).length;
   const pendingRows = evaluated.filter((r) => r.isPending);
 
   return {
@@ -4663,6 +4666,7 @@ const evaluatePendingFees = async (query) => {
       tuitionPaidStudents,
       tuitionUnpaidStudents,
       tuitionNoEntryStudents,
+      tuitionFullySettledStudents,
       pendingStudents: tuitionUnpaidStudents,
     },
     pendingRows,
