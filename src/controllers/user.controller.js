@@ -4,6 +4,12 @@ import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import mongoose from 'mongoose';
 import { connectHRMS } from '../config-mongo/hrms.js';
+import {
+  snapshotUserForAudit,
+  diffUserAuditSnapshots,
+  getRequestAuditMeta,
+  recordUserAuditLog,
+} from '../utils/recordUserAuditLog.js';
 
 const VALID_ROLES = ['Super Admin', 'Sub Super Admin', 'Student Counselor', 'Data Entry User', 'PRO'];
 
@@ -803,6 +809,21 @@ export const createUser = async (req, res) => {
     );
 
     const user = formatUser(users[0]);
+    const actorId = req.user?.id || req.user?._id || null;
+    const actorName = req.user?.name || null;
+    const { ipAddress, userAgent } = getRequestAuditMeta(req);
+    const afterSnap = snapshotUserForAudit(users[0]);
+    await recordUserAuditLog({
+      targetUserId: userId,
+      targetUserName: afterSnap?.name || null,
+      targetUserEmail: afterSnap?.email || null,
+      action: 'create',
+      changedBy: actorId,
+      changedByName: actorName,
+      changes: diffUserAuditSnapshots(null, afterSnap),
+      ipAddress,
+      userAgent,
+    });
 
     return successResponse(res, user, 'User created successfully', 201);
   } catch (error) {
@@ -831,6 +852,8 @@ export const updateUser = async (req, res) => {
 
     const currentUser = users[0];
     const wasManager = currentUser.is_manager === 1 || currentUser.is_manager === true;
+    const beforeSnap = snapshotUserForAudit(currentUser);
+    const passwordChanged = Boolean(password);
 
     // Build update fields
     const updateFields = [];
@@ -1066,11 +1089,29 @@ export const updateUser = async (req, res) => {
 
     // Fetch updated user
     const [updatedUsers] = await pool.execute(
-      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, created_at, updated_at FROM users WHERE id = ?',
+      'SELECT id, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active, hrms_id, emp_no, created_at, updated_at FROM users WHERE id = ?',
       [req.params.id]
     );
 
     const user = formatUser(updatedUsers[0]);
+    const afterSnap = snapshotUserForAudit(updatedUsers[0]);
+    const changes = diffUserAuditSnapshots(beforeSnap, afterSnap, { passwordChanged });
+    if (Object.keys(changes).length > 0) {
+      const actorId = req.user?.id || req.user?._id || null;
+      const actorName = req.user?.name || null;
+      const { ipAddress, userAgent } = getRequestAuditMeta(req);
+      await recordUserAuditLog({
+        targetUserId: req.params.id,
+        targetUserName: afterSnap?.name || beforeSnap?.name || null,
+        targetUserEmail: afterSnap?.email || beforeSnap?.email || null,
+        action: 'update',
+        changedBy: actorId,
+        changedByName: actorName,
+        changes,
+        ipAddress,
+        userAgent,
+      });
+    }
 
     return successResponse(res, user, 'User updated successfully', 200);
   } catch (error) {
@@ -1260,7 +1301,7 @@ export const deleteUser = async (req, res) => {
 
     // Check if user exists
     const [users] = await pool.execute(
-      'SELECT id FROM users WHERE id = ?',
+      'SELECT id, hrms_id, emp_no, name, email, mobile_number, role_name, managed_by, is_manager, designation, permissions, is_active FROM users WHERE id = ?',
       [req.params.id]
     );
 
@@ -1273,6 +1314,24 @@ export const deleteUser = async (req, res) => {
     if (users[0].id === currentUserId) {
       return errorResponse(res, 'You cannot delete your own account', 400);
     }
+
+    const beforeSnap = snapshotUserForAudit(users[0]);
+    const actorId = currentUserId;
+    const actorName = req.user?.name || null;
+    const { ipAddress, userAgent } = getRequestAuditMeta(req);
+
+    // Audit before delete so FK target_user_id is still valid; ON DELETE SET NULL keeps the row
+    await recordUserAuditLog({
+      targetUserId: users[0].id,
+      targetUserName: beforeSnap?.name || null,
+      targetUserEmail: beforeSnap?.email || null,
+      action: 'delete',
+      changedBy: actorId,
+      changedByName: actorName,
+      changes: diffUserAuditSnapshots(beforeSnap, null),
+      ipAddress,
+      userAgent,
+    });
 
     // Delete user (foreign key constraints will handle managed_by relationships)
     await pool.execute(

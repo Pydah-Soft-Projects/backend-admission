@@ -13,6 +13,7 @@ import {
 import { getMySettings, updateMySettings } from '../controllers/userSettings.controller.js';
 import { updateMyProfile } from '../controllers/userProfile.controller.js';
 import { getMyLoginLogs, getAllUserLoginLogs } from '../controllers/userLoginLogs.controller.js';
+import { getUserAuditLogs, getAllUserAuditLogs } from '../controllers/userAudit.controller.js';
 import { protect, isSuperAdmin, requireTimeTrackingEnabled } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
@@ -30,9 +31,11 @@ router.get('/me/login-logs', getMyLoginLogs);
 router.route('/').get(isSuperAdmin, getUsers).post(isSuperAdmin, createUser);
 router.get('/assignable', isSuperAdmin, getAssignableUsers);
 router.get('/all/login-logs', isSuperAdmin, getAllUserLoginLogs);
+router.get('/all/audit-logs', isSuperAdmin, getAllUserAuditLogs);
 router.get('/hrms/search', isSuperAdmin, searchHrmsEmployees);
 router.get('/hrms/id/:mongoId', isSuperAdmin, getHrmsEmployeeByMongoId);
 router.get('/hrms/:empNo', isSuperAdmin, getHrmsEmployeeByEmpNo);
+router.get('/:id/audit-logs', isSuperAdmin, getUserAuditLogs);
 
 // Require time tracking for User/Counsellor/Manager dashboard routes below
 router.use(requireTimeTrackingEnabled);

@@ -4171,7 +4171,34 @@ const OTHER_DOCUMENT_FIELDS_ALL = [
   ...OTHER_DOCUMENT_FIELDS_NON_MGMT,
 ];
 
-const PENDING_CERTIFICATES_SAMPLE_LIMIT = 10;
+const PENDING_LIST_DEFAULT_LIMIT = 20;
+const PENDING_LIST_MAX_LIMIT = 500;
+
+const parsePendingListPagination = (query = {}) => {
+  const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1);
+  const rawLimit = parseInt(String(query.limit ?? String(PENDING_LIST_DEFAULT_LIMIT)), 10);
+  const limit = Math.min(
+    PENDING_LIST_MAX_LIMIT,
+    Math.max(1, Number.isFinite(rawLimit) ? rawLimit : PENDING_LIST_DEFAULT_LIMIT)
+  );
+  return { page, limit };
+};
+
+const paginatePendingRows = (allRows, page, limit) => {
+  const total = Array.isArray(allRows) ? allRows.length : 0;
+  const pages = Math.max(1, Math.ceil(total / limit) || 1);
+  const safePage = Math.min(Math.max(1, page), pages);
+  const start = (safePage - 1) * limit;
+  return {
+    rows: (allRows || []).slice(start, start + limit),
+    pagination: {
+      page: safePage,
+      pages,
+      limit,
+      total,
+    },
+  };
+};
 
 /** Mirrors frontend `isManagementQuotaLabel` for other-documents visibility. */
 const isManagementQuotaForOtherDocs = (quota) => {
@@ -4451,15 +4478,16 @@ const fetchPendingCertificateStats = async (query) => {
 /** List students with pending Other Documents (Important shown as Completed when done). */
 export const listPendingCertificates = async (req, res) => {
   try {
+    const { page, limit } = parsePendingListPagination(req.query);
     const { stats, pendingRows } = await evaluatePendingDocuments(req.query);
-    const rows = pendingRows.slice(0, PENDING_CERTIFICATES_SAMPLE_LIMIT);
+    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit);
     return successResponse(
       res,
       {
         rows,
-        sampleLimit: PENDING_CERTIFICATES_SAMPLE_LIMIT,
+        pagination,
         stats,
-        total: stats.pendingStudents,
+        total: pagination.total,
       },
       'Pending other documents retrieved successfully',
       200
@@ -4473,8 +4501,6 @@ export const listPendingCertificates = async (req, res) => {
     );
   }
 };
-
-const PENDING_FEES_SAMPLE_LIMIT = 10;
 
 const formatPendingFeeRow = (row, tuitionSummary) => {
   const summary = tuitionSummary || {
@@ -4595,15 +4621,16 @@ const evaluatePendingFees = async (query) => {
 /** List students with unpaid tuition fee (TUI01). */
 export const listPendingFees = async (req, res) => {
   try {
+    const { page, limit } = parsePendingListPagination(req.query);
     const { stats, pendingRows } = await evaluatePendingFees(req.query);
-    const rows = pendingRows.slice(0, PENDING_FEES_SAMPLE_LIMIT);
+    const { rows, pagination } = paginatePendingRows(pendingRows, page, limit);
     return successResponse(
       res,
       {
         rows,
-        sampleLimit: PENDING_FEES_SAMPLE_LIMIT,
+        pagination,
         stats,
-        total: stats.pendingStudents,
+        total: pagination.total,
       },
       'Pending tuition fees retrieved successfully',
       200
