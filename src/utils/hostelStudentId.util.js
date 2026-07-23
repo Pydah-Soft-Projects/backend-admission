@@ -82,7 +82,7 @@ export async function getMaxHostelSequenceSerialFromRequests(db, { prefix, acade
 }
 
 /**
- * Assign the next hostel student id from HMS `counters`.
+ * Assign the next hostel student id.
  * Supports new canonical format (e.g. PCEBTECHBH001) if collegeCode + courseCode are passed.
  */
 export async function assignHostelStudentId(db, {
@@ -124,18 +124,17 @@ export async function assignHostelStudentId(db, {
     : isValidHostelStudentId(normalizedExisting) && hostelStudentIdScopeMatches(normalizedExisting, finalPrefix, finalYearSuffix);
 
   if (isExistingValid) {
+    const numPart = normalizedExisting.slice(finalPrefix.length);
+    const sequence = parseInt(numPart, 10) || 0;
     return {
       hostelId: normalizedExisting.toUpperCase(),
       assigned: false,
       reusedExisting: true,
       prefix: finalPrefix,
       yearSuffix: finalYearSuffix,
+      sequence,
     };
   }
-
-  const counterKey = buildHostelCounterKey(finalPrefix, finalYearSuffix);
-  const counterDoc = await db.collection('counters').findOne({ _id: counterKey });
-  const counterSerial = Number(counterDoc?.sequence || 0);
 
   const searchPrefix = finalPrefix + finalYearSuffix;
   const requestsMaxSerial = await getMaxHostelSequenceSerialFromRequests(db, {
@@ -143,36 +142,19 @@ export async function assignHostelStudentId(db, {
     academicYear,
   });
 
-  const lastSerial = Math.max(counterSerial, requestsMaxSerial);
-  const nextSerial = lastSerial + 1;
-
-  const counterResult = await db.collection('counters').findOneAndUpdate(
-    { _id: counterKey },
-    {
-      $set: { sequence: nextSerial, updatedAt: new Date() },
-      $setOnInsert: { createdAt: new Date(), __v: 0 },
-    },
-    { upsert: true, returnDocument: 'after' }
-  );
-
-  const counterDocAfter = counterResult?.value ?? counterResult;
-  const sequence = Number(counterDocAfter?.sequence);
-  if (!Number.isFinite(sequence) || sequence <= 0) {
-    throw new Error(`Failed to update hostel counter ${counterKey}`);
-  }
+  const nextSerial = requestsMaxSerial + 1;
 
   const generatedId = finalFormat === 'new'
-    ? `${finalPrefix}${String(sequence).padStart(3, '0')}`
-    : formatHostelStudentId(finalPrefix, finalYearSuffix, sequence);
+    ? `${finalPrefix}${String(nextSerial).padStart(3, '0')}`
+    : formatHostelStudentId(finalPrefix, finalYearSuffix, nextSerial);
 
   return {
     hostelId: generatedId,
     assigned: true,
     reusedExisting: false,
-    counterKey,
-    sequence,
     prefix: finalPrefix,
     yearSuffix: finalYearSuffix,
+    sequence: nextSerial,
   };
 }
 
@@ -206,17 +188,13 @@ export async function peekNextHostelStudentId(db, {
     finalFormat = 'new';
   }
 
-  const counterKey = buildHostelCounterKey(finalPrefix, finalYearSuffix);
-  const counterDoc = await db.collection('counters').findOne({ _id: counterKey });
-  const counterSerial = Number(counterDoc?.sequence || 0);
-
   const searchPrefix = finalPrefix + finalYearSuffix;
   const requestsMaxSerial = await getMaxHostelSequenceSerialFromRequests(db, {
     prefix: searchPrefix,
     academicYear,
   });
 
-  const nextSerial = Math.max(counterSerial, requestsMaxSerial) + 1;
+  const nextSerial = requestsMaxSerial + 1;
 
   const generatedId = finalFormat === 'new'
     ? `${finalPrefix}${String(nextSerial).padStart(3, '0')}`
@@ -224,9 +202,8 @@ export async function peekNextHostelStudentId(db, {
 
   return {
     hostelId: generatedId,
-    counterKey,
-    sequence: nextSerial,
     prefix: finalPrefix,
     yearSuffix: finalYearSuffix,
+    sequence: nextSerial,
   };
 }
