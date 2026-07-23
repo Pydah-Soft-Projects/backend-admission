@@ -813,7 +813,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       studType,
       toNullableText(registrationExtras?.scholar_status),
       reservationGeneral || null,
-      toNullableText(registrationExtras?.remarks),
+      toNullableText(admissionData?.remarks ?? registrationExtras?.remarks),
       toNullableText(registrationExtras?.previous_college),
       certificatesStatus,
       normalizeStudentPhotoForSecondary(studentPhotoExtracted),

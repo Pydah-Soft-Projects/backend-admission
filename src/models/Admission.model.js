@@ -243,6 +243,7 @@ const admissionSchema = new Schema(
     },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    remarks: { type: String, trim: true, default: '' },
   },
   {
     timestamps: true,

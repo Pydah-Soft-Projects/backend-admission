@@ -899,6 +899,27 @@ export const persistAdmissionReference1 = async (pool, admissionId, reference1, 
   }
 };
 
+export const persistAdmissionRemarks = async (pool, admissionId, remarks, userId) => {
+  const [admRows] = await pool.execute(
+    'SELECT id FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  if (!admRows.length) {
+    const err = new Error('Admission record not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  await pool.execute(
+    `UPDATE admissions SET
+       remarks = ?,
+       updated_by = ?,
+       updated_at = NOW()
+     WHERE id = ?`,
+    [String(remarks ?? ''), userId || null, admissionId]
+  );
+};
+
 /**
  * Merge registration extras (and optional fee sidecar) on admissions + linked joinings,
  * and sync dedicated portrait columns from merged extras.
@@ -1271,6 +1292,7 @@ export const formatAdmission = async (admissionData, pool) => {
     updatedBy: admissionData.updated_by,
     createdAt: admissionData.created_at,
     updatedAt: admissionData.updated_at,
+    remarks: admissionData.remarks || '',
   };
 };
 
@@ -2546,6 +2568,11 @@ export const updateAdmissionById = async (req, res) => {
       updateParams.push(payload.status);
     }
 
+    if (payload.remarks !== undefined) {
+      updateFields.push('remarks = ?');
+      updateParams.push(payload.remarks || '');
+    }
+
     // Always update updated_by and updated_at
     updateFields.push('updated_by = ?');
     updateFields.push('updated_at = NOW()');
@@ -2835,6 +2862,11 @@ export const updateAdmissionByLead = async (req, res) => {
       updateParams.push(payload.status);
     }
 
+    if (payload.remarks !== undefined) {
+      updateFields.push('remarks = ?');
+      updateParams.push(payload.remarks || '');
+    }
+
     // Always update updated_by and updated_at
     updateFields.push('updated_by = ?');
     updateFields.push('updated_at = NOW()');
@@ -2922,6 +2954,43 @@ export const patchAdmissionReferenceById = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to update reference',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * @desc    Update admission remarks only
+ * @route   PATCH /api/admissions/id/:admissionId/remarks
+ */
+export const patchAdmissionRemarksById = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    if (req.body?.remarks === undefined) {
+      return errorResponse(res, 'remarks is required', 400);
+    }
+
+    const pool = getPool();
+    await persistAdmissionRemarks(pool, admissionId, req.body.remarks, req.user?.id);
+
+    const [updated] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [admissionId]);
+    const formattedAdmission = await formatAdmission(updated[0], pool);
+
+    // Sync to secondary database if needed
+    const syncResult = await syncToSecondaryDatabase(
+      formattedAdmission,
+      formattedAdmission.admissionNumber
+    );
+    warnIfSecondaryStudentSyncMissed('patchAdmissionRemarksById', { admissionId }, syncResult);
+
+    return successResponse(res, formattedAdmission, 'Admission remarks updated successfully', 200);
+  } catch (error) {
+    console.error('Error updating admission remarks:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to update admission remarks',
       error.statusCode || 500
     );
   }
