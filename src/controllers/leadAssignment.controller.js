@@ -2525,17 +2525,39 @@ async function fetchPortfolioCohortSummaryTotals(pool, userIds, leadFiltersSql, 
   );
 
   const [statusRows] = await pool.execute(
-    `SELECT
-      u.role_name,
-      l.visit_status,
-      l.call_status,
-      l.lead_status,
-      COUNT(*) AS cnt
-     FROM users u
-     INNER JOIN leads l ON (l.assigned_to = u.id OR l.assigned_to_pro = u.id)
-     WHERE u.id IN (${ph})${leadFiltersSql}
-     GROUP BY u.role_name, l.visit_status, l.call_status, l.lead_status`,
-    [...userIds, ...leadFiltersParams]
+    `SELECT 
+      role_name, 
+      visit_status, 
+      call_status, 
+      lead_status, 
+      SUM(cnt) AS cnt
+     FROM (
+       SELECT
+         u.role_name,
+         l.visit_status,
+         l.call_status,
+         l.lead_status,
+         COUNT(*) AS cnt
+       FROM users u
+       INNER JOIN leads l ON l.assigned_to = u.id
+       WHERE u.id IN (${ph})${leadFiltersSql}
+       GROUP BY u.role_name, l.visit_status, l.call_status, l.lead_status
+
+       UNION ALL
+
+       SELECT
+         u.role_name,
+         l.visit_status,
+         l.call_status,
+         l.lead_status,
+         COUNT(*) AS cnt
+       FROM users u
+       INNER JOIN leads l ON l.assigned_to_pro = u.id
+       WHERE u.id IN (${ph})${leadFiltersSql}
+       GROUP BY u.role_name, l.visit_status, l.call_status, l.lead_status
+     ) AS combined_leads
+     GROUP BY role_name, visit_status, call_status, lead_status`,
+    [...userIds, ...leadFiltersParams, ...userIds, ...leadFiltersParams]
   );
 
   let totalInterested = 0;
