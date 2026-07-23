@@ -32,6 +32,7 @@ import {
   listPendingFees,
   exportPendingFees,
   sendAdmissionConfirmationSmsById,
+  sendDocumentNotificationSmsById,
 } from '../controllers/admission.controller.js';
 
 const router = express.Router();
@@ -60,6 +61,7 @@ router.get('/joining/:joiningId', getAdmissionByJoiningId);
 router.get('/:leadId', getAdmissionByLead); // Keep for backward compatibility
 router.post('/id/:admissionId/cancel', requireJoiningEditAdmission, cancelAdmissionById);
 router.post('/id/:admissionId/send-confirmation-sms', sendAdmissionConfirmationSmsById);
+router.post('/id/:admissionId/send-document-notification', sendDocumentNotificationSmsById);
 router.patch('/id/:admissionId/reference', requireJoiningEditReference, patchAdmissionReferenceById);
 router.patch('/id/:admissionId/remarks', requireJoiningEditAdmission, patchAdmissionRemarksById);
 router.put('/id/:admissionId', requireJoiningEditAdmission, updateAdmissionById);

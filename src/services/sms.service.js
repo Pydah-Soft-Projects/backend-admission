@@ -336,6 +336,63 @@ const smsService = {
       return { success: false, error: error.message }; 
     }
   },
+
+  /**
+   * Send Document Notification SMS to student.
+   * DLT template id: 1777178471122897474
+   * Template: Dear Student {#var#}, the following certificates are pending - {#var#}. Kindly contact the Admissions Office immediately at {#var#} - Pydah Group
+   */
+  sendDocumentNotification: async (mobileNumber, name, pendingDocuments, collegePhone = '+91 73820 15999') => {
+    if (!BULK_SMS_API_KEY) {
+      console.warn('BULK_SMS_API_KEY is not set. Document Notification SMS skipped (Dev Mode).');
+      return { success: true, message: 'SMS simulation successful (Dev Mode)' };
+    }
+
+    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+    if (cleanNumber.length !== 10) {
+      console.warn(`Document Notification SMS skipped — invalid mobile "${mobileNumber}".`);
+      return { success: false, error: 'invalid_mobile_number' };
+    }
+
+    const safeName = String(name || 'Student').trim() || 'Student';
+    const safePendingDocuments = Array.isArray(pendingDocuments) ? pendingDocuments.join(', ') : String(pendingDocuments || '');
+    const templateId = '1777178471122897474';
+    const message = `Dear Student ${safeName}, the following certificates are pending - ${safePendingDocuments}. Kindly contact the Admissions Office immediately at ${collegePhone} - Pydah Group`;
+
+    try {
+      const result = await sendSmsThroughBulkSmsApps({
+        numbers: [cleanNumber],
+        message,
+        tempid: templateId,
+      });
+
+      const responsePreview = String(result.responseText || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+
+      if (result.success) {
+        console.log(
+          `Document Notification SMS sent to ${cleanNumber} (dlt ${templateId}, messageIds=[${result.messageIds.join(',')}]).`
+        );
+        return {
+          success: true,
+          data: { messageIds: result.messageIds, responseText: result.responseText },
+        };
+      }
+
+      console.error(
+        `Document Notification SMS rejected by gateway (mobile=${cleanNumber}, dlt=${templateId}). Gateway response: ${responsePreview}`
+      );
+      return {
+        success: false,
+        error: 'gateway_rejected',
+        gatewayMessage: responsePreview,
+      };
+    } catch (error) {
+      console.error('Failed to send Document Notification SMS:', error.message || error);
+      return { success: false, error: error.message || 'sms_send_failed' };
+    }
+  },
 };
 
 export default smsService;

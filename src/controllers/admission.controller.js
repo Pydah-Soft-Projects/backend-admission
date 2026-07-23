@@ -2349,6 +2349,128 @@ export const sendAdmissionConfirmationSmsById = async (req, res) => {
   }
 };
 
+// Mapping from document column keys to human-readable labels
+const DOCUMENT_LABELS = {
+  document_ssc: 'SSC',
+  document_inter: 'Intermediate',
+  document_ug_pg_cmm: 'UG/PG CMM',
+  document_transfer_certificate: 'Transfer Certificate',
+  document_study_certificate: 'Study Certificate',
+  document_aadhaar_card: 'Aadhaar Card',
+  document_photos: 'Photos',
+  document_income_certificate: 'Income Certificate',
+  document_caste_certificate: 'Caste Certificate',
+  document_cet_rank_card: 'CET Rank Card',
+  document_cet_hall_ticket: 'CET Hall Ticket',
+  document_allotment_letter: 'Allotment Letter',
+  document_joining_report: 'Joining Report',
+  document_bank_passbook: 'Bank Passbook',
+  document_ration_card: 'Ration Card',
+};
+
+export const sendDocumentNotificationSmsById = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    const pool = getPool();
+    const [rows] = await pool.execute(
+      `SELECT id, status, student_name, student_phone, lead_id,
+              document_ssc, document_inter, document_ug_pg_cmm,
+              document_transfer_certificate, document_study_certificate,
+              document_aadhaar_card, document_photos,
+              document_income_certificate, document_caste_certificate,
+              document_cet_rank_card, document_cet_hall_ticket,
+              document_allotment_letter, document_joining_report,
+              document_bank_passbook, document_ration_card
+       FROM admissions WHERE id = ?`,
+      [admissionId]
+    );
+
+    if (rows.length === 0) {
+      return errorResponse(res, 'Admission record not found', 404);
+    }
+
+    const admission = rows[0];
+    if (admission.status === ADMISSION_CANCELLED_STATUS) {
+      return errorResponse(
+        res,
+        'Cannot send document notification SMS — admission is cancelled.',
+        400
+      );
+    }
+
+    // Fall back to lead row for name/phone if needed
+    let studentName = String(admission.student_name || '').trim();
+    let studentPhone = String(admission.student_phone || '').trim();
+    if ((!studentName || !studentPhone) && admission.lead_id) {
+      const [leadRows] = await pool.execute(
+        'SELECT name, phone FROM leads WHERE id = ? LIMIT 1',
+        [admission.lead_id]
+      );
+      if (leadRows.length > 0) {
+        if (!studentName) studentName = String(leadRows[0].name || '').trim();
+        if (!studentPhone) studentPhone = String(leadRows[0].phone || '').trim();
+      }
+    }
+
+    if (!studentPhone) {
+      return errorResponse(
+        res,
+        'Cannot send document notification SMS — student phone is not on file for this admission.',
+        400
+      );
+    }
+
+    // Collect pending documents
+    const pendingDocuments = [];
+    for (const [colKey, label] of Object.entries(DOCUMENT_LABELS)) {
+      const status = String(admission[colKey] || '').trim().toLowerCase();
+      if (status !== 'received') {
+        pendingDocuments.push(label);
+      }
+    }
+
+    const result = await smsService.sendDocumentNotification(
+      studentPhone,
+      studentName || 'Student',
+      pendingDocuments,
+      '+91 73820 15999'
+    );
+
+    if (!result?.success) {
+      const reasonMap = {
+        invalid_mobile_number: 'Cannot send document notification SMS — student phone is not a valid 10-digit number.',
+        gateway_rejected:
+          `SMS gateway rejected the request${result?.gatewayMessage ? `: ${result.gatewayMessage}` : ''}. ` +
+          'Verify that DLT template id is whitelisted on the BulkSMSApps account and that sender id matches.',
+      };
+      const message =
+        reasonMap[result?.error] ||
+        `Failed to send document notification SMS${result?.error ? `: ${result.error}` : ''}.`;
+      return errorResponse(res, message, 502);
+    }
+
+    return successResponse(
+      res,
+      {
+        sentTo: studentPhone.replace(/\D/g, '').slice(-10),
+        pendingDocuments,
+        gateway: result.data ?? null,
+      },
+      'Document notification SMS sent.',
+      200
+    );
+  } catch (error) {
+    console.error('Error sending document notification SMS:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to send document notification SMS',
+      error.statusCode || 500
+    );
+  }
+};
+
 export const updateAdmissionById = async (req, res) => {
   try {
     const { admissionId } = req.params;
