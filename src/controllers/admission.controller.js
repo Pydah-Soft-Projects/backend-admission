@@ -1726,6 +1726,7 @@ const appendAdmissionListSearchCondition = (conditions, params, rawSearch) => {
   if (!t) return false;
 
   const isEnq = t.toUpperCase().startsWith('ENQ');
+  const isAdm = t.toUpperCase().startsWith('ADM');
   const isPhone = /^\d{5,}$/.test(t);
 
   if (isEnq) {
@@ -1740,16 +1741,26 @@ const appendAdmissionListSearchCondition = (conditions, params, rawSearch) => {
     return true;
   }
 
+  if (isAdm) {
+    const admPattern = `${t}%`;
+    conditions.push(`(
+      a.admission_number LIKE ?
+    )`);
+    params.push(admPattern);
+    return true;
+  }
+
   if (isPhone) {
     const phonePattern = `${t}%`;
     conditions.push(`(
-      a.student_phone LIKE ?
+      a.admission_number LIKE ?
+      OR a.student_phone LIKE ?
       OR EXISTS (
         SELECT 1 FROM leads l
         WHERE l.id = a.lead_id AND (l.phone LIKE ? OR l.father_phone LIKE ?)
       )
     )`);
-    params.push(phonePattern, phonePattern, phonePattern);
+    params.push(phonePattern, phonePattern, phonePattern, phonePattern);
     return true;
   }
 
