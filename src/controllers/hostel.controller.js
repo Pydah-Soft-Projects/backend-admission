@@ -437,27 +437,22 @@ const loadAcademicYearRoomOccupancyMap = async (db, { roomIds, academicYear }) =
 
   if (roomsNeedingUserFallback.length === 0) return map;
 
-  const fallbackUsers = await db
-    .collection('users')
+  const fallbackRequests = await db
+    .collection('hostelrequests')
     .find({
-      room: buildRoomRefMatch(roomsNeedingUserFallback),
+      roomId: buildRoomRefMatch(roomsNeedingUserFallback),
       academicYear: normalizedYear,
-      hostelStatus: { $in: ACTIVE_HOSTEL_USER_STATUSES },
+      status: 'active',
     })
-    .project({ room: 1, role: 1 })
+    .project({ roomId: 1 })
     .toArray();
 
-  for (const user of fallbackUsers) {
-    const roomKey = String(user.room);
+  for (const req of fallbackRequests) {
+    const roomKey = String(req.roomId);
     const current = map.get(roomKey) || emptyOccupancyCounts();
-    const role = String(user.role || 'student').trim().toLowerCase();
-    if (role === 'student') {
-      current.studentCount += 1;
-    } else {
-      current.staffCount += 1;
-    }
+    current.studentCount += 1;
     current.totalOccupancy = current.studentCount + current.staffCount;
-    current.source = 'users';
+    current.source = 'hostelrequests';
     map.set(roomKey, current);
   }
 
@@ -675,28 +670,36 @@ export const getHostelStudentDetails = async (req, res) => {
     const conn = await getActiveConnection();
     const db = conn.db;
 
-    let existingUser = null;
+    let existingRequest = null;
     let gender = '';
 
-    // 1. Try to find the student in HMS by admissionNumber
     const admNum = String(admissionNumber || '').trim();
-    if (admNum) {
-      existingUser = await db.collection('users').findOne({ admissionNumber: admNum });
+    const joinId = String(joiningId || '').trim();
+    const normYear = String(academicYear || '').trim();
+
+    // 1. Try to find an active HostelRequest in HMS by admissionNumber + academicYear
+    if (admNum && normYear) {
+      existingRequest = await db.collection('hostelrequests').findOne({ 
+        admissionNumber: admNum,
+        academicYear: normYear,
+        status: 'active'
+      });
     }
 
-    // 2. If not found in HMS, try by joiningId
-    const joinId = String(joiningId || '').trim();
-    if (!existingUser && joinId) {
-      existingUser = await db.collection('users').findOne({ 
+    // 2. If not found, try by joiningId + academicYear (Admissions CRM source fallback)
+    if (!existingRequest && joinId && normYear) {
+      existingRequest = await db.collection('hostelrequests').findOne({ 
         joiningId: joinId,
+        academicYear: normYear,
+        status: 'active',
         source: 'admissions_crm'
       });
     }
 
-    // 3. If student is registered, return their details
-    if (existingUser && existingUser.hostelId) {
+    // 3. If student has an active request, return their details
+    if (existingRequest && existingRequest.hostelSequenceId) {
       let hostelName = '';
-      const hostelRef = existingUser.hostel || existingUser.host;
+      const hostelRef = existingRequest.hostelId;
       if (hostelRef) {
         const hostelDoc = await db.collection('hostels').findOne({
           _id: toObjectIdOrString(hostelRef)
@@ -705,11 +708,11 @@ export const getHostelStudentDetails = async (req, res) => {
       }
 
       return successResponse(res, {
-        _id: String(existingUser._id),
-        hostelId: existingUser.hostelId,
+        _id: String(existingRequest._id),
+        hostelId: existingRequest.hostelSequenceId, // Return hostelSequenceId as the display ID
         isAssigned: true,
-        bedNumber: existingUser.bedNumber || '',
-        roomNumber: existingUser.roomNumber || '',
+        bedNumber: existingRequest.bedNumber || '',
+        roomNumber: existingRequest.roomNumber || '',
         hostelName: hostelName,
       });
     }
@@ -738,12 +741,50 @@ export const getHostelStudentDetails = async (req, res) => {
     // 5. If we have a hostel selected, peek the next hostel student ID
     if (hostelId && academicYear) {
       const { peekNextHostelStudentId } = await import('../utils/hostelStudentId.util.js');
+      const { resolveTransportApplicationCodes } = await import('../utils/transportApplicationNumber.util.js');
       const normalizedGender = String(gender || '').trim().toLowerCase().startsWith('f') ? 'Female' : 'Male';
+
+      let collegeCode = '';
+      let courseCode = '';
+      let sqlRow = null;
+
+      if (admNum) {
+        const [rows] = await pool.execute(
+          'SELECT managed_course_id, course FROM admissions WHERE admission_number = ? LIMIT 1',
+          [admNum]
+        );
+        if (rows?.[0]) sqlRow = rows[0];
+      }
+      if (!sqlRow && joinId) {
+        const [rows] = await pool.execute(
+          'SELECT managed_course_id, course FROM joinings WHERE id = ? LIMIT 1',
+          [joinId]
+        );
+        if (rows?.[0]) sqlRow = rows[0];
+      }
+
+      if (sqlRow) {
+        try {
+          const { getPool: getSecondaryPool } = await import('../config-sql/database-secondary.js');
+          const secPool = getSecondaryPool();
+          const resolved = await resolveTransportApplicationCodes(secPool, {
+            managedCourseId: sqlRow.managed_course_id,
+            courseName: sqlRow.course,
+          });
+          if (resolved.collegeCode) collegeCode = resolved.collegeCode;
+          if (resolved.courseCode) courseCode = resolved.courseCode;
+        } catch (err) {
+          console.warn('Failed to resolve college/course codes for peeking hostel sequence ID:', err);
+        }
+      }
+
       try {
         const preview = await peekNextHostelStudentId(db, {
           hostelObjectId: hostelId,
           academicYear,
           gender: normalizedGender,
+          collegeCode,
+          courseCode,
         });
         return successResponse(res, {
           hostelId: preview.hostelId,

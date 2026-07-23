@@ -53,14 +53,45 @@ export function hostelStudentIdScopeMatches(existingHostelId, prefix, yearSuffix
   return raw.startsWith(`${prefix}${yearSuffix}`);
 }
 
+/** Helper to find the maximum sequential ID serial already assigned to HostelRequests in this academic year. */
+export async function getMaxHostelSequenceSerialFromRequests(db, { prefix, academicYear }) {
+  try {
+    const query = {
+      academicYear,
+      hostelSequenceId: new RegExp(`^${prefix}\\d+`, 'i'),
+    };
+
+    const requests = await db.collection('hostelrequests')
+      .find(query, { projection: { hostelSequenceId: 1 } })
+      .toArray();
+
+    let maxSerial = 0;
+    for (const req of requests) {
+      const seqId = String(req.hostelSequenceId || '').trim();
+      const numPart = seqId.slice(prefix.length);
+      const num = parseInt(numPart, 10);
+      if (Number.isFinite(num) && num > maxSerial) {
+        maxSerial = num;
+      }
+    }
+    return maxSerial;
+  } catch (err) {
+    console.warn('[hostelStudentId] Failed to query max serial from requests:', err);
+    return 0;
+  }
+}
+
 /**
- * Assign the next hostel student id from HMS `counters` (hostel_BH26, hostel_GH26, …).
+ * Assign the next hostel student id from HMS `counters`.
+ * Supports new canonical format (e.g. PCEBTECHBH001) if collegeCode + courseCode are passed.
  */
 export async function assignHostelStudentId(db, {
   hostelObjectId,
   academicYear,
   gender = '',
   existingHostelId = null,
+  collegeCode = '',
+  courseCode = '',
 }) {
   const yearSuffix = academicYearToHostelIdYearSuffix(academicYear);
   if (!yearSuffix) {
@@ -75,53 +106,83 @@ export async function assignHostelStudentId(db, {
   });
   const prefix = resolveHostelTypePrefix(hostelDoc?.name, gender);
 
+  let finalPrefix = prefix;
+  let finalYearSuffix = yearSuffix;
+  let finalFormat = 'legacy';
+
+  if (collegeCode && courseCode) {
+    const cleanCollege = String(collegeCode).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cleanCourse = String(courseCode).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    finalPrefix = `${cleanCollege}${cleanCourse}${prefix}`;
+    finalYearSuffix = '';
+    finalFormat = 'new';
+  }
+
   const normalizedExisting = String(existingHostelId || '').trim();
-  if (
-    isValidHostelStudentId(normalizedExisting) &&
-    hostelStudentIdScopeMatches(normalizedExisting, prefix, yearSuffix)
-  ) {
+  const isExistingValid = finalFormat === 'new'
+    ? new RegExp(`^${finalPrefix}\\d{3}$`, 'i').test(normalizedExisting)
+    : isValidHostelStudentId(normalizedExisting) && hostelStudentIdScopeMatches(normalizedExisting, finalPrefix, finalYearSuffix);
+
+  if (isExistingValid) {
     return {
       hostelId: normalizedExisting.toUpperCase(),
       assigned: false,
       reusedExisting: true,
-      prefix,
-      yearSuffix,
+      prefix: finalPrefix,
+      yearSuffix: finalYearSuffix,
     };
   }
 
-  const counterKey = buildHostelCounterKey(prefix, yearSuffix);
+  const counterKey = buildHostelCounterKey(finalPrefix, finalYearSuffix);
+  const counterDoc = await db.collection('counters').findOne({ _id: counterKey });
+  const counterSerial = Number(counterDoc?.sequence || 0);
+
+  const searchPrefix = finalPrefix + finalYearSuffix;
+  const requestsMaxSerial = await getMaxHostelSequenceSerialFromRequests(db, {
+    prefix: searchPrefix,
+    academicYear,
+  });
+
+  const lastSerial = Math.max(counterSerial, requestsMaxSerial);
+  const nextSerial = lastSerial + 1;
+
   const counterResult = await db.collection('counters').findOneAndUpdate(
     { _id: counterKey },
     {
-      $inc: { sequence: 1 },
-      $set: { updatedAt: new Date() },
+      $set: { sequence: nextSerial, updatedAt: new Date() },
       $setOnInsert: { createdAt: new Date(), __v: 0 },
     },
     { upsert: true, returnDocument: 'after' }
   );
 
-  const counterDoc = counterResult?.value ?? counterResult;
-  const sequence = Number(counterDoc?.sequence);
+  const counterDocAfter = counterResult?.value ?? counterResult;
+  const sequence = Number(counterDocAfter?.sequence);
   if (!Number.isFinite(sequence) || sequence <= 0) {
-    throw new Error(`Failed to increment hostel counter ${counterKey}`);
+    throw new Error(`Failed to update hostel counter ${counterKey}`);
   }
 
+  const generatedId = finalFormat === 'new'
+    ? `${finalPrefix}${String(sequence).padStart(3, '0')}`
+    : formatHostelStudentId(finalPrefix, finalYearSuffix, sequence);
+
   return {
-    hostelId: formatHostelStudentId(prefix, yearSuffix, sequence),
+    hostelId: generatedId,
     assigned: true,
     reusedExisting: false,
     counterKey,
     sequence,
-    prefix,
-    yearSuffix,
+    prefix: finalPrefix,
+    yearSuffix: finalYearSuffix,
   };
 }
 
-/** Read-only preview of the next hostel student id for a hostel + academic year. */
+/** Read-only preview of the next hostel student id. Supports collegeCode and courseCode parameters. */
 export async function peekNextHostelStudentId(db, {
   hostelObjectId,
   academicYear,
   gender = '',
+  collegeCode = '',
+  courseCode = '',
 }) {
   const yearSuffix = academicYearToHostelIdYearSuffix(academicYear);
   if (!yearSuffix || !hostelObjectId) {
@@ -132,15 +193,40 @@ export async function peekNextHostelStudentId(db, {
     _id: toObjectIdOrString(hostelObjectId),
   });
   const prefix = resolveHostelTypePrefix(hostelDoc?.name, gender);
-  const counterKey = buildHostelCounterKey(prefix, yearSuffix);
+
+  let finalPrefix = prefix;
+  let finalYearSuffix = yearSuffix;
+  let finalFormat = 'legacy';
+
+  if (collegeCode && courseCode) {
+    const cleanCollege = String(collegeCode).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const cleanCourse = String(courseCode).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    finalPrefix = `${cleanCollege}${cleanCourse}${prefix}`;
+    finalYearSuffix = '';
+    finalFormat = 'new';
+  }
+
+  const counterKey = buildHostelCounterKey(finalPrefix, finalYearSuffix);
   const counterDoc = await db.collection('counters').findOne({ _id: counterKey });
-  const nextSerial = Number(counterDoc?.sequence || 0) + 1;
+  const counterSerial = Number(counterDoc?.sequence || 0);
+
+  const searchPrefix = finalPrefix + finalYearSuffix;
+  const requestsMaxSerial = await getMaxHostelSequenceSerialFromRequests(db, {
+    prefix: searchPrefix,
+    academicYear,
+  });
+
+  const nextSerial = Math.max(counterSerial, requestsMaxSerial) + 1;
+
+  const generatedId = finalFormat === 'new'
+    ? `${finalPrefix}${String(nextSerial).padStart(3, '0')}`
+    : formatHostelStudentId(finalPrefix, finalYearSuffix, nextSerial);
 
   return {
-    hostelId: formatHostelStudentId(prefix, yearSuffix, nextSerial),
+    hostelId: generatedId,
     counterKey,
     sequence: nextSerial,
-    prefix,
-    yearSuffix,
+    prefix: finalPrefix,
+    yearSuffix: finalYearSuffix,
   };
 }
