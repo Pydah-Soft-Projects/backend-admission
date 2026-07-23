@@ -2371,6 +2371,7 @@ const DOCUMENT_LABELS = {
 export const sendDocumentNotificationSmsById = async (req, res) => {
   try {
     const { admissionId } = req.params;
+    const { selectedDocuments } = req.body || {};
     ensureAdmissionId(admissionId);
 
     const pool = getPool();
@@ -2422,12 +2423,16 @@ export const sendDocumentNotificationSmsById = async (req, res) => {
       );
     }
 
-    // Collect pending documents
-    const pendingDocuments = [];
-    for (const [colKey, label] of Object.entries(DOCUMENT_LABELS)) {
-      const status = String(admission[colKey] || '').trim().toLowerCase();
-      if (status !== 'received') {
-        pendingDocuments.push(label);
+    // Collect pending documents - use selectedDocuments if provided, otherwise all pending
+    let pendingDocuments = [];
+    if (selectedDocuments && Array.isArray(selectedDocuments) && selectedDocuments.length > 0) {
+      pendingDocuments = selectedDocuments;
+    } else {
+      for (const [colKey, label] of Object.entries(DOCUMENT_LABELS)) {
+        const status = String(admission[colKey] || '').trim().toLowerCase();
+        if (status !== 'received') {
+          pendingDocuments.push(label);
+        }
       }
     }
 
