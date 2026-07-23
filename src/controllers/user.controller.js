@@ -532,7 +532,6 @@ const sanitizePermissions = (permissions = {}) => {
     };
     if (key === 'joining' && access) {
       entry.admissionTabAbstract = Boolean(value.admissionTabAbstract);
-      entry.admissionTabDetailed = Boolean(value.admissionTabDetailed);
       entry.admissionTabStudentInfo = Boolean(value.admissionTabStudentInfo);
       entry.admissionTabReference = Boolean(value.admissionTabReference);
       entry.admissionTabSource = Boolean(value.admissionTabSource);
