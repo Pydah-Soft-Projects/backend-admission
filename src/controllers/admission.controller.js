@@ -2462,23 +2462,197 @@ export const sendAdmissionConfirmationSmsById = async (req, res) => {
   }
 };
 
-// Mapping from document column keys to human-readable labels
-const DOCUMENT_LABELS = {
+/** Flat paper columns that belong to Important Documents (certificate checklist). */
+const IMPORTANT_FLAT_DOCUMENT_LABELS = {
   document_ssc: 'SSC',
   document_inter: 'Intermediate',
-  document_ug_pg_cmm: 'UG/PG CMM',
+  document_ug_pg_cmm: 'UG / PG CMM',
   document_transfer_certificate: 'Transfer Certificate',
   document_study_certificate: 'Study Certificate',
-  document_aadhaar_card: 'Aadhaar Card',
-  document_photos: 'Photos',
-  document_income_certificate: 'Income Certificate',
-  document_caste_certificate: 'Caste Certificate',
-  document_cet_rank_card: 'CET Rank Card',
-  document_cet_hall_ticket: 'CET Hall Ticket',
-  document_allotment_letter: 'Allotment Letter',
-  document_joining_report: 'Joining Report',
-  document_bank_passbook: 'Bank Passbook',
-  document_ration_card: 'Ration Card',
+};
+
+const DOCUMENT_SMS_COLLEGE_PHONE = '+91 73820 15999';
+
+const documentSmsFailureMessage = (result) => {
+  const reasonMap = {
+    invalid_mobile_number:
+      'Cannot send document notification SMS — student phone is not a valid 10-digit number.',
+    gateway_rejected:
+      `SMS gateway rejected the request${result?.gatewayMessage ? `: ${result.gatewayMessage}` : ''}. ` +
+      'Verify that DLT template id is whitelisted on the BulkSMSApps account and that sender id matches.',
+  };
+  return (
+    reasonMap[result?.error] ||
+    `Failed to send document notification SMS${result?.error ? `: ${result.error}` : ''}.`
+  );
+};
+
+/**
+ * Resolve pending Important Documents labels for an admission row.
+ * Prefers Step 2 certificate_checklist + certificate_config; falls back to flat paper columns.
+ */
+const resolveImportantPendingDocumentsForRow = (admission, certRoot) => {
+  const leadDataRaw =
+    typeof admission.lead_data === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(admission.lead_data || '{}');
+          } catch {
+            return {};
+          }
+        })()
+      : admission.lead_data && typeof admission.lead_data === 'object'
+        ? admission.lead_data
+        : {};
+  const extras =
+    leadDataRaw?._joiningRegistrationExtras &&
+    typeof leadDataRaw._joiningRegistrationExtras === 'object'
+      ? leadDataRaw._joiningRegistrationExtras
+      : {};
+  const checklistRaw =
+    admission.certificate_checklist !== undefined && admission.certificate_checklist !== null
+      ? parseJsonMaybe(admission.certificate_checklist)
+      : extras.certificate_checklist;
+  const programLevel = resolveProgramLevelFromAdmissionRow({
+    program_level: admission.program_level ?? leadDataRaw?._joiningProgramLevel,
+    extras_program_level: admission.extras_program_level ?? extras.program_level,
+    extras_programLevel: admission.extras_programLevel ?? extras.programLevel,
+    extras_course_level: admission.extras_course_level ?? extras.course_level,
+  });
+  const items = getCertificateItemsForLevel(certRoot, programLevel);
+  const fromChecklist = pendingImportantDocumentLabels({
+    checklistRaw,
+    items,
+  });
+  if (fromChecklist.length > 0) return fromChecklist;
+
+  // No checklist entries — fall back to flat Important Documents columns.
+  const fallback = [];
+  for (const [colKey, label] of Object.entries(IMPORTANT_FLAT_DOCUMENT_LABELS)) {
+    const status = String(admission[colKey] || '').trim().toLowerCase();
+    if (status !== 'received') {
+      fallback.push(label);
+    }
+  }
+  return fallback;
+};
+
+const loadAdmissionForDocumentSms = async (pool, admissionId) => {
+  const [rows] = await pool.execute(
+    `SELECT id, status, student_name, student_phone, lead_id, lead_data,
+            document_ssc, document_inter, document_ug_pg_cmm,
+            document_transfer_certificate, document_study_certificate,
+            JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningProgramLevel')) AS program_level,
+            JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras.program_level')) AS extras_program_level,
+            JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras.programLevel')) AS extras_programLevel,
+            JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras.course_level')) AS extras_course_level,
+            JSON_EXTRACT(lead_data, '$._joiningRegistrationExtras.certificate_checklist') AS certificate_checklist
+     FROM admissions WHERE id = ?`,
+    [admissionId]
+  );
+  return rows[0] || null;
+};
+
+const resolveStudentContactForDocumentSms = async (pool, admission) => {
+  let studentName = String(admission.student_name || '').trim();
+  let studentPhone = String(admission.student_phone || '').trim();
+  if ((!studentName || !studentPhone) && admission.lead_id) {
+    const [leadRows] = await pool.execute(
+      'SELECT name, phone FROM leads WHERE id = ? LIMIT 1',
+      [admission.lead_id]
+    );
+    if (leadRows.length > 0) {
+      if (!studentName) studentName = String(leadRows[0].name || '').trim();
+      if (!studentPhone) studentPhone = String(leadRows[0].phone || '').trim();
+    }
+  }
+  return { studentName, studentPhone };
+};
+
+/**
+ * Send Important Documents pending SMS for one admission.
+ * selectedDocuments (optional) must be a subset of pending important labels.
+ */
+const sendImportantDocumentsSmsForAdmission = async ({
+  pool,
+  admission,
+  certRoot,
+  selectedDocuments,
+}) => {
+  if (admission.status === ADMISSION_CANCELLED_STATUS) {
+    return {
+      success: false,
+      skipped: true,
+      admissionId: admission.id,
+      error: 'cancelled',
+      message: 'Admission is cancelled.',
+    };
+  }
+
+  const { studentName, studentPhone } = await resolveStudentContactForDocumentSms(
+    pool,
+    admission
+  );
+  if (!studentPhone) {
+    return {
+      success: false,
+      skipped: true,
+      admissionId: admission.id,
+      error: 'missing_phone',
+      message: 'Student phone is not on file.',
+    };
+  }
+
+  const importantPending = resolveImportantPendingDocumentsForRow(admission, certRoot);
+  let pendingDocuments = importantPending;
+  if (selectedDocuments && Array.isArray(selectedDocuments) && selectedDocuments.length > 0) {
+    const allowed = new Set(importantPending.map((label) => String(label).trim().toLowerCase()));
+    pendingDocuments = selectedDocuments
+      .map((label) => String(label || '').trim())
+      .filter((label) => label && allowed.has(label.toLowerCase()));
+    // If the client sent labels that don't match (stale UI), fall back to all important pending.
+    if (pendingDocuments.length === 0) {
+      pendingDocuments = importantPending;
+    }
+  }
+
+  if (pendingDocuments.length === 0) {
+    return {
+      success: false,
+      skipped: true,
+      admissionId: admission.id,
+      error: 'no_important_pending',
+      message: 'No pending Important Documents to notify.',
+      studentName: studentName || 'Student',
+    };
+  }
+
+  const result = await smsService.sendDocumentNotification(
+    studentPhone,
+    studentName || 'Student',
+    pendingDocuments,
+    DOCUMENT_SMS_COLLEGE_PHONE
+  );
+
+  if (!result?.success) {
+    return {
+      success: false,
+      admissionId: admission.id,
+      error: result?.error || 'sms_send_failed',
+      message: documentSmsFailureMessage(result),
+      pendingDocuments,
+      studentName: studentName || 'Student',
+    };
+  }
+
+  return {
+    success: true,
+    admissionId: admission.id,
+    sentTo: studentPhone.replace(/\D/g, '').slice(-10),
+    pendingDocuments,
+    studentName: studentName || 'Student',
+    gateway: result.data ?? null,
+  };
 };
 
 export const sendDocumentNotificationSmsById = async (req, res) => {
@@ -2488,95 +2662,40 @@ export const sendDocumentNotificationSmsById = async (req, res) => {
     ensureAdmissionId(admissionId);
 
     const pool = getPool();
-    const [rows] = await pool.execute(
-      `SELECT id, status, student_name, student_phone, lead_id,
-              document_ssc, document_inter, document_ug_pg_cmm,
-              document_transfer_certificate, document_study_certificate,
-              document_aadhaar_card, document_photos,
-              document_income_certificate, document_caste_certificate,
-              document_cet_rank_card, document_cet_hall_ticket,
-              document_allotment_letter, document_joining_report,
-              document_bank_passbook, document_ration_card
-       FROM admissions WHERE id = ?`,
-      [admissionId]
-    );
-
-    if (rows.length === 0) {
+    const admission = await loadAdmissionForDocumentSms(pool, admissionId);
+    if (!admission) {
       return errorResponse(res, 'Admission record not found', 404);
     }
 
-    const admission = rows[0];
-    if (admission.status === ADMISSION_CANCELLED_STATUS) {
+    const certRoot = await loadCertificateConfigRoot();
+    const sendResult = await sendImportantDocumentsSmsForAdmission({
+      pool,
+      admission,
+      certRoot,
+      selectedDocuments,
+    });
+
+    if (sendResult.skipped) {
       return errorResponse(
         res,
-        'Cannot send document notification SMS — admission is cancelled.',
+        `Cannot send document notification SMS — ${sendResult.message}`,
         400
       );
     }
 
-    // Fall back to lead row for name/phone if needed
-    let studentName = String(admission.student_name || '').trim();
-    let studentPhone = String(admission.student_phone || '').trim();
-    if ((!studentName || !studentPhone) && admission.lead_id) {
-      const [leadRows] = await pool.execute(
-        'SELECT name, phone FROM leads WHERE id = ? LIMIT 1',
-        [admission.lead_id]
-      );
-      if (leadRows.length > 0) {
-        if (!studentName) studentName = String(leadRows[0].name || '').trim();
-        if (!studentPhone) studentPhone = String(leadRows[0].phone || '').trim();
-      }
-    }
-
-    if (!studentPhone) {
-      return errorResponse(
-        res,
-        'Cannot send document notification SMS — student phone is not on file for this admission.',
-        400
-      );
-    }
-
-    // Collect pending documents - use selectedDocuments if provided, otherwise all pending
-    let pendingDocuments = [];
-    if (selectedDocuments && Array.isArray(selectedDocuments) && selectedDocuments.length > 0) {
-      pendingDocuments = selectedDocuments;
-    } else {
-      for (const [colKey, label] of Object.entries(DOCUMENT_LABELS)) {
-        const status = String(admission[colKey] || '').trim().toLowerCase();
-        if (status !== 'received') {
-          pendingDocuments.push(label);
-        }
-      }
-    }
-
-    const result = await smsService.sendDocumentNotification(
-      studentPhone,
-      studentName || 'Student',
-      pendingDocuments,
-      '+91 73820 15999'
-    );
-
-    if (!result?.success) {
-      const reasonMap = {
-        invalid_mobile_number: 'Cannot send document notification SMS — student phone is not a valid 10-digit number.',
-        gateway_rejected:
-          `SMS gateway rejected the request${result?.gatewayMessage ? `: ${result.gatewayMessage}` : ''}. ` +
-          'Verify that DLT template id is whitelisted on the BulkSMSApps account and that sender id matches.',
-      };
-      const message =
-        reasonMap[result?.error] ||
-        `Failed to send document notification SMS${result?.error ? `: ${result.error}` : ''}.`;
-      return errorResponse(res, message, 502);
+    if (!sendResult.success) {
+      return errorResponse(res, sendResult.message, 502);
     }
 
     return successResponse(
       res,
       {
-        sentTo: studentPhone.replace(/\D/g, '').slice(-10),
-        pendingDocuments,
-        gateway: result.data ?? null,
+        sentTo: sendResult.sentTo,
+        pendingDocuments: sendResult.pendingDocuments,
+        importantDocumentsOnly: true,
+        gateway: sendResult.gateway,
       },
-      'Document notification SMS sent.',
+      'Document notification SMS sent (Important Documents).',
       200
     );
   } catch (error) {
@@ -2584,6 +2703,85 @@ export const sendDocumentNotificationSmsById = async (req, res) => {
     return errorResponse(
       res,
       error.message || 'Failed to send document notification SMS',
+      error.statusCode || 500
+    );
+  }
+};
+
+/**
+ * Bulk-send Important Documents pending SMS for selected admissions.
+ * Body: { admissionIds: string[] }
+ */
+export const sendDocumentNotificationSmsBulk = async (req, res) => {
+  try {
+    const rawIds = req.body?.admissionIds;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return errorResponse(res, 'admissionIds array is required', 400);
+    }
+
+    const admissionIds = [
+      ...new Set(
+        rawIds
+          .map((id) => String(id || '').trim())
+          .filter((id) => id.length === 36)
+      ),
+    ];
+    if (admissionIds.length === 0) {
+      return errorResponse(res, 'No valid admission ids provided', 400);
+    }
+    if (admissionIds.length > 500) {
+      return errorResponse(res, 'Cannot send to more than 500 admissions at once', 400);
+    }
+
+    const pool = getPool();
+    const certRoot = await loadCertificateConfigRoot();
+    const results = [];
+    let sent = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const admissionId of admissionIds) {
+      const admission = await loadAdmissionForDocumentSms(pool, admissionId);
+      if (!admission) {
+        failed += 1;
+        results.push({
+          success: false,
+          admissionId,
+          error: 'not_found',
+          message: 'Admission record not found.',
+        });
+        continue;
+      }
+
+      const sendResult = await sendImportantDocumentsSmsForAdmission({
+        pool,
+        admission,
+        certRoot,
+      });
+      results.push(sendResult);
+      if (sendResult.success) sent += 1;
+      else if (sendResult.skipped) skipped += 1;
+      else failed += 1;
+    }
+
+    return successResponse(
+      res,
+      {
+        importantDocumentsOnly: true,
+        requested: admissionIds.length,
+        sent,
+        skipped,
+        failed,
+        results,
+      },
+      `Document notification SMS finished — sent ${sent}, skipped ${skipped}, failed ${failed}.`,
+      200
+    );
+  } catch (error) {
+    console.error('Error sending bulk document notification SMS:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to send bulk document notification SMS',
       error.statusCode || 500
     );
   }

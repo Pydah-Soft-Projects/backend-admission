@@ -33,6 +33,7 @@ import {
   exportPendingFees,
   sendAdmissionConfirmationSmsById,
   sendDocumentNotificationSmsById,
+  sendDocumentNotificationSmsBulk,
 } from '../controllers/admission.controller.js';
 import {
   listMinimumFeeConfigs,
@@ -65,6 +66,7 @@ router.get('/minimum-fee-configs', listMinimumFeeConfigs);
 router.put('/minimum-fee-configs/course', upsertMinimumFeeConfigsForCourse);
 router.delete('/minimum-fee-configs/course', clearMinimumFeeConfigsForCourse);
 router.delete('/minimum-fee-configs/college/:collegeId', clearMinimumFeeConfigsForCollege);
+router.post('/send-document-notification-bulk', sendDocumentNotificationSmsBulk);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);
 router.get('/joining/:joiningId', getAdmissionByJoiningId);
