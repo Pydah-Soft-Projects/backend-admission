@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
+import { classifyAdmissionQuotaCategory } from './quotaClassification.util.js';
 
 /** Tuition fee head in Fee Management (TUI01). */
 export const TUI_FEE_HEAD_ID = '6996e24c2e1678e398839187';
@@ -8,10 +9,54 @@ export const TUI_FEE_HEAD_CODE = 'TUI01';
 /** Special Fee head included with tuition in the Student Info Paid amount. */
 export const SPECIAL_FEE_HEAD_CODE = 'OTH1';
 
-/** Admissions desk reports use Year 1 tuition only. */
+/** Regular admissions desk reports use Year 1 tuition + other. */
 export const TUI_STUDENT_YEAR = 1;
 
+/**
+ * Lateral Entry / Lateral Spot start from Year 2 (2-1) — never Year 1.
+ * "Onwards" covers later years if Year 2 ledger is missing but Year 3+ exists.
+ */
+export const LATERAL_FEE_STUDENT_YEAR = 2;
+export const LATERAL_FEE_STUDENT_YEARS = [2, 3, 4, 5, 6];
+
 const FEE_PENDING_TOLERANCE = 0.5;
+
+/** True for Lateral Entry / Lateral Spot quota labels. */
+export function isLateralDeskFeeQuota(quota) {
+  const category = classifyAdmissionQuotaCategory(quota);
+  return category === 'LATER' || category === 'LSPOT';
+}
+
+/**
+ * Same lateral track as Step 4 Collect Fee:
+ * Lateral Entry / Spot quotas OR course label containing LATERAL (e.g. B.Tech (LATERAL)).
+ */
+export function isLateralDeskFeeStudent(quota, course) {
+  if (isLateralDeskFeeQuota(quota)) return true;
+  return isLateralCourseLabel(course);
+}
+
+/** Course label indicates lateral intake (e.g. B.Tech (LATERAL)). */
+export function isLateralCourseLabel(course) {
+  const c = String(course ?? '').trim();
+  if (!c) return false;
+  return /\(lateral\)/i.test(c) || /\blateral\b/i.test(c);
+}
+
+/**
+ * Lateral course / track stored with a non-lateral quota (Convenor / Management / Spot, etc.).
+ * These are the No Fee Entry desk targets when Year 2+ TUI01/OTH1 ledger is missing.
+ */
+export function isLateralQuotaMismatch(quota, course) {
+  return isLateralCourseLabel(course) && !isLateralDeskFeeQuota(quota);
+}
+
+/** Desk fee student-year(s) — mirrors Step 4 year columns. */
+export function resolveDeskFeeStudentYears(quota, course) {
+  return isLateralDeskFeeStudent(quota, course)
+    ? [...LATERAL_FEE_STUDENT_YEARS]
+    : [TUI_STUDENT_YEAR];
+}
 
 const feeHeadMatchValues = (feeHeadId) => {
   const raw = String(feeHeadId || '').trim();
@@ -25,12 +70,19 @@ const feeHeadMatchValues = (feeHeadId) => {
   return values;
 };
 
-/** Mongo may store studentYear as number or string. */
+/**
+ * Mongo may store studentYear as number or string.
+ * Accepts a single year or an array (e.g. lateral Year 2 onwards).
+ */
 const studentYearMatchFilter = (studentYear = TUI_STUDENT_YEAR) => {
-  const numeric = Number(studentYear);
-  const text = String(studentYear).trim();
-  const values = [text];
-  if (Number.isFinite(numeric)) values.unshift(numeric);
+  const years = Array.isArray(studentYear) ? studentYear : [studentYear];
+  const values = [];
+  for (const year of years) {
+    const numeric = Number(year);
+    const text = String(year).trim();
+    if (text) values.push(text);
+    if (Number.isFinite(numeric)) values.push(numeric);
+  }
   return { $in: [...new Set(values)] };
 };
 
@@ -496,14 +548,14 @@ export async function buildTuitionFeeSummariesByAdmissionNumbers(
 }
 
 /**
- * Build Year-1 Step 4 fee summary (Tuition TUI01 + Other/Special OTH1) per admission.
+ * Build Step 4 fee summary (Tuition TUI01 + Other/Special OTH1) per admission.
  * Combined totals drive paid/unpaid; per-head amounts are included for UI/export/print.
  *
  * Paid uses the same Student Info lookup (TUI01 + OTH1 transactions).
  * Unpaid = remaining balance (payable − paid) > tolerance — partial payments stay in the pending list.
  *
  * @param {string[]} admissionNumbers
- * @param {number} [studentYear=1]
+ * @param {number|number[]} [studentYear=1] Single year or years array (lateral: 2+)
  * @returns {Promise<Map<string, ReturnType<typeof emptyTuitionSummary>>>}
  */
 export async function buildTuitionAndOtherFeeSummariesByAdmissionNumbers(
@@ -591,4 +643,91 @@ export async function buildTuitionAndOtherFeeSummariesByAdmissionNumbers(
   }
 
   return summaries;
+}
+
+/**
+ * Build tuition + other fee summaries for desk admissions.
+ * Regular → Year 1; Lateral (quota or course label) → Year 2 onwards — same as Step 4 Collect.
+ *
+ * No Fee Entry (UI / filter) is only for lateral quota-mismatch students
+ * (course is LATERAL but quota is not Lateral Entry / Spot) with no TUI01/OTH1 ledger.
+ * Catalog config and unrelated transactions do not clear that flag.
+ *
+ * @param {Array<{ admissionNumber?: string; quota?: string; course?: string; branch?: string; admission_number?: string }>} rows
+ * @returns {Promise<Map<string, ReturnType<typeof emptyTuitionSummary>>>}
+ */
+export async function buildTuitionAndOtherFeeSummariesForAdmissionRows(rows) {
+  const regularIds = [];
+  const lateralIds = [];
+  const rowById = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?.admissionNumber ?? row?.admission_number ?? '').trim();
+    if (!id) continue;
+    rowById.set(id, row);
+    if (isLateralDeskFeeStudent(row?.quota, row?.course)) lateralIds.push(id);
+    else regularIds.push(id);
+  }
+
+  const [regularMap, lateralMap] = await Promise.all([
+    buildTuitionAndOtherFeeSummariesByAdmissionNumbers(regularIds, TUI_STUDENT_YEAR),
+    buildTuitionAndOtherFeeSummariesByAdmissionNumbers(lateralIds, LATERAL_FEE_STUDENT_YEARS),
+  ]);
+
+  const merged = new Map(regularMap);
+  for (const [id, summary] of lateralMap.entries()) {
+    merged.set(id, summary);
+  }
+
+  for (const [id, summary] of merged.entries()) {
+    const row = rowById.get(id);
+    const payable = Math.max(0, Number(summary?.payable || 0));
+    // Ledger amount = studentfees payable for TUI01/OTH1 (not catalog, not other heads).
+    const hasLedger = payable > FEE_PENDING_TOLERANCE;
+    const mismatch = isLateralQuotaMismatch(row?.quota, row?.course);
+
+    if (mismatch && !hasLedger) {
+      merged.set(id, emptyTuitionSummary());
+      continue;
+    }
+
+    // Non-mismatch students without ledger/payment are not "No Fee Entry".
+    if (!summary?.hasFeeEntry) {
+      merged.set(id, {
+        ...emptyTuitionSummary(),
+        hasFeeEntry: false,
+        feeStatus: 'unpaid',
+        displayLabel: 'Unpaid',
+      });
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Desk paid amounts: Year 1 for regular; Year 2 onwards for lateral track (quota or course).
+ *
+ * @param {Array<{ admissionNumber?: string; quota?: string; course?: string; admission_number?: string }>} rows
+ * @returns {Promise<Map<string, number>>}
+ */
+export async function fetchPaidByAdmissionRowsForDesk(rows) {
+  const regularIds = [];
+  const lateralIds = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?.admissionNumber ?? row?.admission_number ?? '').trim();
+    if (!id) continue;
+    if (isLateralDeskFeeStudent(row?.quota, row?.course)) lateralIds.push(id);
+    else regularIds.push(id);
+  }
+
+  const [regularPaid, lateralPaid] = await Promise.all([
+    fetchPaidByAdmissionNumbersForStudentYear(regularIds, TUI_STUDENT_YEAR),
+    fetchPaidByAdmissionNumbersForStudentYear(lateralIds, LATERAL_FEE_STUDENT_YEARS),
+  ]);
+
+  const merged = new Map(regularPaid);
+  for (const [id, amount] of lateralPaid.entries()) {
+    merged.set(id, amount);
+  }
+  return merged;
 }

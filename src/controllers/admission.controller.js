@@ -23,7 +23,7 @@ import {
   SQL_BTECH_LATERAL_TRACK,
   SQL_COURSE_DISPLAY_NAME,
 } from '../utils/lateralBatch.util.js';
-import { resolveSecondaryManagedIds } from '../data/admissionsCourseBranchMap2026.js';
+import { resolveSecondaryManagedIds, pickSecondaryBranchDisplayLabel } from '../data/admissionsCourseBranchMap2026.js';
 import {
   readReference1FromDynamicFields,
   resolveAdmissionReference1,
@@ -38,8 +38,8 @@ import {
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 import {
-  buildTuitionAndOtherFeeSummariesByAdmissionNumbers,
-  fetchPaidByAdmissionNumbersForStudentYear,
+  buildTuitionAndOtherFeeSummariesForAdmissionRows,
+  fetchPaidByAdmissionRowsForDesk,
   fetchTuitionPaidByAdmissionNumbers,
 } from '../utils/tuitionPaid.util.js';
 import {
@@ -395,7 +395,8 @@ const enrichAdmissionCourseInfoFromSecondary = async (courseInfo) => {
       }
       if (branchDoc) {
         info.branchId = String(branchDoc.id);
-        const catalogBranch = String(branchDoc.name || branchDoc.code || '').trim();
+        // Prefer catalog display name (CSE) over roll/internal code (BCSE).
+        const catalogBranch = pickSecondaryBranchDisplayLabel(branchDoc, info.branch);
         if (catalogBranch) {
           info.branch = catalogBranch;
         }
@@ -439,7 +440,8 @@ const enrichAdmissionCourseInfoFromSecondary = async (courseInfo) => {
         );
         if (byLabel.length > 0) {
           info.branchId = String(byLabel[0].id);
-          info.branch = String(byLabel[0].name || byLabel[0].code || '').trim() || storedBranch;
+          info.branch =
+            pickSecondaryBranchDisplayLabel(byLabel[0], storedBranch) || storedBranch;
         }
       }
     }
@@ -582,6 +584,50 @@ const GENERIC_IMPORT_COURSE_LABELS = new Set([
 const isGenericImportCourseLabel = (name) => {
   const n = String(name || '').trim().toLowerCase();
   return !n || GENERIC_IMPORT_COURSE_LABELS.has(n);
+};
+
+/** Managed branch id → Fee Portal / UI display name (CSE), never roll code (BCSE). */
+const loadManagedBranchDisplayLabels = async (managedBranchIds) => {
+  const ids = [
+    ...new Set(
+      (Array.isArray(managedBranchIds) ? managedBranchIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean)
+    ),
+  ];
+  const map = new Map();
+  if (!ids.length) return map;
+  try {
+    const secondaryPool = getSecondaryPool();
+    const marks = ids.map(() => '?').join(',');
+    const [rows] = await secondaryPool.execute(
+      `SELECT id, name, code FROM course_branches WHERE id IN (${marks})`,
+      ids
+    );
+    for (const row of rows || []) {
+      const label = pickSecondaryBranchDisplayLabel(row);
+      if (label) map.set(String(row.id), label);
+    }
+  } catch (err) {
+    console.warn('[loadManagedBranchDisplayLabels]', err?.message || err);
+  }
+  return map;
+};
+
+/** Prefer catalog branch name on admission/joining rows that still store the code. */
+const applyManagedBranchDisplayLabels = (rows, labelByManagedId) => {
+  if (!labelByManagedId?.size) return rows;
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const managedId = String(row?.managed_branch_id ?? '').trim();
+    const label = managedId ? labelByManagedId.get(managedId) : '';
+    if (!label) return row;
+    const current = String(row?.branch ?? '').trim();
+    if (!current || current.toUpperCase() === label.toUpperCase()) {
+      return current ? row : { ...row, branch: label };
+    }
+    // Replace roll/internal code with catalog name when they differ.
+    return { ...row, branch: label };
+  });
 };
 
 /** Prefer secondary `courses.name` when admission text is a generic import label (e.g. "Degree"). */
@@ -1801,11 +1847,19 @@ export const listAdmissions = async (req, res) => {
       courseName,
       branchName,
       source,
+      feeEntry,
+      quota,
     } = req.query;
 
     const pool = getPool();
     const paginationLimit = Math.min(Number(limit) || 20, 100);
     const offset = (Number(page) - 1) * paginationLimit;
+    const feeEntryFilter = String(feeEntry || '')
+      .trim()
+      .toLowerCase();
+    const filterNoFeeEntry = feeEntryFilter === 'no_entry' || feeEntryFilter === 'no-entry';
+    const filterHasFeeEntry = feeEntryFilter === 'has_entry' || feeEntryFilter === 'has-entry';
+    const applyFeeEntryFilter = filterNoFeeEntry || filterHasFeeEntry;
 
     // Build WHERE conditions
     const conditions = [];
@@ -1815,6 +1869,11 @@ export const listAdmissions = async (req, res) => {
     if (status) {
       conditions.push('a.status = ?');
       params.push(status);
+    }
+    const quotaFilter = String(quota ?? '').trim();
+    if (quotaFilter) {
+      conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
+      params.push(quotaFilter);
     }
     const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
     appendManagedCollegeCourseFilter(
@@ -1892,34 +1951,61 @@ export const listAdmissions = async (req, res) => {
       await pool.execute('SET SESSION sort_buffer_size = 4194304');
     }
 
-    // Get total count (brief cache — pagination/filter toggles hit this often).
-    const total = await getAdmissionCachedCount(
-      pool,
-      `SELECT COUNT(*) as total ${fromClause} ${whereClause}`,
-      params,
-      ADMISSION_CACHE_TTL.listCountMs,
-      'list-admissions'
-    );
+    let total = 0;
+    let pageIds = [];
 
-    // Phase 1: paginate ids only — no lead join unless search needs it; no wide row payload in sort.
-    // When JSON conditions are present (source filter), evaluate them inside a materialized
-    // derived table (NO_MERGE): MySQL 8 packs JSON columns referenced in a sorted query into
-    // the filesort rows, and `lead_data` (base64 photos) overflows any sort buffer.
-    const idQuery = sourceFilter
-      ? `SELECT /*+ NO_MERGE(src) */ a.id
-         FROM admissions a
-         JOIN (SELECT a.id ${fromClause} ${whereClause}) src ON src.id = a.id
-         ORDER BY a.admission_number DESC, a.updated_at DESC
-         LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`
-      : `SELECT a.id ${fromClause} ${whereClause}
-         ORDER BY a.admission_number DESC, a.updated_at DESC
-         LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`;
-    const [idRowsResult] = await pool.execute(idQuery, params);
-    const idRows = idRowsResult;
+    if (applyFeeEntryFilter) {
+      // Fee entry lives in Fee Management (not MySQL) — evaluate after desk filters, then paginate.
+      // Include course so B.Tech (LATERAL) uses Year 2+ like Step 4 Collect Fee.
+      const allIdQuery = sourceFilter
+        ? `SELECT /*+ NO_MERGE(src) */ a.id, a.admission_number, a.quota, a.course, a.branch
+           FROM admissions a
+           JOIN (SELECT a.id ${fromClause} ${whereClause}) src ON src.id = a.id
+           ORDER BY a.admission_number DESC, a.updated_at DESC`
+        : `SELECT a.id, a.admission_number, a.quota, a.course, a.branch ${fromClause} ${whereClause}
+           ORDER BY a.admission_number DESC, a.updated_at DESC`;
+      const [allIdRows] = await pool.execute(allIdQuery, params);
+
+      const feeSummaries = await buildTuitionAndOtherFeeSummariesForAdmissionRows(
+        allIdRows || []
+      );
+
+      const filteredIds = (allIdRows || [])
+        .filter((row) => {
+          const summary = feeSummaries.get(String(row.admission_number || '').trim());
+          // No Fee Entry = lateral quota mismatch with no TUI01/OTH1 ledger only.
+          const isNoFeeEntry = summary?.feeStatus === 'no_entry';
+          const hasFeeEntry = Boolean(summary?.hasFeeEntry);
+          return filterNoFeeEntry ? isNoFeeEntry : hasFeeEntry;
+        })
+        .map((row) => row.id);
+
+      total = filteredIds.length;
+      pageIds = filteredIds.slice(offset, offset + paginationLimit);
+    } else {
+      total = await getAdmissionCachedCount(
+        pool,
+        `SELECT COUNT(*) as total ${fromClause} ${whereClause}`,
+        params,
+        ADMISSION_CACHE_TTL.listCountMs,
+        'list-admissions'
+      );
+
+      const idQuery = sourceFilter
+        ? `SELECT /*+ NO_MERGE(src) */ a.id
+           FROM admissions a
+           JOIN (SELECT a.id ${fromClause} ${whereClause}) src ON src.id = a.id
+           ORDER BY a.admission_number DESC, a.updated_at DESC
+           LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`
+        : `SELECT a.id ${fromClause} ${whereClause}
+           ORDER BY a.admission_number DESC, a.updated_at DESC
+           LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`;
+      const [idRowsResult] = await pool.execute(idQuery, params);
+      pageIds = (idRowsResult || []).map((row) => row.id);
+    }
 
     let admissions = [];
-    if (idRows.length > 0) {
-      const pageIds = idRows.map((row) => row.id);
+    if (pageIds.length > 0) {
       const inMarks = pageIds.map(() => '?').join(',');
       const orderIndex = new Map(pageIds.map((id, index) => [String(id), index]));
 
@@ -1957,18 +2043,45 @@ export const listAdmissions = async (req, res) => {
       );
     }
 
-    const yearOnePaidByAdmissionNumber = await fetchPaidByAdmissionNumbersForStudentYear(
-      admissions.map((row) => row.admission_number)
+    // Show catalog branch name (CSE), not roll code (BCSE), matching Fee Management / Step 4.
+    const branchLabelById = await loadManagedBranchDisplayLabels(
+      admissions.map((row) => row.managed_branch_id)
     );
+    admissions = applyManagedBranchDisplayLabels(admissions, branchLabelById);
+
+    const deskFeeRows = admissions.map((row) => ({
+      admission_number: row.admission_number,
+      quota: row.quota,
+      course: row.course,
+      branch: row.branch,
+    }));
+    const [yearOnePaidByAdmissionNumber, feeSummaries] = await Promise.all([
+      fetchPaidByAdmissionRowsForDesk(deskFeeRows),
+      buildTuitionAndOtherFeeSummariesForAdmissionRows(deskFeeRows),
+    ]);
     const formattedAdmissions = admissions.map((row) => {
       const item = formatAdmissionListItem(row);
-      const yearOnePaid =
-        yearOnePaidByAdmissionNumber.get(String(row.admission_number || '').trim()) ?? 0;
+      const admissionNumber = String(row.admission_number || '').trim();
+      const yearOnePaid = yearOnePaidByAdmissionNumber.get(admissionNumber) ?? 0;
+      const feeSummary = feeSummaries.get(admissionNumber);
+      const isNoFeeEntry = feeSummary?.feeStatus === 'no_entry';
+      const hasFeeEntry = !isNoFeeEntry && Boolean(feeSummary?.hasFeeEntry);
+      const feeStatus = isNoFeeEntry
+        ? 'no_entry'
+        : hasFeeEntry
+          ? feeSummary?.feeStatus === 'paid'
+            ? 'paid'
+            : 'unpaid'
+          : 'unpaid';
       return {
         ...item,
+        hasFeeEntry,
+        feeStatus,
         paymentSummary: {
           ...item.paymentSummary,
           yearOnePaid,
+          hasFeeEntry,
+          feeStatus,
         },
       };
     });
@@ -4146,6 +4259,7 @@ export const exportAdmissions = async (req, res) => {
       courseName,
       branchName,
       source,
+      quota,
     } = req.query;
 
     const conditions = [];
@@ -4154,6 +4268,11 @@ export const exportAdmissions = async (req, res) => {
     if (status && status !== 'all') {
       conditions.push('a.status = ?');
       params.push(status);
+    }
+    const quotaFilter = String(quota ?? '').trim();
+    if (quotaFilter) {
+      conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
+      params.push(quotaFilter);
     }
 
     const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
@@ -4851,9 +4970,7 @@ const evaluatePendingFees = async (query) => {
     (a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0)
   );
 
-  const feeSummaries = await buildTuitionAndOtherFeeSummariesByAdmissionNumbers(
-    detailRows.map((row) => row.admission_number)
-  );
+  const feeSummaries = await buildTuitionAndOtherFeeSummariesForAdmissionRows(detailRows);
 
   const evaluated = detailRows.map((row) =>
     formatPendingFeeRow(row, feeSummaries.get(String(row.admission_number || '').trim()))

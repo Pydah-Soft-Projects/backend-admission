@@ -26,6 +26,7 @@
     "migrate:joining-online-admission-sms-template": "node src/scripts-sql/migrateJoiningOnlineAdmissionSmsTemplate.js",
     "migrate:qualification-merit": "node src/scripts/ensureQualificationMeritColumns.js",
     "migrate:admission-confirmation-sms-template": "node src/scripts-sql/migrateAdmissionConfirmationSmsTemplate.js",
+    "migrate:minimum-fee-configs": "node src/scripts-sql/runMinimumFeeConfigsMigration.js",
     "migrate:parent-portrait-columns": "node src/scripts-sql/runParentPortraitColumnsMigration.js",
     "migrate:student-photo-columns": "node src/scripts-sql/runStudentPhotoColumnsMigration.js",
     "migrate:relative-phone": "node src/scripts-sql/runRelativePhoneMigration.js",

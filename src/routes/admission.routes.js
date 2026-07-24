@@ -34,6 +34,12 @@ import {
   sendAdmissionConfirmationSmsById,
   sendDocumentNotificationSmsById,
 } from '../controllers/admission.controller.js';
+import {
+  listMinimumFeeConfigs,
+  upsertMinimumFeeConfigsForCourse,
+  clearMinimumFeeConfigsForCourse,
+  clearMinimumFeeConfigsForCollege,
+} from '../controllers/minimumFeeConfig.controller.js';
 
 const router = express.Router();
 
@@ -55,6 +61,10 @@ router.get('/pending-certificates/export', exportPendingCertificates);
 router.get('/pending-certificates', listPendingCertificates);
 router.get('/pending-fees/export', exportPendingFees);
 router.get('/pending-fees', listPendingFees);
+router.get('/minimum-fee-configs', listMinimumFeeConfigs);
+router.put('/minimum-fee-configs/course', upsertMinimumFeeConfigsForCourse);
+router.delete('/minimum-fee-configs/course', clearMinimumFeeConfigsForCourse);
+router.delete('/minimum-fee-configs/college/:collegeId', clearMinimumFeeConfigsForCollege);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);
 router.get('/joining/:joiningId', getAdmissionByJoiningId);
