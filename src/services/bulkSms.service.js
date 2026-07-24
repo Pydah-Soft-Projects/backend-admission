@@ -233,7 +233,9 @@ export const sendSmsThroughBulkSmsApps = async ({
   };
 
   if (tempid) {
-    paramsObject.tempid = tempid;
+    // BulkSMSApps English API expects type=1 with DLT tempid so TemplateId is recorded/delivered.
+    paramsObject.type = '1';
+    paramsObject.tempid = String(tempid).trim();
   }
 
   if (isUnicode) {
@@ -276,6 +278,37 @@ export const sendSmsThroughBulkSmsApps = async ({
 
 
 /**
+ * User Creation / credential SMS (DLT-approved on BulkSMSApps).
+ * Template: Hello {#var#} your account has been created. Username: {#var#} Password: {#var#}. Login: {#var#}- Pydah College
+ * Template ID: 1707176525577028276
+ */
+export const USER_CREDENTIALS_DLT_TEMPLATE_ID = '1707176525577028276';
+
+/**
+ * Password Reset/Update SMS (Forgot Password on login).
+ * Template: Hello {#var#} your password has been updated. Username: {#var#} New Password: {#var#} Login: {#var#}- Pydah College
+ * Template ID: 1707176526611076697
+ */
+export const PASSWORD_RESET_DLT_TEMPLATE_ID = '1707176526611076697';
+
+export const buildUserCredentialsSmsMessage = (name, username, password, loginUrl) => {
+  const safeName = String(name || 'User').trim() || 'User';
+  const safeUsername = String(username || '').trim();
+  const safePassword = String(password || '').trim();
+  const safeLoginUrl = String(loginUrl || '').trim();
+  // Must match DLT body exactly (period after Password var).
+  return `Hello ${safeName} your account has been created. Username: ${safeUsername} Password: ${safePassword}. Login: ${safeLoginUrl}- Pydah College`;
+};
+
+export const buildPasswordResetSmsMessage = (name, username, newPassword, loginUrl) => {
+  const safeName = String(name || 'User').trim() || 'User';
+  const safeUsername = String(username || '').trim();
+  const safePassword = String(newPassword || '').trim();
+  const safeLoginUrl = String(loginUrl || '').trim();
+  return `Hello ${safeName} your password has been updated. Username: ${safeUsername} New Password: ${safePassword} Login: ${safeLoginUrl}- Pydah College`;
+};
+
+/**
  * Send OTP
  */
 export const sendOTP = async (mobileNumber, otp) => {
@@ -290,17 +323,16 @@ export const sendOTP = async (mobileNumber, otp) => {
 };
 
 /**
- * Send Password Reset Success
- * Template ID: 1707176526611076697
+ * Send Password Reset/Update SMS (Forgot Password on login).
+ * DLT: 1707176526611076697
  */
 export const sendPasswordResetSuccess = async (mobileNumber, name, username, newPassword, loginUrl) => {
-  const templateId = '1707176526611076697';
-  const message = `Hello ${name} your password has been updated. Username: ${username} New Password: ${newPassword} Login: ${loginUrl}- Pydah College`;
+  const message = buildPasswordResetSmsMessage(name, username, newPassword, loginUrl);
 
   return sendSmsThroughBulkSmsApps({
     numbers: [mobileNumber],
     message,
-    tempid: templateId,
+    tempid: PASSWORD_RESET_DLT_TEMPLATE_ID,
   });
 };
 

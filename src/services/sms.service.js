@@ -1,7 +1,13 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
 import { getPool } from '../config-sql/database.js';
-import { sendSmsThroughBulkSmsApps } from './bulkSms.service.js';
+import {
+  sendSmsThroughBulkSmsApps,
+  USER_CREDENTIALS_DLT_TEMPLATE_ID,
+  PASSWORD_RESET_DLT_TEMPLATE_ID,
+  buildUserCredentialsSmsMessage,
+  buildPasswordResetSmsMessage,
+} from './bulkSms.service.js';
 
 dotenv.config();
 
@@ -12,8 +18,8 @@ const BULK_SMS_SENDER_ID = process.env.BULK_SMS_SENDER_ID || 'PYDAHK';
 export const STUDENT_PORTAL_LOGIN_URL =
   process.env.STUDENT_PORTAL_LOGIN_URL || 'sdms.pydah.edu.in';
 
-/** DLT template: Hello {#var#} your account has been created. Username: {#var#} Password: {#var#}. Login: {#var#}- Pydah College */
-const STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID = '1707176525577028276';
+/** Same DLT as forgot-password / user credentials SMS. */
+const STUDENT_ACCOUNT_CREATED_DLT_TEMPLATE_ID = USER_CREDENTIALS_DLT_TEMPLATE_ID;
 
 /**
  * DLT template id for parent portal SMS (code-only; not in message_templates).
@@ -267,7 +273,12 @@ const smsService = {
       return { success: false, error: 'missing_credentials' };
     }
 
-    const message = `Hello ${safeName} your account has been created. Username: ${safeUsername} Password: ${safePassword} Login: ${safeLoginUrl}- Pydah College`;
+    const message = buildUserCredentialsSmsMessage(
+      safeName,
+      safeUsername,
+      safePassword,
+      safeLoginUrl
+    );
 
     try {
       const result = await sendSmsThroughBulkSmsApps({
@@ -305,35 +316,56 @@ const smsService = {
   },
 
   /**
-   * Send Password Reset Success SMS
+   * Send Password Reset/Update SMS (forgot password).
+   * DLT template id: 1707176526611076697
    * Template: Hello {#var#} your password has been updated. Username: {#var#} New Password: {#var#} Login: {#var#}- Pydah College
-   * Template ID: 1707176526611076697
    */
   sendPasswordResetSuccess: async (mobileNumber, name, username, newPassword, loginUrl) => {
     if (!BULK_SMS_API_KEY) {
-      console.warn('BULKSMS_API_KEY is not set. Reset SMS skipping (Dev Mode).');
+      console.warn('BULK_SMS_API_KEY is not set. Reset SMS skipping (Dev Mode).');
       return { success: true, message: 'SMS simulation successful (Dev Mode)' };
     }
 
-    const cleanNumber = mobileNumber.replace(/\D/g, '').slice(-10);
-    
-    // Construct message: "Hello {name} your password has been updated. Username: {username} New Password: {newPassword} Login: {loginUrl}- Pydah College"
-    const message = `Hello ${name} your password has been updated. Username: ${username} New Password: ${newPassword} Login: ${loginUrl}- Pydah College`;
-    
-    // URL Encode message
-    const encodedMessage = encodeURIComponent(message);
-    const templateId = '1707176526611076697';
+    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+    if (cleanNumber.length !== 10) {
+      console.warn(`Password reset SMS skipped — invalid mobile "${mobileNumber}".`);
+      return { success: false, error: 'invalid_mobile_number' };
+    }
 
-    const url = `https://www.bulksmsapps.com/api/apismsv2.aspx?apikey=${BULK_SMS_API_KEY}&sender=${BULK_SMS_SENDER_ID}&mobile=${cleanNumber}&message=${encodedMessage}&type=1&tempid=${templateId}`;
+    const message = buildPasswordResetSmsMessage(name, username, newPassword, loginUrl);
 
     try {
-      const response = await axios.get(url);
-      console.log(`Password Reset SMS Sent to ${cleanNumber}. Response:`, response.data);
-      return { success: true, data: response.data };
+      const result = await sendSmsThroughBulkSmsApps({
+        numbers: [cleanNumber],
+        message,
+        tempid: PASSWORD_RESET_DLT_TEMPLATE_ID,
+      });
+
+      const responsePreview = String(result.responseText || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+
+      if (result.success) {
+        console.log(
+          `Password Reset SMS sent to ${cleanNumber} (dlt ${PASSWORD_RESET_DLT_TEMPLATE_ID}, messageIds=[${result.messageIds.join(',')}]).`
+        );
+        return {
+          success: true,
+          data: { messageIds: result.messageIds, responseText: result.responseText },
+        };
+      }
+
+      console.error(
+        `Password Reset SMS rejected by gateway (mobile=${cleanNumber}, dlt=${PASSWORD_RESET_DLT_TEMPLATE_ID}). Gateway response: ${responsePreview}`
+      );
+      return {
+        success: false,
+        error: 'gateway_rejected',
+        gatewayMessage: responsePreview,
+      };
     } catch (error) {
-      console.error('Failed to send Password Reset SMS:', error.message);
-      // Don't throw here, as password is already reset. Just log error.
-      return { success: false, error: error.message }; 
+      console.error('Failed to send Password Reset SMS:', error.message || error);
+      return { success: false, error: error.message || 'sms_send_failed' };
     }
   },
 
