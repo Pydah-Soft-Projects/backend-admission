@@ -4,9 +4,8 @@ import { getPool } from '../config-sql/database.js';
 import {
   sendSmsThroughBulkSmsApps,
   USER_CREDENTIALS_DLT_TEMPLATE_ID,
-  PASSWORD_RESET_DLT_TEMPLATE_ID,
   buildUserCredentialsSmsMessage,
-  buildPasswordResetSmsMessage,
+  sendPasswordResetSuccess as sendPasswordResetSuccessSms,
 } from './bulkSms.service.js';
 
 dotenv.config();
@@ -78,7 +77,8 @@ const smsService = {
     // Clean mobile number (keep last 10 digits if needed, or assume valid input)
     // The API expects a specific format, usually just the number.
     const cleanNumber = mobileNumber.replace(/\D/g, '').slice(-10);
-    const otpTemplateId = process.env.OTP_TEMPLATE_ID || '1007482811215703964'; // Fallback or Env
+    // Hardcoded DLT template id (do not rely on OTP_TEMPLATE_ID env).
+    const otpTemplateId = '1007482811215703964';
 
     const message = `Your OTP for recovering your password is ${otp} - PYDAH`;
     // URL Encode message
@@ -316,58 +316,11 @@ const smsService = {
   },
 
   /**
-   * Send Password Reset/Update SMS (forgot password).
-   * DLT template id: 1707176526611076697
-   * Template: Hello {#var#} your password has been updated. Username: {#var#} New Password: {#var#} Login: {#var#}- Pydah College
+   * Send Password Reset SMS (forgot password) — delegates to bulkSms.service
+   * (hardcoded template ids + User Creation fallback).
    */
-  sendPasswordResetSuccess: async (mobileNumber, name, username, newPassword, loginUrl) => {
-    if (!BULK_SMS_API_KEY) {
-      console.warn('BULK_SMS_API_KEY is not set. Reset SMS skipping (Dev Mode).');
-      return { success: true, message: 'SMS simulation successful (Dev Mode)' };
-    }
-
-    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
-    if (cleanNumber.length !== 10) {
-      console.warn(`Password reset SMS skipped — invalid mobile "${mobileNumber}".`);
-      return { success: false, error: 'invalid_mobile_number' };
-    }
-
-    const message = buildPasswordResetSmsMessage(name, username, newPassword, loginUrl);
-
-    try {
-      const result = await sendSmsThroughBulkSmsApps({
-        numbers: [cleanNumber],
-        message,
-        tempid: PASSWORD_RESET_DLT_TEMPLATE_ID,
-      });
-
-      const responsePreview = String(result.responseText || '')
-        .replace(/\s+/g, ' ')
-        .slice(0, 240);
-
-      if (result.success) {
-        console.log(
-          `Password Reset SMS sent to ${cleanNumber} (dlt ${PASSWORD_RESET_DLT_TEMPLATE_ID}, messageIds=[${result.messageIds.join(',')}]).`
-        );
-        return {
-          success: true,
-          data: { messageIds: result.messageIds, responseText: result.responseText },
-        };
-      }
-
-      console.error(
-        `Password Reset SMS rejected by gateway (mobile=${cleanNumber}, dlt=${PASSWORD_RESET_DLT_TEMPLATE_ID}). Gateway response: ${responsePreview}`
-      );
-      return {
-        success: false,
-        error: 'gateway_rejected',
-        gatewayMessage: responsePreview,
-      };
-    } catch (error) {
-      console.error('Failed to send Password Reset SMS:', error.message || error);
-      return { success: false, error: error.message || 'sms_send_failed' };
-    }
-  },
+  sendPasswordResetSuccess: async (mobileNumber, name, username, newPassword) =>
+    sendPasswordResetSuccessSms(mobileNumber, name, username, newPassword),
 
   /**
    * Send Document Notification SMS to student.

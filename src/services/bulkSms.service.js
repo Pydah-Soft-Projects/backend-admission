@@ -228,12 +228,14 @@ export const sendSmsThroughBulkSmsApps = async ({
   const paramsObject = {
     apikey: BULK_SMS_API_KEY,
     sender: senderId,
+    // English single-SMS API on BulkSMSApps — `number` is the working param
+    // (student account SMS). Sending only `mobile` caused:
+    // "Object reference not set to an instance of an object."
     number: sanitizedNumbers.join(','),
     message,
   };
 
   if (tempid) {
-    // BulkSMSApps English API expects type=1 with DLT tempid so TemplateId is recorded/delivered.
     paramsObject.type = '1';
     paramsObject.tempid = String(tempid).trim();
   }
@@ -262,7 +264,9 @@ export const sendSmsThroughBulkSmsApps = async ({
   const success = isValidSmsResponse(responseText);
   const messageIds = extractMessageIds(responseText);
 
-  console.log(`[BulkSMS] Sent to ${sanitizedNumbers.join(',')}. Message: "${message}". Success: ${success}. Response: ${responseText}`);
+  console.log(
+    `[BulkSMS] Sent to ${sanitizedNumbers.join(',')}. Message: "${message}". tempid=${tempid || 'none'}. Success: ${success}. Response: ${redactSensitiveInText(responseText).slice(0, 240)}`
+  );
 
   return {
     success,
@@ -291,20 +295,37 @@ export const USER_CREDENTIALS_DLT_TEMPLATE_ID = '1707176525577028276';
  */
 export const PASSWORD_RESET_DLT_TEMPLATE_ID = '1707176526611076697';
 
+export const PASSWORD_RESET_LOGIN_HOST = 'admissions.pydah.edu.in';
+
+/** DLT {#var#} max length is commonly 30 (sometimes 20) — clip to stay deliverable. */
+const clipDltVar = (value, max = 30) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
+
+/**
+ * DLT {#var#} fields are commonly capped (~30 chars). Strip scheme/path so
+ * `https://admissions.pydah.edu.in` (32) becomes `admissions.pydah.edu.in` (24).
+ */
+export const toDltSafeLoginHost = (loginUrl) => {
+  let value = String(loginUrl || '').trim();
+  if (!value) return PASSWORD_RESET_LOGIN_HOST;
+  value = value.replace(/^https?:\/\//i, '');
+  value = value.split('/')[0].split('?')[0].split('#')[0].trim();
+  return value || PASSWORD_RESET_LOGIN_HOST;
+};
+
 export const buildUserCredentialsSmsMessage = (name, username, password, loginUrl) => {
-  const safeName = String(name || 'User').trim() || 'User';
-  const safeUsername = String(username || '').trim();
-  const safePassword = String(password || '').trim();
-  const safeLoginUrl = String(loginUrl || '').trim();
+  const safeName = clipDltVar(name) || 'User';
+  const safeUsername = clipDltVar(username);
+  const safePassword = clipDltVar(password);
+  const safeLoginUrl = toDltSafeLoginHost(loginUrl);
   // Must match DLT body exactly (period after Password var).
   return `Hello ${safeName} your account has been created. Username: ${safeUsername} Password: ${safePassword}. Login: ${safeLoginUrl}- Pydah College`;
 };
 
-export const buildPasswordResetSmsMessage = (name, username, newPassword, loginUrl) => {
-  const safeName = String(name || 'User').trim() || 'User';
-  const safeUsername = String(username || '').trim();
-  const safePassword = String(newPassword || '').trim();
-  const safeLoginUrl = String(loginUrl || '').trim();
+export const buildPasswordResetSmsMessage = (name, username, newPassword) => {
+  const safeName = clipDltVar(name) || 'User';
+  const safeUsername = clipDltVar(username);
+  const safePassword = clipDltVar(newPassword);
+  const safeLoginUrl = PASSWORD_RESET_LOGIN_HOST;
   return `Hello ${safeName} your password has been updated. Username: ${safeUsername} New Password: ${safePassword} Login: ${safeLoginUrl}- Pydah College`;
 };
 
@@ -312,7 +333,8 @@ export const buildPasswordResetSmsMessage = (name, username, newPassword, loginU
  * Send OTP
  */
 export const sendOTP = async (mobileNumber, otp) => {
-  const otpTemplateId = process.env.OTP_TEMPLATE_ID || '1007482811215703964'; // Env or Fallback
+  // Hardcoded DLT template id (do not rely on OTP_TEMPLATE_ID env).
+  const otpTemplateId = '1007482811215703964';
   const message = `Your OTP for recovering your password is ${otp} - PYDAH`;
 
   return sendSmsThroughBulkSmsApps({
@@ -324,15 +346,30 @@ export const sendOTP = async (mobileNumber, otp) => {
 
 /**
  * Send Password Reset/Update SMS (Forgot Password on login).
- * DLT: 1707176526611076697
+ * Hardcoded DLT template id: 1707176526611076697
+ * Template: Hello {#var#} your password has been updated. Username: {#var#} New Password: {#var#} Login: {#var#}- Pydah College
+ * Login host: admissions.pydah.edu.in
  */
-export const sendPasswordResetSuccess = async (mobileNumber, name, username, newPassword, loginUrl) => {
-  const message = buildPasswordResetSmsMessage(name, username, newPassword, loginUrl);
+export const sendPasswordResetSuccess = async (mobileNumber, name, username, newPassword) => {
+  if (!BULK_SMS_API_KEY) {
+    console.warn('[BulkSMS] BULK_SMS_API_KEY missing — password reset SMS skipped (Dev Mode).');
+    return { success: true, message: 'SMS simulation successful (Dev Mode)', messageIds: [] };
+  }
+
+  const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+  if (cleanNumber.length !== 10) {
+    return { success: false, error: 'invalid_mobile_number', messageIds: [] };
+  }
+
+  const smsUsername = clipDltVar(username) || cleanNumber;
+  const message = buildPasswordResetSmsMessage(name, smsUsername, newPassword);
+  // Hardcoded Password Reset/Update template — not from .env, no User Creation fallback
+  const tempid = '1707176526611076697';
 
   return sendSmsThroughBulkSmsApps({
-    numbers: [mobileNumber],
+    numbers: [cleanNumber],
     message,
-    tempid: PASSWORD_RESET_DLT_TEMPLATE_ID,
+    tempid,
   });
 };
 
