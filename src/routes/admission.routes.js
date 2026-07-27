@@ -41,6 +41,10 @@ import {
   clearMinimumFeeConfigsForCourse,
   clearMinimumFeeConfigsForCollege,
 } from '../controllers/minimumFeeConfig.controller.js';
+import {
+  getAdmissionPendingFeeDocsSmsScheduler,
+  upsertAdmissionPendingFeeDocsSmsScheduler,
+} from '../controllers/admissionPendingFeeDocsSmsScheduler.controller.js';
 
 const router = express.Router();
 
@@ -66,6 +70,19 @@ router.get('/minimum-fee-configs', listMinimumFeeConfigs);
 router.put('/minimum-fee-configs/course', upsertMinimumFeeConfigsForCourse);
 router.delete('/minimum-fee-configs/course', clearMinimumFeeConfigsForCourse);
 router.delete('/minimum-fee-configs/college/:collegeId', clearMinimumFeeConfigsForCollege);
+
+// Super Admin: schedule daily pending fee + pending documents SMS dispatch (AM/PM)
+router.get(
+  '/pending-fees-docs-sms-scheduler',
+  isSuperAdmin,
+  getAdmissionPendingFeeDocsSmsScheduler
+);
+router.put(
+  '/pending-fees-docs-sms-scheduler',
+  isSuperAdmin,
+  upsertAdmissionPendingFeeDocsSmsScheduler
+);
+
 router.post('/send-document-notification-bulk', sendDocumentNotificationSmsBulk);
 router.get('/', listAdmissions);
 router.get('/id/:admissionId', getAdmissionById);

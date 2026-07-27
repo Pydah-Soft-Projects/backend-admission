@@ -378,6 +378,84 @@ const smsService = {
       return { success: false, error: error.message || 'sms_send_failed' };
     }
   },
+
+  /**
+   * Send Admission Confirmation Pending SMS (pending fees at the time of sending certificates).
+   *
+   * Template:
+   * Dear {#var#}, towards confirmation of your admission, an amount of {#var#} is pending.
+   * Kindly contact the Admissions Office immediately at {#var#}. - Pydah Group
+   *
+   * DLT template id (provided by user): 1777178496518000671
+   */
+  sendAdmissionConfirmationPending: async (mobileNumber, name, pendingAmount, collegePhone = '+91 73820 15999') => {
+    if (!BULK_SMS_API_KEY) {
+      console.warn('BULK_SMS_API_KEY is not set. Admission Confirmation Pending SMS skipped (Dev Mode).');
+      return { success: true, message: 'SMS simulation successful (Dev Mode)' };
+    }
+
+    const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);
+    if (cleanNumber.length !== 10) {
+      return {
+        success: false,
+        skipped: true,
+        error: 'invalid_mobile_number',
+      };
+    }
+
+    const safeName = String(name || 'Student').trim() || 'Student';
+    const amountNum = Number(pendingAmount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      return {
+        success: false,
+        skipped: true,
+        error: 'missing_or_invalid_pending_amount',
+      };
+    }
+
+    const formattedAmount = new Intl.NumberFormat('en-IN', {
+      maximumFractionDigits: 0,
+    }).format(Math.trunc(amountNum));
+
+    const amountVar = `Rs. ${formattedAmount}`;
+    const safeCollegePhone = String(collegePhone || '').trim() || '+91 73820 15999';
+
+    const templateId = '1777178496518000671';
+    const message = `Dear ${safeName}, towards confirmation of your admission, an amount of ${amountVar} is pending. Kindly contact the Admissions Office immediately at ${safeCollegePhone}. - Pydah Group`;
+
+    try {
+      const result = await sendSmsThroughBulkSmsApps({
+        numbers: [cleanNumber],
+        message,
+        tempid: templateId,
+      });
+
+      const responsePreview = String(result.responseText || '')
+        .replace(/\s+/g, ' ')
+        .slice(0, 240);
+
+      if (result.success) {
+        console.log(
+          `Admission Confirmation Pending SMS sent to ${cleanNumber} (dlt ${templateId}, pending=${amountVar}).`
+        );
+        return {
+          success: true,
+          data: { messageIds: result.messageIds, responseText: result.responseText },
+        };
+      }
+
+      return {
+        success: false,
+        error: 'gateway_rejected',
+        gatewayMessage: responsePreview,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error?.message || 'sms_send_failed',
+      };
+    }
+  },
 };
 
 export default smsService;

@@ -2715,6 +2715,11 @@ export const sendDocumentNotificationSmsById = async (req, res) => {
 export const sendDocumentNotificationSmsBulk = async (req, res) => {
   try {
     const rawIds = req.body?.admissionIds;
+    const pendingFeeAmountsByAdmissionIdRaw = req.body?.pendingFeeAmountsByAdmissionId;
+    const pendingFeeAmountsByAdmissionId =
+      pendingFeeAmountsByAdmissionIdRaw && typeof pendingFeeAmountsByAdmissionIdRaw === 'object'
+        ? pendingFeeAmountsByAdmissionIdRaw
+        : {};
     if (!Array.isArray(rawIds) || rawIds.length === 0) {
       return errorResponse(res, 'admissionIds array is required', 400);
     }
@@ -2735,10 +2740,42 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
 
     const pool = getPool();
     const certRoot = await loadCertificateConfigRoot();
+
+    // Pre-compute pending fee amounts for the same admission ids (Year-1 tuition + other / Special)
+    // so we can send "Admission Confirmation Pending" SMS alongside certificate SMS.
+    const pendingAmountByAdmissionId = new Map();
+    try {
+      if (admissionIds.length > 0) {
+        const inMarks = admissionIds.map(() => '?').join(',');
+        const [detailRows] = await pool.execute(
+          `SELECT a.id, a.admission_number, a.student_name, a.student_phone, a.father_phone,
+                  a.quota, a.course, a.branch
+           FROM admissions a
+           WHERE a.id IN (${inMarks})`,
+          admissionIds
+        );
+
+        const feeSummaries = await buildTuitionAndOtherFeeSummariesForAdmissionRows(detailRows);
+        for (const row of detailRows || []) {
+          const admissionNumber = String(row.admission_number || '').trim();
+          const summary = feeSummaries.get(admissionNumber);
+          const formatted = formatPendingFeeRow(row, summary);
+          pendingAmountByAdmissionId.set(String(row.id), Number(formatted.totalPending || 0));
+        }
+      }
+    } catch (feeErr) {
+      // SMS should still send for documents even if fee computation fails.
+      console.warn('Failed to precompute pending fee amounts for pending confirmation SMS:', feeErr?.message || feeErr);
+    }
+
     const results = [];
     let sent = 0;
     let skipped = 0;
     let failed = 0;
+
+    let confirmationSent = 0;
+    let confirmationSkipped = 0;
+    let confirmationFailed = 0;
 
     for (const admissionId of admissionIds) {
       const admission = await loadAdmissionForDocumentSms(pool, admissionId);
@@ -2758,6 +2795,34 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
         admission,
         certRoot,
       });
+
+      // Send Admission Confirmation Pending SMS when there is a pending fee amount.
+      // Uses template id + message defined in sms.service.js.
+      let confirmationResult = null;
+      const pendingAmountFromClient = Number(pendingFeeAmountsByAdmissionId?.[String(admission.id)] ?? 0);
+      const pendingAmountFromServer = Number(pendingAmountByAdmissionId.get(String(admission.id)) || 0);
+      const pendingAmount = pendingAmountFromClient > 0 ? pendingAmountFromClient : pendingAmountFromServer;
+      if (pendingAmount > 0 && admission.status !== ADMISSION_CANCELLED_STATUS) {
+        confirmationResult = await smsService.sendAdmissionConfirmationPending(
+          admission.student_phone,
+          admission.student_name,
+          pendingAmount,
+          DOCUMENT_SMS_COLLEGE_PHONE
+        );
+        if (confirmationResult?.success) confirmationSent += 1;
+        else if (confirmationResult?.skipped) confirmationSkipped += 1;
+        else confirmationFailed += 1;
+      } else {
+        confirmationSkipped += 1;
+      }
+
+      if (sendResult && typeof sendResult === 'object') {
+        sendResult.confirmationPendingSms = {
+          pendingAmount,
+          ...((confirmationResult && typeof confirmationResult === 'object') ? confirmationResult : {}),
+        };
+      }
+
       results.push(sendResult);
       if (sendResult.success) sent += 1;
       else if (sendResult.skipped) skipped += 1;
@@ -2772,6 +2837,11 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
         sent,
         skipped,
         failed,
+        confirmationPendingSms: {
+          sent: confirmationSent,
+          skipped: confirmationSkipped,
+          failed: confirmationFailed,
+        },
         results,
       },
       `Document notification SMS finished — sent ${sent}, skipped ${skipped}, failed ${failed}.`,

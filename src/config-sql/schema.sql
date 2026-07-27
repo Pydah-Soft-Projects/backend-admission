@@ -597,6 +597,33 @@ CREATE TABLE IF NOT EXISTS admission_minimum_fee_configs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================
+-- 10c. PENDING FEE + DOCUMENTS SMS DAILY SCHEDULER
+-- Once daily: pick AM (00–11) or PM (12–23) window + one IST time.
+-- enabled_am / enabled_pm are mutually exclusive when enabled.
+-- last_run_date_am stores the single once-per-day run marker.
+-- ============================================
+CREATE TABLE IF NOT EXISTS admission_pending_fee_documents_sms_scheduler (
+    id CHAR(36) PRIMARY KEY,
+    enabled_am BOOLEAN NOT NULL DEFAULT FALSE,
+    enabled_pm BOOLEAN NOT NULL DEFAULT FALSE,
+    am_hour INT NOT NULL DEFAULT 9 CHECK (am_hour >= 0 AND am_hour <= 23),
+    am_minute INT NOT NULL DEFAULT 0 CHECK (am_minute >= 0 AND am_minute <= 59),
+    pm_hour INT NOT NULL DEFAULT 17 CHECK (pm_hour >= 0 AND pm_hour <= 23),
+    pm_minute INT NOT NULL DEFAULT 0 CHECK (pm_minute >= 0 AND pm_minute <= 59),
+    scope_college_id VARCHAR(64) NULL,
+    scope_course_id VARCHAR(64) NULL,
+    scope_course_name VARCHAR(255) NULL,
+    scope_branch_id VARCHAR(64) NULL,
+    scope_branch_name VARCHAR(255) NULL,
+    scope_start_date VARCHAR(32) NULL,
+    scope_end_date VARCHAR(32) NULL,
+    last_run_date_am DATE NULL,
+    last_run_date_pm DATE NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================
 -- 11. ADMISSION RELATIVES TABLE
 -- ============================================
 CREATE TABLE IF NOT EXISTS admission_relatives (

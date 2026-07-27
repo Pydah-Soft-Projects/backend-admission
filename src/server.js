@@ -9,6 +9,7 @@ import { warmupFeeManagementMongo } from './config-mongo/feeManagement.js';
 import { warmupTransportMongo } from './config-mongo/transport.js';
 import { warmupHostelMongo } from './config-mongo/hostel.js';
 import { initLeadReclaimer } from './services/leadReclaimer.service.js';
+import { initAdmissionPendingFeeDocsSmsScheduler } from './services/admissionPendingFeeDocsSmsScheduler.service.js';
 import { resumeRunningSmsBulkJobsOnStartup } from './services/smsBulkJob.service.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
@@ -88,6 +89,10 @@ warmupHostelMongo().catch((err) => {
 const app = express();
 // Lead reclamation: once daily at configured IST wall time (default 23:11; see leadReclaimer.service.js)
 initLeadReclaimer();
+// Pending fee + pending documents SMS dispatch: AM/PM daily (see admissionPendingFeeDocsSmsScheduler.service.js)
+initAdmissionPendingFeeDocsSmsScheduler().catch((e) =>
+  console.error('[Admission Pending SMS Scheduler] startup failed:', e?.message || e)
+);
 
 const PORT = process.env.PORT || 5000;
 
