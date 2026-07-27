@@ -531,6 +531,11 @@ const sanitizePermissions = (permissions = {}) => {
       permission,
     };
     if (key === 'joining' && access) {
+      entry.pageConfirmedLeads = Boolean(value.pageConfirmedLeads);
+      entry.pageSelfRegistration = Boolean(value.pageSelfRegistration);
+      entry.pageJoiningPipeline = Boolean(value.pageJoiningPipeline);
+      entry.pageFeeRequests = Boolean(value.pageFeeRequests);
+      entry.pageAdmissions = Boolean(value.pageAdmissions);
       entry.admissionTabAbstract = Boolean(value.admissionTabAbstract);
       entry.admissionTabStudentInfo = Boolean(value.admissionTabStudentInfo);
       entry.admissionTabReference = Boolean(value.admissionTabReference);
@@ -540,6 +545,9 @@ const sanitizePermissions = (permissions = {}) => {
         entry.editReference = Boolean(value.editReference);
         entry.editAdmission = Boolean(value.editAdmission);
         entry.approveFeeRequest = Boolean(value.approveFeeRequest);
+        if (entry.approveFeeRequest) {
+          entry.pageFeeRequests = true;
+        }
       }
       if (Array.isArray(value.allowedColleges)) {
         entry.allowedColleges = value.allowedColleges
