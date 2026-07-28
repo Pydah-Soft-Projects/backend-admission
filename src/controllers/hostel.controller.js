@@ -714,6 +714,14 @@ export const getHostelStudentDetails = async (req, res) => {
         bedNumber: existingRequest.bedNumber || '',
         roomNumber: existingRequest.roomNumber || '',
         hostelName: hostelName,
+        joiningDate: existingRequest.joiningDate
+          ? new Date(existingRequest.joiningDate).toISOString().slice(0, 10)
+          : null,
+        admitDate: existingRequest.admitDate
+          ? new Date(existingRequest.admitDate).toISOString().slice(0, 10)
+          : existingRequest.createdAt
+            ? new Date(existingRequest.createdAt).toISOString().slice(0, 10)
+            : null,
       });
     }
 

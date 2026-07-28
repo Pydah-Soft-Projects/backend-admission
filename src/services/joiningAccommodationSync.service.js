@@ -221,7 +221,7 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
 
   let bedNumber = existingRequest?.bedNumber || '';
   let lockerNumber = existingRequest?.lockerNumber || '';
-  const roomObjectId = toStoredHostelRefId(transport.roomId);
+  const roomObjectId = transport.roomId ? toStoredHostelRefId(transport.roomId) : null;
   if (transport.roomId && transport.roomNumber && (!bedNumber || !lockerNumber)) {
     const roomDoc = await db.collection('rooms').findOne({ _id: roomObjectId });
     const bedLocker = await resolveNextBedAndLocker(db, {
@@ -233,6 +233,18 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     bedNumber = bedLocker.bedNumber || bedNumber;
     lockerNumber = bedLocker.lockerNumber || lockerNumber;
   }
+
+  const parseHostelDate = (raw) => {
+    if (raw == null || String(raw).trim() === '') return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  // Admit date comes from Step 3 (defaults to today). Never write joiningDate from admissions.
+  const admitDateValue =
+    parseHostelDate(transport.admitDate) ||
+    parseHostelDate(existingRequest?.admitDate) ||
+    parseHostelDate(existingRequest?.createdAt) ||
+    new Date();
 
   // 1. Upsert User (Login/Identity fields only, no room/hostel allocations)
   const userBaseDoc = {
@@ -269,8 +281,9 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
   }
 
   // 2. Upsert StudentMaster (Linked by admissionNumber)
+  let studentMasterId = existingRequest?.studentMasterId || null;
   if (admissionNumber) {
-    await studentmasters.updateOne(
+    const studentMasterResult = await studentmasters.findOneAndUpdate(
       { admissionNumber },
       {
         $set: {
@@ -285,17 +298,24 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
         },
         $setOnInsert: { createdAt: new Date() }
       },
-      { upsert: true }
+      { upsert: true, returnDocument: 'after' }
     );
+    studentMasterId = studentMasterResult?._id || studentMasterResult?.value?._id || studentMasterId;
+    if (!studentMasterId) {
+      const masterDoc = await studentmasters.findOne({ admissionNumber });
+      studentMasterId = masterDoc?._id || null;
+    }
   }
 
   // 3. Upsert HostelRequest (Academic Year source of truth for hostel allocations)
+  // Room is optional until warden assigns one — category-only registration from admissions.
   const hostelRequestDoc = {
     status: 'active',
+    ...(studentMasterId ? { studentMasterId } : {}),
     hostelId: toStoredHostelRefId(transport.hostelId),
     hostelCategoryId: toStoredHostelRefId(transport.categoryId),
-    roomId: roomObjectId,
-    roomNumber: transport.roomNumber || '',
+    ...(roomObjectId ? { roomId: roomObjectId } : {}),
+    ...(transport.roomNumber ? { roomNumber: transport.roomNumber } : {}),
     bedNumber: bedNumber || undefined,
     lockerNumber: lockerNumber || undefined,
     hostelSequenceId: hostelIdAssignment.hostelId,
@@ -307,6 +327,7 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     admissionNumber: admissionNumber || undefined,
     joiningId,
     leadId: leadId || null,
+    admitDate: admitDateValue,
     actualHostelFee: actualFee,
     revisedHostelFee: revisedFee,
     isHostelFeeRevised: revisedFee !== actualFee,
@@ -319,7 +340,10 @@ export async function syncJoiningHostelToHmsMongo({ joiningId, leadId, joiningCo
     existingRequestKey,
     {
       $set: hostelRequestDoc,
-      $setOnInsert: { createdAt: new Date() }
+      $setOnInsert: {
+        createdAt: new Date(),
+        allocatedAt: new Date(),
+      },
     },
     { upsert: true }
   );
@@ -494,6 +518,7 @@ export function previewJoiningHostelSync({ joiningId, leadId, joiningContext, po
           hostelCategoryId: transport.categoryId,
           roomId: transport.roomId || undefined,
           roomNumber: transport.roomNumber || '',
+          admitDate: transport.admitDate || '(defaults to today)',
           hostelSequenceId: collegeCode && courseCode
             ? `(assigned on save — ${collegeCode.trim().toUpperCase()}${courseCode.trim().toUpperCase()}${gender.startsWith('F') ? 'GH' : 'BH'} + 3-digit serial)`
             : '(assigned on save — BH26/GH26 + 3-digit serial per AY)',
