@@ -888,6 +888,413 @@ const parseAdmissionLeadData = (value) => {
   return value && typeof value === 'object' ? value : {};
 };
 
+const APPLICATION_EDIT_HISTORY_KEY = '_applicationEditHistory';
+const APPLICATION_EDIT_HISTORY_MAX = 200;
+
+const normalizeHistoryActorName = (name, fallbackId) => {
+  const named = String(name || '').trim();
+  if (named) return named;
+  const id = String(fallbackId || '').trim();
+  if (!id || /^[0-9a-f-]{36}$/i.test(id)) return '';
+  return id;
+};
+
+const readApplicationEditHistory = (leadData) => {
+  const raw = leadData?.[APPLICATION_EDIT_HISTORY_KEY];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => ({
+      id: String(entry.id || '').trim() || uuidv4(),
+      kind: String(entry.kind || 'update').trim() || 'update',
+      title: String(entry.title || 'Application updated').trim() || 'Application updated',
+      description: String(entry.description || '').trim(),
+      performedById: entry.performedById ? String(entry.performedById) : null,
+      performedByName: String(entry.performedByName || '').trim(),
+      at: entry.at ? String(entry.at) : null,
+      statusFrom: entry.statusFrom != null ? String(entry.statusFrom) : null,
+      statusTo: entry.statusTo != null ? String(entry.statusTo) : null,
+      source: String(entry.source || 'admission').trim() || 'admission',
+    }))
+    .filter((entry) => entry.at);
+};
+
+/** Append an application edit event onto admissions.lead_data (and activity_logs when lead exists). */
+const appendAdmissionApplicationEditHistory = async (
+  pool,
+  {
+    admissionId,
+    leadId,
+    userId,
+    userName,
+    title,
+    description = '',
+    kind = 'update',
+    statusFrom = null,
+    statusTo = null,
+  }
+) => {
+  if (!admissionId || !userId) return;
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, lead_id, lead_data FROM admissions WHERE id = ? LIMIT 1',
+      [admissionId]
+    );
+    if (!rows.length) return;
+    const row = rows[0];
+    const resolvedLeadId = leadId || row.lead_id || null;
+    let resolvedName = normalizeHistoryActorName(userName, userId);
+    if (!resolvedName) {
+      const [users] = await pool.execute('SELECT name FROM users WHERE id = ? LIMIT 1', [userId]);
+      resolvedName = String(users?.[0]?.name || '').trim();
+    }
+
+    const entry = {
+      id: uuidv4(),
+      kind,
+      title: String(title || 'Application updated').trim(),
+      description: String(description || '').trim(),
+      performedById: userId,
+      performedByName: resolvedName,
+      at: new Date().toISOString(),
+      statusFrom: statusFrom || null,
+      statusTo: statusTo || null,
+      source: 'admission',
+    };
+
+    const leadData = parseAdmissionLeadData(row.lead_data);
+    const history = readApplicationEditHistory(leadData);
+    history.push(entry);
+    const nextLeadData = {
+      ...leadData,
+      [APPLICATION_EDIT_HISTORY_KEY]: history.slice(-APPLICATION_EDIT_HISTORY_MAX),
+    };
+
+    await pool.execute(
+      `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+      [JSON.stringify(nextLeadData), userId, admissionId]
+    );
+
+    if (resolvedLeadId) {
+      try {
+        await pool.execute(
+          `INSERT INTO activity_logs (id, lead_id, type, performed_by, comment, metadata, created_at, updated_at)
+           VALUES (?, ?, 'joining_update', ?, ?, ?, NOW(), NOW())`,
+          [
+            uuidv4(),
+            resolvedLeadId,
+            userId,
+            entry.title,
+            JSON.stringify({
+              admissionId,
+              kind: entry.kind,
+              description: entry.description || null,
+              statusFrom: entry.statusFrom,
+              statusTo: entry.statusTo,
+              source: 'admission_application_history',
+            }),
+          ]
+        );
+      } catch (activityError) {
+        console.error('Failed to append admission activity log:', activityError);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to append admission application edit history:', error);
+  }
+};
+
+const resolveUserNamesByIds = async (pool, ids) => {
+  const unique = [
+    ...new Set(
+      (ids || [])
+        .map((id) => (id == null ? '' : String(id).trim()))
+        .filter(Boolean)
+    ),
+  ];
+  if (!unique.length) return {};
+  const [rows] = await pool.execute(
+    `SELECT id, name FROM users WHERE id IN (${unique.map(() => '?').join(',')})`,
+    unique
+  );
+  return Object.fromEntries(
+    (rows || []).map((row) => [String(row.id), String(row.name || '').trim()])
+  );
+};
+
+const pushTimelineEvent = (events, event) => {
+  if (!event?.at) return;
+  events.push({
+    id: String(event.id || uuidv4()),
+    kind: String(event.kind || 'update'),
+    title: String(event.title || 'Application update'),
+    description: String(event.description || '').trim(),
+    performedById: event.performedById || null,
+    performedByName: String(event.performedByName || '').trim() || '—',
+    at: event.at,
+    statusFrom: event.statusFrom || null,
+    statusTo: event.statusTo || null,
+    source: String(event.source || 'system'),
+  });
+};
+
+/**
+ * Timeline of application changes from initial entry through latest updates.
+ * Combines joining milestones, admission milestones, stored edit history, and joining_update activity logs.
+ */
+export const getAdmissionApplicationHistory = async (req, res) => {
+  try {
+    const { admissionId } = req.params;
+    ensureAdmissionId(admissionId);
+
+    const pool = getPool();
+    const [admissions] = await pool.execute(
+      'SELECT * FROM admissions WHERE id = ? LIMIT 1',
+      [admissionId]
+    );
+    if (!admissions.length) {
+      return errorResponse(res, 'Admission record not found', 404);
+    }
+
+    const admission = admissions[0];
+    const leadData = parseAdmissionLeadData(admission.lead_data);
+    let joining = null;
+    if (admission.joining_id) {
+      const [joiningRows] = await pool.execute(
+        'SELECT * FROM joinings WHERE id = ? LIMIT 1',
+        [admission.joining_id]
+      );
+      joining = joiningRows[0] || null;
+    }
+
+    const actorIds = [
+      admission.created_by,
+      admission.updated_by,
+      joining?.created_by,
+      joining?.updated_by,
+      joining?.submitted_by,
+      joining?.approved_by,
+      leadData?._admissionCancellation?.cancelledBy,
+    ];
+    const storedHistory = readApplicationEditHistory(leadData);
+    for (const entry of storedHistory) {
+      if (entry.performedById) actorIds.push(entry.performedById);
+    }
+
+    let activityRows = [];
+    if (admission.lead_id) {
+      const [logs] = await pool.execute(
+        `SELECT a.id, a.type, a.comment, a.metadata, a.created_at, a.old_status, a.new_status,
+                a.performed_by, u.name AS performed_by_name
+         FROM activity_logs a
+         LEFT JOIN users u ON a.performed_by = u.id
+         WHERE a.lead_id = ?
+           AND a.type IN ('joining_update', 'field_update', 'status_change')
+         ORDER BY a.created_at ASC
+         LIMIT 500`,
+        [admission.lead_id]
+      );
+      activityRows = logs || [];
+      for (const log of activityRows) {
+        if (log.performed_by) actorIds.push(log.performed_by);
+      }
+    }
+
+    const nameById = await resolveUserNamesByIds(pool, actorIds);
+    const events = [];
+
+    if (joining?.created_at) {
+      pushTimelineEvent(events, {
+        id: `joining-created-${joining.id}`,
+        kind: 'initial',
+        title: 'Initial application entry',
+        description: 'Joining application first created',
+        performedById: joining.created_by || null,
+        performedByName:
+          nameById[String(joining.created_by || '')] ||
+          normalizeHistoryActorName('', joining.created_by),
+        at: joining.created_at,
+        source: 'joining',
+      });
+    }
+
+    if (joining?.submitted_at) {
+      pushTimelineEvent(events, {
+        id: `joining-submitted-${joining.id}`,
+        kind: 'submitted',
+        title: 'Application submitted for approval',
+        performedById: joining.submitted_by || null,
+        performedByName:
+          nameById[String(joining.submitted_by || '')] ||
+          normalizeHistoryActorName('', joining.submitted_by),
+        at: joining.submitted_at,
+        statusTo: 'pending_approval',
+        source: 'joining',
+      });
+    }
+
+    if (joining?.approved_at) {
+      pushTimelineEvent(events, {
+        id: `joining-approved-${joining.id}`,
+        kind: 'approved',
+        title: 'Application approved',
+        description: 'Joining approved and admission created',
+        performedById: joining.approved_by || null,
+        performedByName:
+          nameById[String(joining.approved_by || '')] ||
+          normalizeHistoryActorName('', joining.approved_by),
+        at: joining.approved_at,
+        statusTo: 'approved',
+        source: 'joining',
+      });
+    }
+
+    if (admission.created_at) {
+      const alreadyHaveJoiningCreated =
+        joining?.created_at &&
+        Math.abs(new Date(admission.created_at).getTime() - new Date(joining.created_at).getTime()) <
+          2000;
+      if (!alreadyHaveJoiningCreated || !joining?.created_at) {
+        pushTimelineEvent(events, {
+          id: `admission-created-${admission.id}`,
+          kind: joining?.created_at ? 'approved' : 'initial',
+          title: joining?.created_at ? 'Admission record created' : 'Initial admission entry',
+          performedById: admission.created_by || null,
+          performedByName:
+            nameById[String(admission.created_by || '')] ||
+            normalizeHistoryActorName('', admission.created_by),
+          at: admission.created_at,
+          source: 'admission',
+        });
+      }
+    }
+
+    for (const entry of storedHistory) {
+      pushTimelineEvent(events, {
+        ...entry,
+        performedByName:
+          entry.performedByName ||
+          nameById[String(entry.performedById || '')] ||
+          '—',
+      });
+    }
+
+    for (const log of activityRows) {
+      let metadata = {};
+      if (log.metadata) {
+        try {
+          metadata =
+            typeof log.metadata === 'string' ? JSON.parse(log.metadata) : log.metadata || {};
+        } catch {
+          metadata = {};
+        }
+      }
+      // Skip duplicates already recorded into admission edit history.
+      if (metadata?.source === 'admission_application_history') continue;
+
+      pushTimelineEvent(events, {
+        id: `activity-${log.id}`,
+        kind: log.type === 'status_change' ? 'status_change' : 'update',
+        title: String(log.comment || 'Application updated').trim() || 'Application updated',
+        description:
+          metadata?.description ||
+          (metadata?.statusFrom || metadata?.statusTo
+            ? `Status ${metadata.statusFrom || log.old_status || '—'} → ${
+                metadata.statusTo || log.new_status || '—'
+              }`
+            : ''),
+        performedById: log.performed_by || null,
+        performedByName:
+          String(log.performed_by_name || '').trim() ||
+          nameById[String(log.performed_by || '')] ||
+          '—',
+        at: log.created_at,
+        statusFrom: metadata.statusFrom || log.old_status || null,
+        statusTo: metadata.statusTo || log.new_status || null,
+        source: 'activity_log',
+      });
+    }
+
+    const cancellation = leadData?._admissionCancellation;
+    if (cancellation?.cancelledAt) {
+      pushTimelineEvent(events, {
+        id: `admission-cancelled-${admission.id}`,
+        kind: 'cancelled',
+        title: 'Admission cancelled',
+        description: String(cancellation.reason || '').trim(),
+        performedById: cancellation.cancelledBy || null,
+        performedByName:
+          String(cancellation.approvedBy || '').trim() ||
+          nameById[String(cancellation.cancelledBy || '')] ||
+          '—',
+        at: cancellation.cancelledAt,
+        statusTo: ADMISSION_CANCELLED_STATUS,
+        source: 'admission',
+      });
+    }
+
+    if (
+      admission.updated_at &&
+      admission.created_at &&
+      new Date(admission.updated_at).getTime() - new Date(admission.created_at).getTime() > 2000
+    ) {
+      const updatedMs = new Date(admission.updated_at).getTime();
+      const hasNearbyEvent = events.some(
+        (event) => Math.abs(new Date(event.at).getTime() - updatedMs) < 5000
+      );
+      if (!hasNearbyEvent) {
+        pushTimelineEvent(events, {
+          id: `admission-updated-${admission.id}-${updatedMs}`,
+          kind: 'update',
+          title: 'Last admission update',
+          performedById: admission.updated_by || null,
+          performedByName:
+            nameById[String(admission.updated_by || '')] ||
+            normalizeHistoryActorName('', admission.updated_by),
+          at: admission.updated_at,
+          source: 'admission',
+        });
+      }
+    }
+
+    events.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+
+    // Light de-dupe: same title + actor within 3s.
+    const deduped = [];
+    for (const event of events) {
+      const prev = deduped[deduped.length - 1];
+      if (
+        prev &&
+        prev.title === event.title &&
+        prev.performedByName === event.performedByName &&
+        Math.abs(new Date(prev.at).getTime() - new Date(event.at).getTime()) < 3000
+      ) {
+        continue;
+      }
+      deduped.push(event);
+    }
+
+    return successResponse(
+      res,
+      {
+        admissionId: admission.id,
+        joiningId: admission.joining_id || null,
+        leadId: admission.lead_id || null,
+        events: deduped,
+      },
+      'Admission application history retrieved successfully',
+      200
+    );
+  } catch (error) {
+    console.error('Error fetching admission application history:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to fetch admission application history',
+      error.statusCode || 500
+    );
+  }
+};
+
 /**
  * Persist Excel "Reference 1" on admission + linked joining + CRM lead (same as import script).
  * Stored at lead_data.reference1 (admissions/joinings) and dynamic_fields.reference1 (leads).
@@ -1136,7 +1543,7 @@ export const formatAdmission = async (admissionData, pool) => {
   const admissionId = admissionData.id;
 
   // Fetch related data in parallel (detail view).
-  const [relativesResult, educationHistoryResult, siblingsResult] = await Promise.all([
+  const [relativesResult, educationHistoryResult, siblingsResult, actorNamesResult] = await Promise.all([
     pool.execute('SELECT * FROM admission_relatives WHERE admission_id = ?', [admissionId]),
     pool.execute(
       'SELECT * FROM admission_education_history WHERE admission_id = ? ORDER BY created_at ASC',
@@ -1146,10 +1553,32 @@ export const formatAdmission = async (admissionData, pool) => {
       'SELECT * FROM admission_siblings WHERE admission_id = ? ORDER BY created_at ASC',
       [admissionId]
     ),
+    (async () => {
+      const ids = [
+        ...new Set(
+          [admissionData.created_by, admissionData.updated_by]
+            .map((id) => (id == null ? '' : String(id).trim()))
+            .filter(Boolean)
+        ),
+      ];
+      if (ids.length === 0) return { createdByName: '', updatedByName: '' };
+      const [rows] = await pool.execute(
+        `SELECT id, name FROM users WHERE id IN (${ids.map(() => '?').join(',')})`,
+        ids
+      );
+      const nameById = Object.fromEntries(
+        (rows || []).map((row) => [String(row.id), String(row.name || '').trim()])
+      );
+      return {
+        createdByName: nameById[String(admissionData.created_by || '').trim()] || '',
+        updatedByName: nameById[String(admissionData.updated_by || '').trim()] || '',
+      };
+    })(),
   ]);
   const relatives = relativesResult[0];
   const educationHistory = educationHistoryResult[0];
   const siblings = siblingsResult[0];
+  const { createdByName, updatedByName } = actorNamesResult;
 
   // Parse JSON fields
   const leadDataRaw = typeof admissionData.lead_data === 'string'
@@ -1170,6 +1599,7 @@ export const formatAdmission = async (admissionData, pool) => {
             _joiningProgramLevel,
             _joiningManagedCourseId,
             _joiningManagedBranchId,
+            _applicationEditHistory,
             ...rest
           } = leadDataRaw;
           return rest;
@@ -1336,6 +1766,8 @@ export const formatAdmission = async (admissionData, pool) => {
     },
     createdBy: admissionData.created_by,
     updatedBy: admissionData.updated_by,
+    createdByName,
+    updatedByName,
     createdAt: admissionData.created_at,
     updatedAt: admissionData.updated_at,
     remarks: admissionData.remarks || '',
@@ -2335,6 +2767,17 @@ export const cancelAdmissionById = async (req, res) => {
       })
     );
 
+    await appendAdmissionApplicationEditHistory(pool, {
+      admissionId,
+      leadId: admissionData.lead_id,
+      userId: req.user.id,
+      userName: req.user.name,
+      kind: 'cancelled',
+      title: 'Admission cancelled',
+      description: reason,
+      statusTo: ADMISSION_CANCELLED_STATUS,
+    });
+
     clearAdmissionQueryCache();
 
     return successResponse(
@@ -2466,7 +2909,6 @@ export const sendAdmissionConfirmationSmsById = async (req, res) => {
 const IMPORTANT_FLAT_DOCUMENT_LABELS = {
   document_ssc: 'SSC',
   document_inter: 'Intermediate',
-  document_ug_pg_cmm: 'UG / PG CMM',
   document_transfer_certificate: 'Transfer Certificate',
   document_study_certificate: 'Study Certificate',
 };
@@ -3234,6 +3676,16 @@ export const updateAdmissionById = async (req, res) => {
       })
     );
 
+    await appendAdmissionApplicationEditHistory(pool, {
+      admissionId,
+      leadId: formattedAdmission.leadId,
+      userId: req.user.id,
+      userName: req.user.name,
+      kind: 'update',
+      title: 'Admission application updated',
+      description: 'Admission record saved',
+    });
+
     return successResponse(
       res,
       formattedAdmission,
@@ -3528,6 +3980,16 @@ export const updateAdmissionByLead = async (req, res) => {
       })
     );
 
+    await appendAdmissionApplicationEditHistory(pool, {
+      admissionId,
+      leadId: formattedAdmission.leadId,
+      userId: req.user.id,
+      userName: req.user.name,
+      kind: 'update',
+      title: 'Admission application updated',
+      description: 'Admission record saved',
+    });
+
     return successResponse(
       res,
       formattedAdmission,
@@ -3562,6 +4024,16 @@ export const patchAdmissionReferenceById = async (req, res) => {
 
     const [updated] = await pool.execute('SELECT * FROM admissions WHERE id = ?', [admissionId]);
     const formattedAdmission = await formatAdmission(updated[0], pool);
+
+    await appendAdmissionApplicationEditHistory(pool, {
+      admissionId,
+      leadId: formattedAdmission.leadId,
+      userId: req.user.id,
+      userName: req.user.name,
+      kind: 'update',
+      title: 'Reference updated',
+      description: 'Admission reference changed',
+    });
 
     return successResponse(res, formattedAdmission, 'Reference updated successfully', 200);
   } catch (error) {
@@ -3599,6 +4071,16 @@ export const patchAdmissionRemarksById = async (req, res) => {
       formattedAdmission.admissionNumber
     );
     warnIfSecondaryStudentSyncMissed('patchAdmissionRemarksById', { admissionId }, syncResult);
+
+    await appendAdmissionApplicationEditHistory(pool, {
+      admissionId,
+      leadId: formattedAdmission.leadId,
+      userId: req.user.id,
+      userName: req.user.name,
+      kind: 'update',
+      title: 'Remarks updated',
+      description: 'Admission remarks changed',
+    });
 
     return successResponse(res, formattedAdmission, 'Admission remarks updated successfully', 200);
   } catch (error) {
@@ -4844,8 +5326,6 @@ const OTHER_DOCUMENT_FIELDS_ALWAYS = [
   { column: 'document_photos', label: 'Photos (5)' },
   { column: 'document_income_certificate', label: 'Income Certificate' },
   { column: 'document_caste_certificate', label: 'Caste Certificate' },
-  { column: 'document_bank_passbook', label: 'Bank Pass Book' },
-  { column: 'document_ration_card', label: 'Ration Card' },
 ];
 
 /** CET / allotment docs — hidden for Management quota (same as joining other-documents checklist). */

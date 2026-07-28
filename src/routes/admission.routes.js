@@ -9,6 +9,7 @@ import { searchHrmsEmployees } from '../controllers/user.controller.js';
 import {
   listAdmissions,
   getAdmissionById,
+  getAdmissionApplicationHistory,
   getAdmissionByJoiningId,
   getAdmissionByLead,
   cancelAdmissionById,
@@ -85,6 +86,7 @@ router.put(
 
 router.post('/send-document-notification-bulk', sendDocumentNotificationSmsBulk);
 router.get('/', listAdmissions);
+router.get('/id/:admissionId/history', getAdmissionApplicationHistory);
 router.get('/id/:admissionId', getAdmissionById);
 router.get('/joining/:joiningId', getAdmissionByJoiningId);
 router.get('/:leadId', getAdmissionByLead); // Keep for backward compatibility
