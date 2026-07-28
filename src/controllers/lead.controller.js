@@ -19,6 +19,7 @@ import {
 } from '../utils/studentQuotas.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
+import { SELF_REGISTRATION_SOURCE } from '../utils/joiningSelfRegistration.util.js';
 
 const deleteQueue = new PQueue({
   concurrency: Number(process.env.LEAD_DELETE_CONCURRENCY || 1),
@@ -172,6 +173,12 @@ const buildLeadFilterConditions = (req, alias = 'l') => {
           AND j_stale.status = 'approved'
           AND TRIM(COALESCE(a_stale.admission_number, '')) <> ''
       )`);
+      // Self-registration requests stay on Self Registration only — never Confirmed Leads.
+      conditions.push(`NOT (
+        TRIM(COALESCE(${p}source, '')) = ?
+        OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(${p}dynamic_fields, '$.createdFrom')), '')) = 'self_registration'
+      )`);
+      params.push(SELF_REGISTRATION_SOURCE);
     }
   }
   if (callStatus) { conditions.push(`${p}call_status = ?`); params.push(callStatus); }

@@ -11,6 +11,7 @@ import {
   patchJoiningStepTwo,
   submitJoiningForApproval,
   approveJoining,
+  deleteSelfRegistrationJoining,
 } from '../controllers/joining.controller.js';
 import {
   createJoiningPublicEditLink,
@@ -37,6 +38,7 @@ router.patch('/:leadId/step-two', requireJoiningEditAdmission, patchJoiningStepT
 router.post('/:leadId', saveJoiningDraft);
 router.post('/:leadId/submit', submitJoiningForApproval);
 router.post('/:leadId/approve', isSuperAdmin, approveJoining);
+router.delete('/:leadId', isSuperAdmin, deleteSelfRegistrationJoining);
 
 export default router;
 

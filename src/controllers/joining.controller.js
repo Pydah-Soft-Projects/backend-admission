@@ -42,6 +42,7 @@ import {
   SQL_JOINING_IS_SELF_REGISTRATION,
   createSelfRegistrationLeadAndJoining,
   isSelfRegistrationLead,
+  isSelfRegistrationLeadData,
 } from '../utils/joiningSelfRegistration.util.js';
 import { resolveJoiningFormLeadSource } from '../utils/joiningFormSource.util.js';
 import {
@@ -1121,6 +1122,26 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     updatedBy: joiningData.updated_by,
     createdAt: joiningData.created_at,
     updatedAt: joiningData.updated_at,
+    // Present when list query LEFT JOINs admissions (self-registration approved clarity).
+    ...(Object.prototype.hasOwnProperty.call(joiningData, 'list_admission_id')
+      ? {
+          admissionId: joiningData.list_admission_id
+            ? String(joiningData.list_admission_id)
+            : undefined,
+          admissionNumber: joiningData.list_admission_number
+            ? String(joiningData.list_admission_number).trim()
+            : '',
+          admissionStatus: joiningData.list_admission_status
+            ? String(joiningData.list_admission_status).trim()
+            : '',
+          admissionConfirmed: Boolean(
+            joiningData.list_admission_id &&
+              String(joiningData.list_admission_number || '').trim() &&
+              String(joiningData.list_admission_status || '').trim().toLowerCase() !==
+                'admission cancelled'
+          ),
+        }
+      : {}),
   };
 };
 
@@ -1209,6 +1230,25 @@ export const listJoinings = async (req, res) => {
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
+    // Same filters without status — used for inline Draft / Pending / Approved stats.
+    const statusCountConditions = [];
+    const statusCountParams = [];
+    {
+      let paramIdx = 0;
+      for (const condition of conditions) {
+        const placeholderCount = (condition.match(/\?/g) || []).length;
+        const slice = params.slice(paramIdx, paramIdx + placeholderCount);
+        paramIdx += placeholderCount;
+        if (condition === 'j.status = ?' || condition.startsWith('j.status IN (')) {
+          continue;
+        }
+        statusCountConditions.push(condition);
+        statusCountParams.push(...slice);
+      }
+    }
+    const statusCountWhere =
+      statusCountConditions.length > 0 ? `WHERE ${statusCountConditions.join(' AND ')}` : '';
+
     // Get total count
     const [countResult] = await pool.execute(
       `SELECT COUNT(*) as total
@@ -1219,15 +1259,38 @@ export const listJoinings = async (req, res) => {
     );
     const total = countResult[0]?.total || 0;
 
+    const [statusCountRows] = await pool.execute(
+      `SELECT j.status AS status, COUNT(*) AS total
+       FROM joinings j
+       LEFT JOIN leads l ON j.lead_id = l.id
+       ${statusCountWhere}
+       GROUP BY j.status`,
+      statusCountParams
+    );
+    const statusCounts = {
+      draft: 0,
+      pending_approval: 0,
+      approved: 0,
+    };
+    for (const row of statusCountRows || []) {
+      const key = String(row.status || '').trim();
+      if (key in statusCounts) {
+        statusCounts[key] = Number(row.total) || 0;
+      }
+    }
+
     // Get paginated results
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const [joinings] = await pool.execute(
       `SELECT j.*, l.name as lead_name, l.phone as lead_phone, l.hall_ticket_number as lead_hall_ticket_number,
               l.enquiry_number as lead_enquiry_number, l.lead_status as lead_lead_status,
               l.course_interested as lead_course_interested, l.mandal as lead_mandal, l.district as lead_district,
-              l.quota as lead_quota, l.father_phone as lead_father_phone
+              l.quota as lead_quota, l.father_phone as lead_father_phone,
+              a.id AS list_admission_id, a.admission_number AS list_admission_number,
+              a.status AS list_admission_status
        FROM joinings j
        LEFT JOIN leads l ON j.lead_id = l.id
+       LEFT JOIN admissions a ON a.joining_id = j.id
        ${whereClause}
        ORDER BY j.updated_at DESC
        LIMIT ${Number(paginationLimit)} OFFSET ${Number(offset)}`,
@@ -1249,6 +1312,7 @@ export const listJoinings = async (req, res) => {
           total,
           pages: Math.ceil(total / paginationLimit) || 1,
         },
+        statusCounts,
       },
       'Joining records retrieved successfully',
       200
@@ -3790,5 +3854,158 @@ export const approveJoining = async (req, res) => {
   }
 };
 
+/**
+ * Delete a self-registration joining + its lead (draft / pending only; no admission row).
+ * @route DELETE /api/joinings/:leadId
+ */
+export const deleteSelfRegistrationJoining = async (req, res) => {
+  let connection;
+  try {
+    const pool = getPool();
+    const routeKey = String(req.params.leadId || '').trim();
+    if (!routeKey) {
+      return errorResponse(res, 'Lead id is required', 400);
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT j.id AS joining_id, j.status AS joining_status, j.lead_id,
+              j.lead_data, l.source AS lead_source, l.dynamic_fields AS lead_dynamic_fields,
+              l.enquiry_number
+       FROM joinings j
+       LEFT JOIN leads l ON l.id = j.lead_id
+       WHERE j.lead_id = ? OR j.id = ?
+       ORDER BY (j.lead_id = ?) DESC
+       LIMIT 1`,
+      [routeKey, routeKey, routeKey]
+    );
+
+    if (!rows.length) {
+      return errorResponse(res, 'Self-registration joining not found', 404);
+    }
+
+    const row = rows[0];
+    let leadData = row.lead_data;
+    if (typeof leadData === 'string') {
+      try {
+        leadData = JSON.parse(leadData);
+      } catch {
+        leadData = {};
+      }
+    }
+    let leadDynamicFields = row.lead_dynamic_fields;
+    if (typeof leadDynamicFields === 'string') {
+      try {
+        leadDynamicFields = JSON.parse(leadDynamicFields);
+      } catch {
+        leadDynamicFields = {};
+      }
+    }
+    const leadLike = {
+      source: row.lead_source || leadData?.source,
+      dynamic_fields: leadDynamicFields,
+      dynamicFields: leadDynamicFields,
+    };
+    if (!isSelfRegistrationLead(leadLike) && !isSelfRegistrationLeadData(leadData)) {
+      return errorResponse(res, 'Only self-registration requests can be deleted here', 400);
+    }
+
+    const status = String(row.joining_status || '').trim();
+    if (status === 'approved') {
+      return errorResponse(
+        res,
+        'Approved self-registrations cannot be deleted from this page. Cancel via Admissions if needed.',
+        400
+      );
+    }
+    if (status !== 'draft' && status !== 'pending_approval') {
+      return errorResponse(res, `Cannot delete joining in status "${status}"`, 400);
+    }
+
+    const [admissions] = await pool.execute(
+      'SELECT id FROM admissions WHERE joining_id = ? LIMIT 1',
+      [row.joining_id]
+    );
+    if (admissions.length > 0) {
+      return errorResponse(
+        res,
+        'This self-registration already has an admission record and cannot be deleted here',
+        400
+      );
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const tokenKeys = [...new Set([row.joining_id, row.lead_id, routeKey].filter(Boolean))];
+    if (tokenKeys.length > 0) {
+      const placeholders = tokenKeys.map(() => '?').join(',');
+      await connection.execute(
+        `DELETE FROM joining_public_edit_tokens WHERE route_key IN (${placeholders})`,
+        tokenKeys
+      );
+    }
+
+    try {
+      await connection.execute('DELETE FROM payment_transactions WHERE joining_id = ?', [
+        row.joining_id,
+      ]);
+    } catch {
+      // Table / FK may not exist in all environments.
+    }
+
+    await connection.execute('DELETE FROM joinings WHERE id = ?', [row.joining_id]);
+
+    if (row.lead_id) {
+      await connection.execute('DELETE FROM activity_logs WHERE lead_id = ?', [row.lead_id]);
+      try {
+        await connection.execute('DELETE FROM whatsapp_conversations WHERE lead_id = ?', [
+          row.lead_id,
+        ]);
+      } catch {
+        // Optional table.
+      }
+      await connection.execute('DELETE FROM leads WHERE id = ?', [row.lead_id]);
+    }
+
+    await connection.commit();
+
+    // Best-effort fee mongo cleanup (draft/pending usually have none).
+    try {
+      const { connectFeeManagement } = await import('../config-mongo/feeManagement.js');
+      const { JOINING_STUDENT_FEE_MONGO_COLLECTION } = await import(
+        '../services/joiningStudentFeeMongoSync.service.js'
+      );
+      if (process.env.FEE_MANAGEMENT_MONGO_URI?.trim()) {
+        const m = await connectFeeManagement();
+        await m.db
+          .collection(JOINING_STUDENT_FEE_MONGO_COLLECTION)
+          .deleteOne({ joiningId: row.joining_id });
+      }
+    } catch {
+      // Ignore mongo cleanup failures after SQL commit.
+    }
+
+    return successResponse(
+      res,
+      {
+        deletedJoiningId: row.joining_id,
+        deletedLeadId: row.lead_id || null,
+        enquiryNumber: row.enquiry_number || leadData?.enquiryNumber || null,
+      },
+      'Self-registration deleted',
+      200
+    );
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error('Error deleting self-registration:', error);
+    return errorResponse(
+      res,
+      error.message || 'Failed to delete self-registration',
+      error.statusCode || 500
+    );
+  } finally {
+    if (connection) connection.release();
+  }
+};
 
 
