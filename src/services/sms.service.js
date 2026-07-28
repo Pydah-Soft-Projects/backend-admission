@@ -388,10 +388,25 @@ const smsService = {
    *
    * DLT template id (provided by user): 1777178496518000671
    */
-  sendAdmissionConfirmationPending: async (mobileNumber, name, pendingAmount, collegePhone = '+91 73820 15999') => {
+  sendAdmissionConfirmationPending: async (
+    mobileNumber,
+    name,
+    pendingAmount,
+    collegePhone = '+91 73820 15999',
+    options = {}
+  ) => {
     if (!BULK_SMS_API_KEY) {
       console.warn('BULK_SMS_API_KEY is not set. Admission Confirmation Pending SMS skipped (Dev Mode).');
       return { success: true, message: 'SMS simulation successful (Dev Mode)' };
+    }
+
+    const meritYes = options?.meritYes === true;
+    if (meritYes) {
+      return {
+        success: false,
+        skipped: true,
+        error: 'merit_student_excluded',
+      };
     }
 
     const cleanNumber = String(mobileNumber || '').replace(/\D/g, '').slice(-10);

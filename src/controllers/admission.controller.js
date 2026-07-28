@@ -2539,7 +2539,7 @@ const resolveImportantPendingDocumentsForRow = (admission, certRoot) => {
 
 const loadAdmissionForDocumentSms = async (pool, admissionId) => {
   const [rows] = await pool.execute(
-    `SELECT id, status, student_name, student_phone, lead_id, lead_data,
+    `SELECT id, status, student_name, student_phone, lead_id, lead_data, qualification_merit,
             document_ssc, document_inter, document_ug_pg_cmm,
             document_transfer_certificate, document_study_certificate,
             JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningProgramLevel')) AS program_level,
@@ -2741,19 +2741,92 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
     const pool = getPool();
     const certRoot = await loadCertificateConfigRoot();
 
+    const normalizeMinimumFeeMatchKey = (value) =>
+      String(value ?? '')
+        .trim()
+        .toLowerCase();
+    const resolveMinimumFeeAmountForSms = (configs, match) => {
+      if (!Array.isArray(configs) || configs.length === 0) return 0;
+      const quota = normalizeMinimumFeeMatchKey(match?.quota);
+      const courseId = String(match?.courseId ?? '').trim();
+      const courseName = normalizeMinimumFeeMatchKey(match?.courseName);
+      const branchId = String(match?.branchId ?? '').trim();
+      const branchName = normalizeMinimumFeeMatchKey(match?.branchName);
+      if (courseId && branchId && quota) {
+        const byCourseId = configs.find(
+          (c) =>
+            String(c.courseId ?? '').trim() === courseId &&
+            String(c.branchId ?? '').trim() === branchId &&
+            normalizeMinimumFeeMatchKey(c.quota) === quota
+        );
+        if (byCourseId) return Number(byCourseId.amount) || 0;
+      }
+      if (courseName && branchName && quota) {
+        const byCourseName = configs.find(
+          (c) =>
+            normalizeMinimumFeeMatchKey(c.courseName) === courseName &&
+            normalizeMinimumFeeMatchKey(c.branchName) === branchName &&
+            normalizeMinimumFeeMatchKey(c.quota) === quota
+        );
+        if (byCourseName) return Number(byCourseName.amount) || 0;
+      }
+      if (branchId && quota) {
+        const byQuota = configs.filter(
+          (c) =>
+            String(c.branchId ?? '').trim() === branchId &&
+            normalizeMinimumFeeMatchKey(c.quota) === quota
+        );
+        if (byQuota.length === 1) return Number(byQuota[0].amount) || 0;
+      }
+      if (courseId && quota) {
+        const courseLevel = configs.find(
+          (c) =>
+            String(c.courseId ?? '').trim() === courseId &&
+            String(c.branchId ?? '').trim() === '' &&
+            normalizeMinimumFeeMatchKey(c.quota) === quota
+        );
+        if (courseLevel) return Number(courseLevel.amount) || 0;
+      }
+      if (courseName && quota) {
+        const byCourseName = configs.find(
+          (c) =>
+            normalizeMinimumFeeMatchKey(c.courseName) === courseName &&
+            String(c.branchId ?? '').trim() === '' &&
+            normalizeMinimumFeeMatchKey(c.quota) === quota
+        );
+        if (byCourseName) return Number(byCourseName.amount) || 0;
+      }
+      return 0;
+    };
+
     // Pre-compute pending fee amounts for the same admission ids (Year-1 tuition + other / Special)
     // so we can send "Admission Confirmation Pending" SMS alongside certificate SMS.
     const pendingAmountByAdmissionId = new Map();
+    const hasMatchingMinimumFeeConfigByAdmissionId = new Map();
     try {
       if (admissionIds.length > 0) {
         const inMarks = admissionIds.map(() => '?').join(',');
         const [detailRows] = await pool.execute(
           `SELECT a.id, a.admission_number, a.student_name, a.student_phone, a.father_phone,
-                  a.quota, a.course, a.branch
+                  a.quota, a.course, a.branch, a.managed_course_id, a.course_id, a.managed_branch_id, a.branch_id
            FROM admissions a
            WHERE a.id IN (${inMarks})`,
           admissionIds
         );
+
+        const [minimumFeeConfigRows] = await pool.execute(
+          `SELECT college_id, course_id, course_name, branch_id, branch_name, quota, amount
+           FROM admission_minimum_fee_configs`
+        );
+        const minimumFeeConfigs = (minimumFeeConfigRows || []).map((row) => ({
+          collegeId: String(row.college_id ?? ''),
+          courseId: String(row.course_id ?? ''),
+          courseName: String(row.course_name ?? ''),
+          branchId: String(row.branch_id ?? ''),
+          branchName: String(row.branch_name ?? ''),
+          quota: String(row.quota ?? ''),
+          amount: Number(row.amount) || 0,
+        }));
 
         const feeSummaries = await buildTuitionAndOtherFeeSummariesForAdmissionRows(detailRows);
         for (const row of detailRows || []) {
@@ -2761,6 +2834,17 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
           const summary = feeSummaries.get(admissionNumber);
           const formatted = formatPendingFeeRow(row, summary);
           pendingAmountByAdmissionId.set(String(row.id), Number(formatted.totalPending || 0));
+          const minimumFeeAmount = resolveMinimumFeeAmountForSms(minimumFeeConfigs, {
+            courseId: row.managed_course_id || row.course_id,
+            courseName: row.course,
+            branchId: row.managed_branch_id || row.branch_id,
+            branchName: row.branch,
+            quota: row.quota,
+          });
+          hasMatchingMinimumFeeConfigByAdmissionId.set(
+            String(row.id),
+            minimumFeeAmount > 0
+          );
         }
       }
     } catch (feeErr) {
@@ -2802,12 +2886,24 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
       const pendingAmountFromClient = Number(pendingFeeAmountsByAdmissionId?.[String(admission.id)] ?? 0);
       const pendingAmountFromServer = Number(pendingAmountByAdmissionId.get(String(admission.id)) || 0);
       const pendingAmount = pendingAmountFromClient > 0 ? pendingAmountFromClient : pendingAmountFromServer;
-      if (pendingAmount > 0 && admission.status !== ADMISSION_CANCELLED_STATUS) {
+      const hasMatchingMinimumFeeConfig =
+        hasMatchingMinimumFeeConfigByAdmissionId.size === 0
+          ? pendingAmountFromClient > 0
+          : hasMatchingMinimumFeeConfigByAdmissionId.get(String(admission.id)) === true;
+      if (
+        pendingAmount > 0 &&
+        hasMatchingMinimumFeeConfig &&
+        admission.status !== ADMISSION_CANCELLED_STATUS
+      ) {
         confirmationResult = await smsService.sendAdmissionConfirmationPending(
           admission.student_phone,
           admission.student_name,
           pendingAmount,
-          DOCUMENT_SMS_COLLEGE_PHONE
+          DOCUMENT_SMS_COLLEGE_PHONE,
+          {
+            meritYes:
+              admission.qualification_merit === 1 || admission.qualification_merit === true,
+          }
         );
         if (confirmationResult?.success) confirmationSent += 1;
         else if (confirmationResult?.skipped) confirmationSkipped += 1;

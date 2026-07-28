@@ -107,34 +107,76 @@ function resolveMinimumFeeAmount(configs, match) {
   const courseId = String(match?.courseId ?? '').trim();
   const collegeId = String(match?.collegeId ?? '').trim();
   const courseName = normalizeLower(match?.courseName);
+  const branchId = String(match?.branchId ?? '').trim();
+  const branchName = normalizeLower(match?.branchName);
 
-  if (collegeId && courseId && quota) {
+  if (collegeId && courseId && branchId && quota) {
     const exact = configs.find(
       (c) =>
         String(c.collegeId ?? '').trim() === collegeId &&
         String(c.courseId ?? '').trim() === courseId &&
+        String(c.branchId ?? '').trim() === branchId &&
         normalizeLower(c.quota) === quota
     );
     if (exact) return Number(exact.amount) || 0;
   }
 
-  if (courseId && quota) {
+  if (courseId && branchId && quota) {
     const byCourseId = configs.find(
-      (c) => String(c.courseId ?? '').trim() === courseId && normalizeLower(c.quota) === quota
+      (c) =>
+        String(c.courseId ?? '').trim() === courseId &&
+        String(c.branchId ?? '').trim() === branchId &&
+        normalizeLower(c.quota) === quota
     );
     if (byCourseId) return Number(byCourseId.amount) || 0;
   }
 
-  if (courseName && quota) {
+  if (courseName && branchName && quota) {
     const byCourseName = configs.find(
-      (c) => normalizeLower(c.courseName) === courseName && normalizeLower(c.quota) === quota
+      (c) =>
+        normalizeLower(c.courseName) === courseName &&
+        normalizeLower(c.branchName) === branchName &&
+        normalizeLower(c.quota) === quota
     );
     if (byCourseName) return Number(byCourseName.amount) || 0;
   }
 
-  if (quota) {
-    const byQuota = configs.filter((c) => normalizeLower(c.quota) === quota);
-    if (byQuota.length === 1) return Number(byQuota[0].amount) || 0;
+  if (branchId && quota) {
+    const byBranch = configs.filter(
+      (c) => String(c.branchId ?? '').trim() === branchId && normalizeLower(c.quota) === quota
+    );
+    if (byBranch.length === 1) return Number(byBranch[0].amount) || 0;
+  }
+
+  if (collegeId && courseId && quota) {
+    const courseLevel = configs.find(
+      (c) =>
+        String(c.collegeId ?? '').trim() === collegeId &&
+        String(c.courseId ?? '').trim() === courseId &&
+        String(c.branchId ?? '').trim() === '' &&
+        normalizeLower(c.quota) === quota
+    );
+    if (courseLevel) return Number(courseLevel.amount) || 0;
+  }
+
+  if (courseId && quota) {
+    const byCourse = configs.find(
+      (c) =>
+        String(c.courseId ?? '').trim() === courseId &&
+        String(c.branchId ?? '').trim() === '' &&
+        normalizeLower(c.quota) === quota
+    );
+    if (byCourse) return Number(byCourse.amount) || 0;
+  }
+
+  if (courseName && quota) {
+    const byCourseName = configs.find(
+      (c) =>
+        normalizeLower(c.courseName) === courseName &&
+        String(c.branchId ?? '').trim() === '' &&
+        normalizeLower(c.quota) === quota
+    );
+    if (byCourseName) return Number(byCourseName.amount) || 0;
   }
 
   return 0;
@@ -152,6 +194,8 @@ function resolvePendingFeeAmounts(row, minimumFeeConfigs, matchContext) {
     collegeId: matchContext?.collegeId,
     courseId: matchContext?.courseId,
     courseName: matchContext?.courseName ?? row?.course,
+    branchId: matchContext?.branchId,
+    branchName: matchContext?.branchName ?? row?.branch,
     quota: row?.quota ?? matchContext?.quota,
   });
 
@@ -171,7 +215,7 @@ function isFeeStillPending(row, minimumFeeConfigs, matchContext) {
 
   const { unpaid, usingMinFee } = resolvePendingFeeAmounts(row, minimumFeeConfigs, matchContext);
   if (usingMinFee) return unpaid > FEE_UNPAID_TOLERANCE;
-  return row?.feeStatus === 'unpaid' || Number(row?.totalPending || 0) > FEE_UNPAID_TOLERANCE;
+  return false;
 }
 
 /**
@@ -320,6 +364,8 @@ async function loadMinimumFeeConfigs(pool) {
       collegeName: String(r.college_name ?? ''),
       courseId: String(r.course_id ?? ''),
       courseName: String(r.course_name ?? ''),
+      branchId: String(r.branch_id ?? ''),
+      branchName: String(r.branch_name ?? ''),
       quota: String(r.quota ?? ''),
       amount: Number(r.amount) || 0,
     }));
@@ -338,7 +384,7 @@ async function loadAdmissionMeta(pool, admissionIds) {
     const chunk = admissionIds.slice(i, i + CHUNK);
     const inMarks = chunk.map(() => '?').join(',');
     const [rows] = await pool.execute(
-      `SELECT id, managed_course_id, course_id, course
+      `SELECT id, managed_course_id, course_id, managed_branch_id, branch_id, course, branch
        FROM admissions
        WHERE id IN (${inMarks})`,
       chunk
@@ -349,7 +395,9 @@ async function loadAdmissionMeta(pool, admissionIds) {
       out.set(String(r.id), {
         collegeId: '',
         courseId: managedCourseId || String(r.course_id ?? '').trim(),
+        branchId: String(r.managed_branch_id ?? r.branch_id ?? '').trim(),
         courseName: String(r.course ?? ''),
+        branchName: String(r.branch ?? ''),
         managedCourseId,
       });
     }
@@ -427,6 +475,8 @@ async function dispatchDailySms({ todayYmd, configRow }) {
         collegeId: meta.collegeId,
         courseId: meta.courseId,
         courseName: String(r.course ?? meta.courseName ?? ''),
+        branchId: meta.branchId,
+        branchName: String(r.branch ?? meta.branchName ?? ''),
         quota: r.quota,
       };
       if (isFeeStillPending(r, minFeeConfigs, matchContext)) {
@@ -443,6 +493,8 @@ async function dispatchDailySms({ todayYmd, configRow }) {
         collegeId: meta.collegeId,
         courseId: meta.courseId,
         courseName: String(r.course ?? meta.courseName ?? ''),
+        branchId: meta.branchId,
+        branchName: String(r.branch ?? meta.branchName ?? ''),
         quota: r.quota,
       });
       pendingFeeAmountsByAdmissionId[String(admissionId)] = Number(unpaid) || 0;
