@@ -3311,15 +3311,20 @@ export const approveJoining = async (req, res) => {
       return errorResponse(res, 'Joining draft not found', 404);
     }
 
-    if (joining.status !== 'pending_approval' && joining.status !== 'approved') {
+    // draft → first fee collect / explicit approve; pending_approval kept for legacy queue rows
+    if (
+      joining.status !== 'draft' &&
+      joining.status !== 'pending_approval' &&
+      joining.status !== 'approved'
+    ) {
       return errorResponse(
         res,
-        'Only submissions awaiting approval can be approved',
+        'Only draft or pending joining forms can be approved',
         400
       );
     }
 
-    if (joining.status === 'pending_approval') {
+    if (joining.status === 'pending_approval' || joining.status === 'draft') {
       const { courseId, branchId } = getEffectiveManagedCourseBranchIds(joining);
       const quotaOk = String(joining.quota ?? '').trim() !== '';
       const collegeOk = registrationExtrasHaveCollegeSelection(joining);
@@ -3853,6 +3858,103 @@ export const approveJoining = async (req, res) => {
     if (connection) connection.release();
   }
 };
+
+/**
+ * Ensures an admission row + admission number exist before fee portal collection.
+ * Idempotent when already approved with a number. Otherwise runs the approve path
+ * (draft / pending → approved) so the number is minted only at first payment.
+ *
+ * @param {string} joiningId
+ * @param {string} userId
+ * @returns {Promise<{ admission: object, admissionNumber: string, admissionId: string }>}
+ */
+export async function ensureAdmissionForFeeCollection(joiningId, userId) {
+  const pool = getPool();
+  const id = String(joiningId || '').trim();
+  if (!id || id === 'new' || id === 'undefined') {
+    const err = new Error('Invalid joining identifier');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const [joinings] = await pool.execute(
+    'SELECT id, status FROM joinings WHERE id = ? OR lead_id = ? LIMIT 1',
+    [id, id]
+  );
+  if (joinings.length === 0) {
+    const err = new Error('Joining not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  const joining = joinings[0];
+
+  const [admRows] = await pool.execute(
+    'SELECT * FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+    [joining.id]
+  );
+  const existing = admRows[0] || null;
+  const existingNumber = String(existing?.admission_number || '').trim();
+  if (existing && existingNumber) {
+    return {
+      admission: existing,
+      admissionNumber: existingNumber,
+      admissionId: existing.id,
+    };
+  }
+
+  const result = await new Promise((resolve, reject) => {
+    const req = { params: { leadId: joining.id }, user: { id: userId } };
+    const res = {
+      statusCode: 200,
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(body) {
+        if (body?.success === false || (this.statusCode && this.statusCode >= 400)) {
+          const err = new Error(body?.message || 'Failed to create admission for fee collection');
+          err.statusCode = this.statusCode || 400;
+          reject(err);
+          return body;
+        }
+        resolve(body);
+        return body;
+      },
+    };
+    Promise.resolve(approveJoining(req, res)).catch(reject);
+  });
+
+  const admissionNumber = String(
+    result?.data?.admissionNumber || result?.admissionNumber || ''
+  ).trim();
+  const admissionId = result?.data?.admissionId || result?.admissionId || null;
+  if (!admissionNumber) {
+    const err = new Error('Admission number was not generated during fee collection');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  let admission = null;
+  if (admissionId) {
+    const [rows] = await pool.execute('SELECT * FROM admissions WHERE id = ? LIMIT 1', [
+      admissionId,
+    ]);
+    admission = rows[0] || null;
+  }
+  if (!admission) {
+    const [rows] = await pool.execute(
+      'SELECT * FROM admissions WHERE joining_id = ? ORDER BY updated_at DESC LIMIT 1',
+      [joining.id]
+    );
+    admission = rows[0] || null;
+  }
+
+  return {
+    admission,
+    admissionNumber,
+    admissionId: admission?.id || admissionId,
+  };
+}
 
 /**
  * Delete a self-registration joining + its lead (draft / pending only; no admission row).

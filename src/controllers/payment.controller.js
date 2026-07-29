@@ -385,7 +385,13 @@ export const listFeeManagementTransactions = async (req, res) => {
     }
     if (!studentId) studentId = fallbackStudentId;
     if (!studentId) {
-      return errorResponse(res, 'studentId/admissionNumber or joiningId/admissionId is required', 422);
+      // Draft joinings have no admission number until first fee collect — return empty list.
+      return successResponse(res, {
+        transactions: [],
+        data: [],
+        total: 0,
+        filters: { studentId: null, studentYear: studentYear || null },
+      });
     }
 
     const conn = await connectFeeManagement();
@@ -484,11 +490,29 @@ export const recordFeeManagementTransaction = async (req, res) => {
       admission = admissionRows[0] || null;
     }
 
-    const studentId = String(admission?.admission_number || '').trim();
+    let studentId = String(admission?.admission_number || '').trim();
+    // Mint admission number on first fee collect (not on submit/approve alone).
+    if (!studentId) {
+      if (!req.user?.id) {
+        return errorResponse(res, 'Authentication required to generate admission number', 401);
+      }
+      try {
+        const { ensureAdmissionForFeeCollection } = await import('./joining.controller.js');
+        const ensured = await ensureAdmissionForFeeCollection(joiningId, req.user.id);
+        admission = ensured.admission || admission;
+        studentId = String(ensured.admissionNumber || '').trim();
+      } catch (ensureErr) {
+        return errorResponse(
+          res,
+          ensureErr.message || 'Failed to generate admission number for fee collection',
+          ensureErr.statusCode || 422
+        );
+      }
+    }
     if (!studentId) {
       return errorResponse(
         res,
-        'Admission number is required before recording fee portal transactions',
+        'Admission number could not be generated for this fee payment',
         422
       );
     }
@@ -572,6 +596,8 @@ export const recordFeeManagementTransaction = async (req, res) => {
         ...doc,
         feeHead: String(feeHeadValue),
         paymentConfigId: doc.paymentConfigId ? String(doc.paymentConfigId) : undefined,
+        admissionNumber: studentId,
+        admissionId: admission?.id || null,
       },
       'Fee payment transaction recorded',
       201
@@ -1818,11 +1844,32 @@ export const verifyRazorpayQR = async (req, res) => {
       admission = admissionRows[0] || null;
     }
 
-    const studentId = String(admission?.admission_number || '').trim();
+    let studentId = String(admission?.admission_number || '').trim();
+    if (!studentId) {
+      const actorId = req.user?.id || transaction.collected_by;
+      if (!actorId) {
+        return errorResponse(res, 'Authentication required to generate admission number', 401);
+      }
+      try {
+        const { ensureAdmissionForFeeCollection } = await import('./joining.controller.js');
+        const ensured = await ensureAdmissionForFeeCollection(joiningId, actorId);
+        admission = ensured.admission || admission;
+        studentId = String(ensured.admissionNumber || '').trim();
+        if (ensured.admissionId && !admissionId) {
+          admissionId = ensured.admissionId;
+        }
+      } catch (ensureErr) {
+        return errorResponse(
+          res,
+          ensureErr.message || 'Failed to generate admission number for fee collection',
+          ensureErr.statusCode || 422
+        );
+      }
+    }
     if (!studentId) {
       return errorResponse(
         res,
-        'Admission number is required before recording transactions in fee portal',
+        'Admission number could not be generated for this fee payment',
         422
       );
     }
