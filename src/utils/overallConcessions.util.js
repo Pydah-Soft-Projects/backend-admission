@@ -127,3 +127,149 @@ export const normalizeOverallConcessionLineForStorage = (line) => {
 
 export const normalizeOverallConcessionLinesForStorage = (lines = []) =>
   (Array.isArray(lines) ? lines : []).map(normalizeOverallConcessionLineForStorage).filter(Boolean);
+
+/** True when Step 4 builder (`_joiningStudentFeeDetails`) has any revised/concession amount. */
+export const studentFeeDetailsHasRevisedFeeEntries = (studentFeeDetails) =>
+  buildOverallConcessionLinesFromBuilder(studentFeeDetails).length > 0;
+
+/**
+ * True when overall_concessions.revised_fees JSON has any persistable revised/concession line.
+ * Accepts array, JSON string, or already-parsed object wrapper.
+ */
+export const overallConcessionsJsonHasRevisedFeeEntries = (revisedFeesRaw) => {
+  let lines = revisedFeesRaw;
+  if (typeof lines === 'string') {
+    try {
+      lines = JSON.parse(lines);
+    } catch {
+      return false;
+    }
+  }
+  if (lines && typeof lines === 'object' && !Array.isArray(lines) && Array.isArray(lines.revisedFees)) {
+    lines = lines.revisedFees;
+  }
+  if (Array.isArray(lines) && lines.length === 0) return false;
+  // Fast path: non-empty stored lines were sanitized to persistable amounts at write time.
+  if (Array.isArray(lines) && lines.length > 0) {
+    return normalizeOverallConcessionLinesForStorage(lines).length > 0;
+  }
+  return false;
+};
+
+const parseJsonMaybe = (raw) => {
+  if (raw == null) return null;
+  if (typeof raw === 'object') return raw;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === 'null') return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+};
+
+const chunkArray = (items, size = 500) => {
+  const list = Array.isArray(items) ? items : [];
+  const chunks = [];
+  for (let i = 0; i < list.length; i += size) {
+    chunks.push(list.slice(i, i + size));
+  }
+  return chunks;
+};
+
+/**
+ * Student Info "No Fee Entry" = no Step 4 revised/concession fee amounts.
+ * Uses JSON path extracts only (never pulls full lead_data blobs with photos).
+ *
+ * @param {import('mysql2/promise').Pool} pool
+ * @param {Array<{ admission_number?: string; admissionNumber?: string; joining_id?: string; id?: string }>} rows
+ * @param {{ getSecondaryPool?: () => import('mysql2/promise').Pool }} [options]
+ * @returns {Promise<Map<string, boolean>>} admissionNumber → hasRevisedFeeEntries
+ */
+export async function buildHasStepFourRevisedFeeEntriesByAdmissionRows(pool, rows, options = {}) {
+  const result = new Map();
+  const joiningIds = new Set();
+  const admissionNumbers = [];
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const admissionNumber = String(row?.admission_number ?? row?.admissionNumber ?? '').trim();
+    if (!admissionNumber) continue;
+    result.set(admissionNumber, false);
+    admissionNumbers.push(admissionNumber);
+    if (row?.joining_id) joiningIds.add(String(row.joining_id));
+  }
+
+  if (result.size === 0) return result;
+
+  // 1) Joining Step 4 builder — extract only the fee sidecar path (not full lead_data).
+  const joiningHasFees = new Map();
+  const joiningIdList = [...joiningIds];
+  await Promise.all(
+    chunkArray(joiningIdList, 500).map(async (ids) => {
+      if (ids.length === 0) return;
+      const placeholders = ids.map(() => '?').join(',');
+      const [joiningRows] = await pool.execute(
+        `SELECT id,
+                JSON_EXTRACT(lead_data, '$._joiningStudentFeeDetails') AS fee_details
+         FROM joinings
+         WHERE id IN (${placeholders})
+           AND JSON_EXTRACT(lead_data, '$._joiningStudentFeeDetails.lines') IS NOT NULL
+           AND COALESCE(JSON_LENGTH(JSON_EXTRACT(lead_data, '$._joiningStudentFeeDetails.lines')), 0) > 0`,
+        ids
+      );
+      for (const joining of joiningRows || []) {
+        const feeDetails = parseJsonMaybe(joining.fee_details);
+        if (studentFeeDetailsHasRevisedFeeEntries(feeDetails)) {
+          joiningHasFees.set(String(joining.id), true);
+        }
+      }
+    })
+  );
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const admissionNumber = String(row?.admission_number ?? row?.admissionNumber ?? '').trim();
+    if (!admissionNumber) continue;
+    const joiningId = row?.joining_id ? String(row.joining_id) : '';
+    if (joiningId && joiningHasFees.get(joiningId)) {
+      result.set(admissionNumber, true);
+    }
+  }
+
+  // 2) Secondary overall_concessions — only for admissions still missing a builder entry.
+  const stillMissing = admissionNumbers.filter((adm) => !result.get(adm));
+  if (stillMissing.length === 0) return result;
+
+  try {
+    const getSecondaryPool = options.getSecondaryPool;
+    if (typeof getSecondaryPool !== 'function') return result;
+    const secondaryPool = getSecondaryPool();
+    await Promise.all(
+      chunkArray(stillMissing, 500).map(async (numbers) => {
+        if (numbers.length === 0) return;
+        const placeholders = numbers.map(() => '?').join(',');
+        const [ocRows] = await secondaryPool.execute(
+          `SELECT admission_number
+           FROM overall_concessions
+           WHERE admission_number IN (${placeholders})
+             AND revised_fees IS NOT NULL
+             AND TRIM(CAST(revised_fees AS CHAR)) NOT IN ('', 'null', 'NULL', '[]')
+             AND LENGTH(TRIM(CAST(revised_fees AS CHAR))) > 2`,
+          numbers
+        );
+        for (const oc of ocRows || []) {
+          const admissionNumber = String(oc.admission_number || '').trim();
+          if (admissionNumber) result.set(admissionNumber, true);
+        }
+      })
+    );
+  } catch (error) {
+    console.warn(
+      'overall_concessions revised-fee lookup failed for Student Info fee entry filter:',
+      error?.message || error
+    );
+  }
+
+  return result;
+}
+

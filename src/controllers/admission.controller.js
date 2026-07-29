@@ -42,6 +42,7 @@ import {
   fetchPaidByAdmissionRowsForDesk,
   fetchTuitionPaidByAdmissionNumbers,
 } from '../utils/tuitionPaid.util.js';
+import { buildHasStepFourRevisedFeeEntriesByAdmissionRows } from '../utils/overallConcessions.util.js';
 import {
   SQL_IS_CONV_QUOTA,
   SQL_IS_MANG_QUOTA,
@@ -2387,28 +2388,79 @@ export const listAdmissions = async (req, res) => {
     let pageIds = [];
 
     if (applyFeeEntryFilter) {
-      // Fee entry lives in Fee Management (not MySQL) — evaluate after desk filters, then paginate.
-      // Include course so B.Tech (LATERAL) uses Year 2+ like Step 4 Collect Fee.
+      // Student Info Fee Entry filter:
+      // No Fee Entry = no Step 4 revised/concession fee amounts saved for the student.
+      // Detect joining builder lines in SQL (JSON path only — never load full lead_data).
       const allIdQuery = sourceFilter
-        ? `SELECT /*+ NO_MERGE(src) */ a.id, a.admission_number, a.quota, a.course, a.branch
+        ? `SELECT /*+ NO_MERGE(src) */ a.id, a.admission_number, a.joining_id,
+             CASE
+               WHEN COALESCE(
+                 JSON_LENGTH(JSON_EXTRACT(j.lead_data, '$._joiningStudentFeeDetails.lines')),
+                 0
+               ) > 0 THEN 1 ELSE 0
+             END AS has_joining_revised_fee
            FROM admissions a
+           LEFT JOIN joinings j ON j.id = a.joining_id
            JOIN (SELECT a.id ${fromClause} ${whereClause}) src ON src.id = a.id
            ORDER BY a.admission_number DESC, a.updated_at DESC`
-        : `SELECT a.id, a.admission_number, a.quota, a.course, a.branch ${fromClause} ${whereClause}
+        : `SELECT a.id, a.admission_number, a.joining_id,
+             CASE
+               WHEN COALESCE(
+                 JSON_LENGTH(JSON_EXTRACT(j.lead_data, '$._joiningStudentFeeDetails.lines')),
+                 0
+               ) > 0 THEN 1 ELSE 0
+             END AS has_joining_revised_fee
+           ${fromClause}
+           LEFT JOIN joinings j ON j.id = a.joining_id
+           ${whereClause}
            ORDER BY a.admission_number DESC, a.updated_at DESC`;
       const [allIdRows] = await pool.execute(allIdQuery, params);
 
-      const feeSummaries = await buildTuitionAndOtherFeeSummariesForAdmissionRows(
-        allIdRows || []
-      );
+      const hasRevisedFeeByAdmission = new Map();
+      const missingForSecondary = [];
+      for (const row of allIdRows || []) {
+        const admissionNumber = String(row.admission_number || '').trim();
+        if (!admissionNumber) continue;
+        const hasJoiningRevised = Number(row.has_joining_revised_fee) === 1;
+        hasRevisedFeeByAdmission.set(admissionNumber, hasJoiningRevised);
+        if (!hasJoiningRevised) missingForSecondary.push(admissionNumber);
+      }
+
+      // overall_concessions only for rows without joining builder lines (cheap secondary pass).
+      if (missingForSecondary.length > 0) {
+        try {
+          const secondaryPool = getSecondaryPool();
+          const chunkSize = 500;
+          for (let i = 0; i < missingForSecondary.length; i += chunkSize) {
+            const chunk = missingForSecondary.slice(i, i + chunkSize);
+            const placeholders = chunk.map(() => '?').join(',');
+            const [ocRows] = await secondaryPool.execute(
+              `SELECT admission_number
+               FROM overall_concessions
+               WHERE admission_number IN (${placeholders})
+                 AND revised_fees IS NOT NULL
+                 AND TRIM(CAST(revised_fees AS CHAR)) NOT IN ('', 'null', 'NULL', '[]')
+                 AND LENGTH(TRIM(CAST(revised_fees AS CHAR))) > 2`,
+              chunk
+            );
+            for (const oc of ocRows || []) {
+              const admissionNumber = String(oc.admission_number || '').trim();
+              if (admissionNumber) hasRevisedFeeByAdmission.set(admissionNumber, true);
+            }
+          }
+        } catch (error) {
+          console.warn(
+            'Student Info fee-entry overall_concessions lookup failed:',
+            error?.message || error
+          );
+        }
+      }
 
       const filteredIds = (allIdRows || [])
         .filter((row) => {
-          const summary = feeSummaries.get(String(row.admission_number || '').trim());
-          // No Fee Entry = lateral quota mismatch with no TUI01/OTH1 ledger only.
-          const isNoFeeEntry = summary?.feeStatus === 'no_entry';
-          const hasFeeEntry = Boolean(summary?.hasFeeEntry);
-          return filterNoFeeEntry ? isNoFeeEntry : hasFeeEntry;
+          const admissionNumber = String(row.admission_number || '').trim();
+          const hasRevisedFeeEntry = Boolean(hasRevisedFeeByAdmission.get(admissionNumber));
+          return filterNoFeeEntry ? !hasRevisedFeeEntry : hasRevisedFeeEntry;
         })
         .map((row) => row.id);
 
@@ -2486,24 +2538,30 @@ export const listAdmissions = async (req, res) => {
       quota: row.quota,
       course: row.course,
       branch: row.branch,
+      joining_id: row.joining_id,
+      id: row.id,
     }));
-    const [yearOnePaidByAdmissionNumber, feeSummaries] = await Promise.all([
-      fetchPaidByAdmissionRowsForDesk(deskFeeRows),
-      buildTuitionAndOtherFeeSummariesForAdmissionRows(deskFeeRows),
-    ]);
+    const [yearOnePaidByAdmissionNumber, feeSummaries, hasRevisedFeeByAdmission] =
+      await Promise.all([
+        fetchPaidByAdmissionRowsForDesk(deskFeeRows),
+        buildTuitionAndOtherFeeSummariesForAdmissionRows(deskFeeRows),
+        buildHasStepFourRevisedFeeEntriesByAdmissionRows(pool, deskFeeRows, {
+          getSecondaryPool,
+        }),
+      ]);
     const formattedAdmissions = admissions.map((row) => {
       const item = formatAdmissionListItem(row);
       const admissionNumber = String(row.admission_number || '').trim();
       const yearOnePaid = yearOnePaidByAdmissionNumber.get(admissionNumber) ?? 0;
       const feeSummary = feeSummaries.get(admissionNumber);
-      const isNoFeeEntry = feeSummary?.feeStatus === 'no_entry';
-      const hasFeeEntry = !isNoFeeEntry && Boolean(feeSummary?.hasFeeEntry);
+      // Student Info: No Fee Entry = no Step 4 revised/concession fee amounts.
+      const hasRevisedFeeEntry = Boolean(hasRevisedFeeByAdmission.get(admissionNumber));
+      const isNoFeeEntry = !hasRevisedFeeEntry;
+      const hasFeeEntry = hasRevisedFeeEntry;
       const feeStatus = isNoFeeEntry
         ? 'no_entry'
-        : hasFeeEntry
-          ? feeSummary?.feeStatus === 'paid'
-            ? 'paid'
-            : 'unpaid'
+        : feeSummary?.feeStatus === 'paid'
+          ? 'paid'
           : 'unpaid';
       return {
         ...item,
