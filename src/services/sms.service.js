@@ -327,7 +327,7 @@ const smsService = {
    * DLT template id: 1777178471122897474
    * Template: Dear Student {#var#}, the following certificates are pending - {#var#}. Kindly contact the Admissions Office immediately at {#var#} - Pydah Group
    */
-  sendDocumentNotification: async (mobileNumber, name, pendingDocuments, collegePhone = '+91 73820 15999') => {
+  sendDocumentNotification: async (mobileNumber, name, pendingDocuments, collegePhone = '+91 73823 15999') => {
     if (!BULK_SMS_API_KEY) {
       console.warn('BULK_SMS_API_KEY is not set. Document Notification SMS skipped (Dev Mode).');
       return { success: true, message: 'SMS simulation successful (Dev Mode)' };
@@ -392,7 +392,7 @@ const smsService = {
     mobileNumber,
     name,
     pendingAmount,
-    collegePhone = '+91 73820 15999',
+    collegePhone = '+91 73823 15999',
     options = {}
   ) => {
     if (!BULK_SMS_API_KEY) {
@@ -433,7 +433,7 @@ const smsService = {
     }).format(Math.trunc(amountNum));
 
     const amountVar = `Rs. ${formattedAmount}`;
-    const safeCollegePhone = String(collegePhone || '').trim() || '+91 73820 15999';
+    const safeCollegePhone = String(collegePhone || '').trim() || '+91 73823 15999';
 
     const templateId = '1777178496518000671';
     const message = `Dear ${safeName}, towards confirmation of your admission, an amount of ${amountVar} is pending. Kindly contact the Admissions Office immediately at ${safeCollegePhone}. - Pydah Group`;

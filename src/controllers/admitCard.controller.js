@@ -8,7 +8,7 @@ const MAX_INLINE_FEE_QR_BYTES = 120_000;
 
 /** Default admissions contact block on admit cards when not set in student_database. */
 export const DEFAULT_ADMISSION_CONTACT_DETAILS =
-  'Mobile: +91 73820 15999\nMail: admissions@pydah.edu.in';
+  'Mobile: +91 73823 15999\nMail: admissions@pydah.edu.in';
 
 function bufferToDataUrl(buffer, mimeType) {
   if (!buffer || !mimeType) return null;

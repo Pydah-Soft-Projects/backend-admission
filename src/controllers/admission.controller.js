@@ -2913,7 +2913,7 @@ const IMPORTANT_FLAT_DOCUMENT_LABELS = {
   document_study_certificate: 'Study Certificate',
 };
 
-const DOCUMENT_SMS_COLLEGE_PHONE = '+91 73820 15999';
+const DOCUMENT_SMS_COLLEGE_PHONE = '+91 73823 15999';
 
 const documentSmsFailureMessage = (result) => {
   const reasonMap = {
