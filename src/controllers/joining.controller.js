@@ -822,6 +822,17 @@ const qualificationMeritFromSql = (value) => {
   return false;
 };
 
+/** AC = 1, Non-AC = 0 (same Yes/No persistence pattern as merit). */
+const qualificationAcToSql = (ac) => {
+  if (ac === true) return 1;
+  return 0;
+};
+
+const qualificationAcFromSql = (value) => {
+  if (value === 1 || value === true) return true;
+  return false;
+};
+
 const formatJoining = async (joiningData, pool, options = {}) => {
   const listMode = Boolean(options?.listMode);
   if (!joiningData) return null;
@@ -1074,6 +1085,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       interOrDiploma: joiningData.qualification_inter_diploma === 1 || joiningData.qualification_inter_diploma === true,
       ug: joiningData.qualification_ug === 1 || joiningData.qualification_ug === true,
       merit: qualificationMeritFromSql(joiningData.qualification_merit),
+      ac: qualificationAcFromSql(joiningData.qualification_ac),
       mediums: qualificationMediums,
       otherMediumLabel: joiningData.qualification_other_medium_label || '',
     },
@@ -1691,6 +1703,7 @@ export const getJoining = async (req, res) => {
           interOrDiploma: false,
           ug: false,
           merit: null,
+          ac: null,
           mediums: [],
           otherMediumLabel: '',
         },
@@ -2726,6 +2739,7 @@ export const saveJoiningDraft = async (req, res) => {
         qualification_inter_diploma = ?,
         qualification_ug = ?,
         qualification_merit = ?,
+        qualification_ac = ?,
         qualification_mediums = ?,
         qualification_other_medium_label = ?,
         document_ssc = ?,
@@ -2797,6 +2811,7 @@ export const saveJoiningDraft = async (req, res) => {
         qualifications.interOrDiploma === true ? 1 : 0,
         qualifications.ug === true ? 1 : 0,
         qualificationMeritToSql(qualifications.merit),
+        qualificationAcToSql(qualifications.ac),
         JSON.stringify(qualifications.mediums || []),
         qualifications.otherMediumLabel || '',
         ...joiningDocumentsToSqlParams(documents),
@@ -3662,7 +3677,7 @@ export const approveJoining = async (req, res) => {
           mother_name = ?, mother_phone = ?, mother_aadhaar_number = ?, preferred_mobile_number = ?, mother_photo = ?, mother_occupation = ?,
           reservation_general = ?, reservation_other = ?,
           address_door_street = ?, address_landmark = ?, address_village_city = ?, address_mandal = ?, address_district = ?, address_pin_code = ?, address_state = ?,
-          qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_merit = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
+          qualification_ssc = ?, qualification_inter_diploma = ?, qualification_ug = ?, qualification_merit = ?, qualification_ac = ?, qualification_mediums = ?, qualification_other_medium_label = ?,
           document_ssc = ?, document_inter = ?, document_ug_pg_cmm = ?, document_transfer_certificate = ?, document_study_certificate = ?,
           document_aadhaar_card = ?, document_photos = ?, document_income_certificate = ?, document_caste_certificate = ?,
           document_cet_rank_card = ?, document_cet_hall_ticket = ?, document_allotment_letter = ?, document_joining_report = ?,
@@ -3715,6 +3730,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0,
           formattedJoining.qualifications?.ug === true ? 1 : 0,
           qualificationMeritToSql(formattedJoining.qualifications?.merit),
+          qualificationAcToSql(formattedJoining.qualifications?.ac),
           JSON.stringify(formattedJoining.qualifications?.mediums || []),
           formattedJoining.qualifications?.otherMediumLabel || '',
           formattedJoining.documents?.ssc || 'pending',
@@ -3748,14 +3764,14 @@ export const approveJoining = async (req, res) => {
           mother_name, mother_phone, mother_aadhaar_number, preferred_mobile_number, mother_photo, mother_occupation,
           reservation_general, reservation_other,
           address_door_street, address_landmark, address_village_city, address_mandal, address_district, address_pin_code, address_state,
-          qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_merit, qualification_mediums, qualification_other_medium_label,
+          qualification_ssc, qualification_inter_diploma, qualification_ug, qualification_merit, qualification_ac, qualification_mediums, qualification_other_medium_label,
           document_ssc, document_inter, document_ug_pg_cmm, document_transfer_certificate, document_study_certificate,
           document_aadhaar_card, document_photos, document_income_certificate, document_caste_certificate,
           document_cet_rank_card, document_cet_hall_ticket, document_allotment_letter, document_joining_report,
           document_bank_passbook, document_ration_card,
           reservation_is_ews,
           admission_date, created_by, updated_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW(), NOW())`,
         [
           admissionId, // 1
           joining.lead_id || null, // 2
@@ -3804,6 +3820,7 @@ export const approveJoining = async (req, res) => {
           formattedJoining.qualifications?.interOrDiploma === true ? 1 : 0, // 34
           formattedJoining.qualifications?.ug === true ? 1 : 0, // 35
           qualificationMeritToSql(formattedJoining.qualifications?.merit),
+          qualificationAcToSql(formattedJoining.qualifications?.ac),
           JSON.stringify(formattedJoining.qualifications?.mediums || []), // 36
           formattedJoining.qualifications?.otherMediumLabel || '', // 37
           formattedJoining.documents?.ssc || 'pending', // 38

@@ -124,6 +124,8 @@ const joiningSchema = new Schema(
       interOrDiploma: { type: Boolean, default: false },
       ug: { type: Boolean, default: false },
       merit: { type: Boolean, default: null },
+      /** true = AC, false = Non-AC, null = not answered */
+      ac: { type: Boolean, default: null },
       mediums: {
         type: [String],
         enum: ['english', 'telugu', 'other'],

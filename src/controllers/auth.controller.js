@@ -2,12 +2,126 @@ import { getPool } from '../config-sql/database.js';
 import { generateToken } from '../utils/generateToken.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import bcrypt from 'bcryptjs';
-import bulkSmsService from '../services/bulkSms.service.js';
+import bulkSmsService, { PASSWORD_RESET_LOGIN_HOST } from '../services/bulkSms.service.js';
+import { sendEmail } from '../services/unifiedEmail.service.js';
 import axios from 'axios';
 import { connectHRMS } from '../config-mongo/hrms.js';
 import { matchHrmsEmployeePassword } from '../utils/employeePasswordAuth.util.js';
 
+const escapeHtml = (value = '') =>
+  String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
+const buildPasswordResetEmailHtml = ({ name, username, password, loginUrl }) => {
+  const safeName = escapeHtml(name || 'User');
+  const safeUsername = escapeHtml(username || '');
+  const safePassword = escapeHtml(password || '');
+  const safeLoginUrl = escapeHtml(loginUrl);
+  const loginHref = loginUrl.startsWith('http') ? loginUrl : `https://${loginUrl}`;
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Password Reset - CRM Admissions</title>
+    </head>
+    <body style="margin:0;padding:0;background-color:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f3f4f6;padding:24px 12px;">
+        <tr>
+          <td align="center">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
+              <tr>
+                <td style="background-color:#1e3a5f;padding:28px 24px;text-align:center;">
+                  <div style="font-size:13px;letter-spacing:1px;text-transform:uppercase;color:#93c5fd;margin-bottom:8px;">Pydah Group</div>
+                  <h1 style="margin:0;font-size:22px;line-height:1.3;color:#ffffff;font-weight:700;">Password Reset Successful</h1>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:28px 24px;">
+                  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Hello <strong>${safeName}</strong>,</p>
+                  <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#374151;">
+                    Your password has been reset. Use the credentials below to sign in to the Admissions CRM.
+                  </p>
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">
+                    <tr>
+                      <td style="padding:18px 20px;">
+                        <p style="margin:0 0 12px;font-size:12px;letter-spacing:0.6px;text-transform:uppercase;color:#64748b;font-weight:700;">Your login credentials</p>
+                        <p style="margin:0 0 10px;font-size:14px;line-height:1.5;color:#334155;">
+                          <span style="display:inline-block;min-width:90px;color:#64748b;">Username</span>
+                          <strong style="color:#0f172a;">${safeUsername}</strong>
+                        </p>
+                        <p style="margin:0 0 10px;font-size:14px;line-height:1.5;color:#334155;">
+                          <span style="display:inline-block;min-width:90px;color:#64748b;">Password</span>
+                          <strong style="font-size:16px;letter-spacing:1px;color:#0f172a;background:#e0f2fe;padding:4px 10px;border-radius:6px;">${safePassword}</strong>
+                        </p>
+                        <p style="margin:0;font-size:14px;line-height:1.5;color:#334155;">
+                          <span style="display:inline-block;min-width:90px;color:#64748b;">Login</span>
+                          <a href="${loginHref}" style="color:#1d4ed8;text-decoration:none;font-weight:600;">${safeLoginUrl}</a>
+                        </p>
+                      </td>
+                    </tr>
+                  </table>
+                  <div style="text-align:center;margin:24px 0 8px;">
+                    <a href="${loginHref}" style="display:inline-block;padding:12px 28px;background-color:#1e3a5f;color:#ffffff;text-decoration:none;border-radius:8px;font-size:14px;font-weight:700;">
+                      Login to Admissions CRM
+                    </a>
+                  </div>
+                  <p style="margin:20px 0 0;font-size:13px;line-height:1.6;color:#6b7280;">
+                    For security, please change this password after logging in. If you did not request this reset, contact your administrator immediately.
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:16px 24px 24px;border-top:1px solid #e5e7eb;text-align:center;">
+                  <p style="margin:0;font-size:12px;color:#9ca3af;">This is an automated message from CRM Admissions. Please do not reply.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+};
+
+const sendPasswordResetEmail = async ({ email, name, username, password }) => {
+  if (!email || !String(email).trim()) {
+    return { success: false, skipped: true, reason: 'no_email' };
+  }
+
+  const loginUrl = PASSWORD_RESET_LOGIN_HOST;
+  const htmlContent = buildPasswordResetEmailHtml({
+    name,
+    username: username || email,
+    password,
+    loginUrl,
+  });
+
+  return sendEmail({
+    to: String(email).trim(),
+    subject: 'Your new Admissions CRM password',
+    htmlContent,
+    textContent: [
+      `Hello ${name || 'User'},`,
+      '',
+      'Your password has been reset. Use these credentials to sign in:',
+      `Username: ${username || email}`,
+      `Password: ${password}`,
+      `Login: https://${loginUrl}`,
+      '',
+      'Please change this password after logging in.',
+      '',
+      '— CRM Admissions Team',
+    ].join('\n'),
+  });
+};
 
 // @desc    Login user
 // @route   POST /api/auth/login
@@ -407,25 +521,51 @@ export const createSSOSession = async (req, res) => {
 // @access  Public
 export const checkUser = async (req, res) => {
   try {
-    const { mobileNumber } = req.body;
+    const identifier = String(
+      req.body?.identifier || req.body?.mobileNumber || req.body?.email || ''
+    ).trim();
 
-    if (!mobileNumber) {
-      return errorResponse(res, 'Mobile number is required', 400);
+    if (!identifier) {
+      return errorResponse(res, 'Mobile number or email is required', 400);
     }
 
     const pool = getPool();
-    const [users] = await pool.execute(
-      'SELECT id, name FROM users WHERE mobile_number = ?',
-      [mobileNumber]
-    );
+    const isEmail = identifier.includes('@');
+    const mobileDigits = identifier.replace(/\D/g, '').slice(-10);
 
-    if (users.length === 0) {
-      return errorResponse(res, 'No user found with this mobile number', 404);
+    let users;
+    if (isEmail) {
+      [users] = await pool.execute(
+        'SELECT id, name, email, mobile_number FROM users WHERE LOWER(email) = LOWER(?)',
+        [identifier]
+      );
+    } else {
+      if (mobileDigits.length !== 10) {
+        return errorResponse(res, 'Enter a valid 10-digit mobile number or email address', 400);
+      }
+      [users] = await pool.execute(
+        'SELECT id, name, email, mobile_number FROM users WHERE mobile_number = ?',
+        [mobileDigits]
+      );
     }
 
+    if (users.length === 0) {
+      return errorResponse(
+        res,
+        isEmail
+          ? 'No user found with this email address'
+          : 'No user found with this mobile number',
+        404
+      );
+    }
+
+    const user = users[0];
     return successResponse(res, {
       exists: true,
-      name: users[0].name
+      name: user.name,
+      email: user.email || null,
+      mobileNumber: user.mobile_number || null,
+      identifierType: isEmail ? 'email' : 'mobile',
     }, 'User found');
 
   } catch (error) {
@@ -439,22 +579,42 @@ export const checkUser = async (req, res) => {
 // @access  Public
 export const resetPasswordDirectly = async (req, res) => {
   try {
-    const { mobileNumber } = req.body;
+    const identifier = String(
+      req.body?.identifier || req.body?.mobileNumber || req.body?.email || ''
+    ).trim();
 
-    if (!mobileNumber) {
-      return errorResponse(res, 'Mobile number is required', 400);
+    if (!identifier) {
+      return errorResponse(res, 'Mobile number or email is required', 400);
     }
 
     const pool = getPool();
+    const isEmail = identifier.includes('@');
+    const mobileDigits = identifier.replace(/\D/g, '').slice(-10);
 
-    // Check if user exists
-    const [users] = await pool.execute(
-      'SELECT id, name, email, mobile_number FROM users WHERE mobile_number = ?',
-      [mobileNumber]
-    );
+    let users;
+    if (isEmail) {
+      [users] = await pool.execute(
+        'SELECT id, name, email, mobile_number FROM users WHERE LOWER(email) = LOWER(?)',
+        [identifier]
+      );
+    } else {
+      if (mobileDigits.length !== 10) {
+        return errorResponse(res, 'Enter a valid 10-digit mobile number or email address', 400);
+      }
+      [users] = await pool.execute(
+        'SELECT id, name, email, mobile_number FROM users WHERE mobile_number = ?',
+        [mobileDigits]
+      );
+    }
 
     if (users.length === 0) {
-      return errorResponse(res, 'No user found with this mobile number', 404);
+      return errorResponse(
+        res,
+        isEmail
+          ? 'No user found with this email address'
+          : 'No user found with this mobile number',
+        404
+      );
     }
 
     const user = users[0];
@@ -467,26 +627,70 @@ export const resetPasswordDirectly = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-    // Update User Password
+    // Update User Password by id (works for email or mobile lookup)
     await pool.execute(
-      'UPDATE users SET password = ? WHERE mobile_number = ?',
-      [hashedPassword, mobileNumber]
+      'UPDATE users SET password = ? WHERE id = ?',
+      [hashedPassword, user.id]
     );
 
-    // Send confirmation SMS with new password (Login link: admissions.pydah.edu.in)
+    // Send confirmation SMS + email with new password (Login: admissions.pydah.edu.in)
+    const delivery = { sms: false, email: false };
+    const smsMobile = String(user.mobile_number || '').replace(/\D/g, '').slice(-10);
+
     try {
-      await bulkSmsService.sendPasswordResetSuccess(
-        mobileNumber,
-        user.name,
-        user.email,
-        newPassword
-      );
+      if (smsMobile.length === 10) {
+        const smsResult = await bulkSmsService.sendPasswordResetSuccess(
+          smsMobile,
+          user.name,
+          user.email,
+          newPassword
+        );
+        delivery.sms = smsResult?.success !== false;
+      } else {
+        console.warn('Password reset SMS skipped — user has no valid mobile number.');
+      }
     } catch (smsError) {
-      console.error("Failed to send password reset SMS:", smsError);
-      // We still return success because the password WAS reset, but warn log is enough.
+      console.error('Failed to send password reset SMS:', smsError);
     }
 
-    return successResponse(res, { message: 'Password reset successfully. Check your SMS.' }, 'Password reset and SMS sent');
+    try {
+      const emailResult = await sendPasswordResetEmail({
+        email: user.email,
+        name: user.name,
+        username: user.email,
+        password: newPassword,
+      });
+      delivery.email = Boolean(emailResult?.success);
+      if (emailResult?.skipped) {
+        console.warn('Password reset email skipped — user has no email on file.');
+      } else if (!emailResult?.success) {
+        console.warn('Password reset email failed:', emailResult?.channels || emailResult);
+      }
+    } catch (emailError) {
+      console.error('Failed to send password reset email:', emailError);
+    }
+
+    const channels = [
+      delivery.sms ? 'SMS' : null,
+      delivery.email ? 'email' : null,
+    ].filter(Boolean);
+
+    const channelText = channels.length > 0
+      ? `Check your ${channels.join(' and ')}.`
+      : 'Password was reset, but delivery failed. Please contact support.';
+
+    return successResponse(
+      res,
+      {
+        message: `Password reset successfully. ${channelText}`,
+        delivery,
+        email: user.email || null,
+        mobileNumber: user.mobile_number || null,
+      },
+      channels.length > 0
+        ? `Password reset and sent via ${channels.join(' and ')}`
+        : 'Password reset successfully'
+    );
 
   } catch (error) {
     console.error('Reset Password Direct error:', error);

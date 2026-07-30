@@ -1548,6 +1548,17 @@ const qualificationMeritToSql = (merit) => {
   return 0;
 };
 
+/** AC = 1, Non-AC = 0 (same Yes/No persistence pattern as merit). */
+const qualificationAcFromSql = (value) => {
+  if (value === 1 || value === true) return true;
+  return false;
+};
+
+const qualificationAcToSql = (ac) => {
+  if (ac === true) return 1;
+  return 0;
+};
+
 function pickFromRegistrationFormData(registrationFormData, keys) {
   if (!registrationFormData || typeof registrationFormData !== 'object') return '';
   const want = new Set(keys.map((k) => String(k).toLowerCase()));
@@ -1800,6 +1811,7 @@ export const formatAdmission = async (admissionData, pool) => {
       interOrDiploma: admissionData.qualification_inter_diploma === 1 || admissionData.qualification_inter_diploma === true,
       ug: admissionData.qualification_ug === 1 || admissionData.qualification_ug === true,
       merit: qualificationMeritFromSql(admissionData.qualification_merit),
+      ac: qualificationAcFromSql(admissionData.qualification_ac),
       mediums: qualificationMediums,
       otherMediumLabel: admissionData.qualification_other_medium_label || '',
     },
@@ -2167,6 +2179,12 @@ const formatAdmissionListItem = (row) => {
       row.qualification_merit === 1 || row.qualification_merit === true
         ? true
         : row.qualification_merit === 0 || row.qualification_merit === false
+          ? false
+          : null,
+    ac:
+      row.qualification_ac === 1 || row.qualification_ac === true
+        ? true
+        : row.qualification_ac === 0 || row.qualification_ac === false
           ? false
           : null,
   },
@@ -2579,7 +2597,7 @@ export const listAdmissions = async (req, res) => {
                 a.course_id, a.branch_id, a.managed_course_id, a.managed_branch_id, a.course, a.branch, a.quota,
                 a.student_name, a.student_phone, a.created_at, a.updated_at,
                 a.reservation_general, a.reservation_is_ews, a.reservation_other, a.payment_total_paid,
-                a.qualification_merit,
+                a.qualification_merit, a.qualification_ac,
                 a.document_ssc, a.document_inter, a.document_ug_pg_cmm, a.document_transfer_certificate,
                 a.document_study_certificate, a.document_aadhaar_card, a.document_photos,
                 a.document_income_certificate, a.document_caste_certificate, a.document_cet_rank_card,
@@ -3721,6 +3739,10 @@ export const updateAdmissionById = async (req, res) => {
         updateFields.push('qualification_merit = ?');
         updateParams.push(qualificationMeritToSql(payload.qualifications.merit));
       }
+      if (payload.qualifications.ac !== undefined) {
+        updateFields.push('qualification_ac = ?');
+        updateParams.push(qualificationAcToSql(payload.qualifications.ac));
+      }
       if (payload.qualifications.mediums !== undefined) {
         updateFields.push('qualification_mediums = ?');
         updateParams.push(JSON.stringify(payload.qualifications.mediums || []));
@@ -4025,6 +4047,10 @@ export const updateAdmissionByLead = async (req, res) => {
       if (payload.qualifications.merit !== undefined) {
         updateFields.push('qualification_merit = ?');
         updateParams.push(qualificationMeritToSql(payload.qualifications.merit));
+      }
+      if (payload.qualifications.ac !== undefined) {
+        updateFields.push('qualification_ac = ?');
+        updateParams.push(qualificationAcToSql(payload.qualifications.ac));
       }
       if (payload.qualifications.mediums !== undefined) {
         updateFields.push('qualification_mediums = ?');
@@ -5459,7 +5485,7 @@ export const exportAdmissions = async (req, res) => {
 const OTHER_DOCUMENT_FIELDS_ALWAYS = [
   { column: 'document_aadhaar_card', label: 'Aadhaar Card' },
   { column: 'document_photos', label: 'Photos (5)' },
-  { column: 'document_income_certificate', label: 'Income Certificate' },
+  { column: 'document_income_certificate', label: 'EWS Certificate' },
   { column: 'document_caste_certificate', label: 'Caste Certificate' },
 ];
 
