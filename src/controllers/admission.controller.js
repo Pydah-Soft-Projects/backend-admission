@@ -5,6 +5,7 @@ import { buildHrmsEmployeeMetaByReferenceKeys } from './user.controller.js';
 import { successResponse, errorResponse } from '../utils/response.util.js';
 import { decryptSensitiveValue } from '../utils/encryption.util.js';
 import { syncToSecondaryDatabase, warnIfSecondaryStudentSyncMissed } from '../utils/studentSync.util.js';
+import { buildJoiningReservationMeta } from '../utils/casteCatalog.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
 import ExcelJS from 'exceljs';
@@ -1375,6 +1376,61 @@ export const persistAdmissionRemarks = async (pool, admissionId, remarks, userId
 };
 
 /**
+ * Persist category_id / nested caste_id on admissions (+ linked joining) lead_data
+ * for secondary student sync (students.category_id / students.caste_id).
+ */
+export const persistAdmissionReservationMeta = async (pool, admissionId, reservation, userId) => {
+  if (!reservation || typeof reservation !== 'object') return;
+
+  const [admRows] = await pool.execute(
+    'SELECT id, lead_data, joining_id FROM admissions WHERE id = ? LIMIT 1',
+    [admissionId]
+  );
+  if (!admRows.length) return;
+
+  const adm = admRows[0];
+  let admLd =
+    typeof adm.lead_data === 'string' ? JSON.parse(adm.lead_data) : adm.lead_data || {};
+  if (!admLd || typeof admLd !== 'object') admLd = {};
+
+  const meta = buildJoiningReservationMeta(reservation);
+  const admNextLd = { ...admLd };
+  if (meta) {
+    admNextLd._joiningReservation = meta;
+  } else {
+    delete admNextLd._joiningReservation;
+  }
+
+  await pool.execute(
+    `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(admNextLd), userId || null, admissionId]
+  );
+
+  if (!adm.joining_id) return;
+
+  const [joiningRows] = await pool.execute('SELECT id, lead_data FROM joinings WHERE id = ? LIMIT 1', [
+    adm.joining_id,
+  ]);
+  if (!joiningRows.length) return;
+
+  let jLd =
+    typeof joiningRows[0].lead_data === 'string'
+      ? JSON.parse(joiningRows[0].lead_data)
+      : joiningRows[0].lead_data || {};
+  if (!jLd || typeof jLd !== 'object') jLd = {};
+  const jNextLd = { ...jLd };
+  if (meta) {
+    jNextLd._joiningReservation = meta;
+  } else {
+    delete jNextLd._joiningReservation;
+  }
+  await pool.execute(`UPDATE joinings SET lead_data = ?, updated_at = NOW() WHERE id = ?`, [
+    JSON.stringify(jNextLd),
+    adm.joining_id,
+  ]);
+};
+
+/**
  * Merge registration extras (and optional fee sidecar) on admissions + linked joinings,
  * and sync dedicated portrait columns from merged extras.
  */
@@ -1592,6 +1648,13 @@ export const formatAdmission = async (admissionData, pool) => {
     typeof leadDataRaw._joiningRegistrationExtras === 'object'
       ? { ...leadDataRaw._joiningRegistrationExtras }
       : {};
+  const reservationMeta =
+    leadDataRaw &&
+    typeof leadDataRaw === 'object' &&
+    leadDataRaw._joiningReservation &&
+    typeof leadDataRaw._joiningReservation === 'object'
+      ? leadDataRaw._joiningReservation
+      : null;
   const leadData =
     leadDataRaw && typeof leadDataRaw === 'object'
       ? (() => {
@@ -1600,6 +1663,7 @@ export const formatAdmission = async (admissionData, pool) => {
             _joiningProgramLevel,
             _joiningManagedCourseId,
             _joiningManagedBranchId,
+            _joiningReservation,
             _applicationEditHistory,
             ...rest
           } = leadDataRaw;
@@ -1716,6 +1780,14 @@ export const formatAdmission = async (admissionData, pool) => {
     },
     reservation: {
       general: admissionData.reservation_general || '',
+      categoryId:
+        reservationMeta?.categoryId != null && String(reservationMeta.categoryId).trim() !== ''
+          ? String(reservationMeta.categoryId).trim()
+          : undefined,
+      casteId:
+        reservationMeta?.casteId != null && String(reservationMeta.casteId).trim() !== ''
+          ? String(reservationMeta.casteId).trim()
+          : undefined,
       isEws: admissionData.reservation_is_ews === 1 || admissionData.reservation_is_ews === true,
       other: reservationOther,
     },
@@ -3597,6 +3669,7 @@ export const updateAdmissionById = async (req, res) => {
         updateFields.push('reservation_is_ews = ?');
         updateParams.push(payload.reservation.isEws === true ? 1 : 0);
       }
+      await persistAdmissionReservationMeta(pool, admissionId, payload.reservation, req.user?.id);
     }
 
     if (payload.address?.communication !== undefined) {
@@ -3901,6 +3974,7 @@ export const updateAdmissionByLead = async (req, res) => {
         updateFields.push('reservation_is_ews = ?');
         updateParams.push(payload.reservation.isEws === true ? 1 : 0);
       }
+      await persistAdmissionReservationMeta(pool, admissionId, payload.reservation, req.user?.id);
     }
 
     if (payload.address?.communication !== undefined) {

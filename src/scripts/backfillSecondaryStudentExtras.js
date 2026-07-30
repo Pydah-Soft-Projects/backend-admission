@@ -1,5 +1,7 @@
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+import { resolveSecondaryStudentCasteFields } from '../utils/casteCatalog.util.js';
+import { getTableColumnSet } from '../utils/secondarySchema.util.js';
 
 dotenv.config();
 
@@ -110,6 +112,8 @@ async function main() {
       TARGET_NUMBERS
     );
 
+    const studentCols = await getTableColumnSet(secondary, 'students');
+
     const results = [];
     for (const admission of admissions) {
       const leadData =
@@ -126,7 +130,18 @@ async function main() {
         toNullableText(extras.school_or_college_name) || toNullableText(extras.college);
       const studType = toNullableText(extras.data_collection_type);
       const scholarStatus = toNullableText(extras.scholar_status);
-      const caste = toNullableText(admission.reservation_general)?.toUpperCase() || null;
+      const reservationMeta =
+        leadData && typeof leadData === 'object' && leadData._joiningReservation
+          ? leadData._joiningReservation
+          : {};
+      const resolvedCaste = await resolveSecondaryStudentCasteFields({
+        general: admission.reservation_general,
+        categoryId: reservationMeta.categoryId,
+        casteId: reservationMeta.casteId,
+      });
+      const caste = resolvedCaste.caste;
+      const categoryId = resolvedCaste.categoryId;
+      const casteId = resolvedCaste.casteId;
       const remarks = toNullableText(extras.remarks);
       const previousCollege = toNullableText(extras.previous_college);
       const certificatesStatus = deriveCertificatesStatus(extras);
@@ -135,6 +150,17 @@ async function main() {
       const currentYear =
         parseCurrentYear(extras.current_year) ?? parseCurrentYear(extras.currentYear);
 
+      const casteCols = ['caste = COALESCE(?, caste)'];
+      const casteVals = [caste];
+      if (studentCols.has('category_id')) {
+        casteCols.push('category_id = COALESCE(?, category_id)');
+        casteVals.push(categoryId);
+      }
+      if (studentCols.has('caste_id')) {
+        casteCols.push('caste_id = COALESCE(?, caste_id)');
+        casteVals.push(casteId);
+      }
+
       await secondary.execute(
         `UPDATE students
          SET
@@ -142,7 +168,7 @@ async function main() {
            college = COALESCE(?, college),
            stud_type = COALESCE(?, stud_type),
            scholar_status = COALESCE(?, scholar_status),
-           caste = COALESCE(?, caste),
+           ${casteCols.join(',\n           ')},
            remarks = COALESCE(?, remarks),
            previous_college = COALESCE(?, previous_college),
            certificates_status = COALESCE(?, certificates_status),
@@ -156,7 +182,7 @@ async function main() {
           college,
           studType,
           scholarStatus,
-          caste,
+          ...casteVals,
           remarks,
           previousCollege,
           certificatesStatus,

@@ -26,6 +26,7 @@ import {
   relativeAddressFromSqlRow,
 } from '../utils/joiningAddress.util.js';
 import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
+import { buildJoiningReservationMeta } from '../utils/casteCatalog.util.js';
 import {
   buildJoiningLeadDataSnapshot,
   backfillJoiningReferenceFromLead,
@@ -861,6 +862,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
   let storedProgramLevel = '';
   let managedJoiningCourseId = null;
   let managedJoiningBranchId = null;
+  let reservationMeta = null;
   if (leadDataRaw && typeof leadDataRaw === 'object') {
     if (leadDataRaw._joiningProgramLevel != null && String(leadDataRaw._joiningProgramLevel).trim()) {
       storedProgramLevel = String(leadDataRaw._joiningProgramLevel).trim();
@@ -870,6 +872,12 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     }
     if (leadDataRaw._joiningManagedBranchId != null && String(leadDataRaw._joiningManagedBranchId) !== '') {
       managedJoiningBranchId = leadDataRaw._joiningManagedBranchId;
+    }
+    if (
+      leadDataRaw._joiningReservation &&
+      typeof leadDataRaw._joiningReservation === 'object'
+    ) {
+      reservationMeta = leadDataRaw._joiningReservation;
     }
     if (leadDataRaw._joiningRegistrationExtras) {
       registrationFormData = {
@@ -883,6 +891,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
         _joiningProgramLevel,
         _joiningManagedCourseId: _jmc,
         _joiningManagedBranchId: _jmb,
+        _joiningReservation: _jres,
         ...rest
       } = leadDataRaw;
       studentFeeDetails = formatStudentFeeDetailsForClient(_joiningStudentFeeDetails);
@@ -893,6 +902,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
         _joiningProgramLevel,
         _joiningManagedCourseId: _jmc,
         _joiningManagedBranchId: _jmb,
+        _joiningReservation: _jres,
         ...rest
       } = leadDataRaw;
       studentFeeDetails = formatStudentFeeDetailsForClient(_joiningStudentFeeDetails);
@@ -1044,6 +1054,14 @@ const formatJoining = async (joiningData, pool, options = {}) => {
     },
     reservation: {
       general: joiningData.reservation_general || '',
+      categoryId:
+        reservationMeta?.categoryId != null && String(reservationMeta.categoryId).trim() !== ''
+          ? String(reservationMeta.categoryId).trim()
+          : undefined,
+      casteId:
+        reservationMeta?.casteId != null && String(reservationMeta.casteId).trim() !== ''
+          ? String(reservationMeta.casteId).trim()
+          : undefined,
       isEws: joiningData.reservation_is_ews === 1 || joiningData.reservation_is_ews === true,
       other: reservationOther,
     },
@@ -2022,6 +2040,14 @@ const normalizeJoiningPayload = (payload) => {
       safePayload.reservation.general || DEFAULT_GENERAL_RESERVATION;
     safePayload.reservation.other =
       safePayload.reservation.other?.map((entry) => sanitizeString(entry)) || [];
+    if (safePayload.reservation.categoryId != null) {
+      const cid = String(safePayload.reservation.categoryId).trim();
+      safePayload.reservation.categoryId = cid || undefined;
+    }
+    if (safePayload.reservation.casteId != null) {
+      const nid = String(safePayload.reservation.casteId).trim();
+      safePayload.reservation.casteId = nid || undefined;
+    }
   }
 
   if (safePayload.courseInfo) {
@@ -2575,6 +2601,21 @@ export const saveJoiningDraft = async (req, res) => {
         ...(finalPayload.leadData && typeof finalPayload.leadData === 'object' ? finalPayload.leadData : {}),
         ...managedCourseRefs,
       };
+    }
+
+    if (payload.reservation !== undefined) {
+      const nextLd = {
+        ...(finalPayload.leadData && typeof finalPayload.leadData === 'object'
+          ? finalPayload.leadData
+          : {}),
+      };
+      const reservationMetaToStore = buildJoiningReservationMeta(reservation);
+      if (reservationMetaToStore) {
+        nextLd._joiningReservation = reservationMetaToStore;
+      } else {
+        delete nextLd._joiningReservation;
+      }
+      finalPayload.leadData = nextLd;
     }
 
     if (payload.reference1 !== undefined) {
@@ -3581,11 +3622,15 @@ export const approveJoining = async (req, res) => {
     
     // Preserve registration extras and other unmapped fields
     if (joiningLeadData && typeof joiningLeadData === 'object') {
-      ['_joiningRegistrationExtras', '_joiningStudentFeeDetails', '_joiningProgramLevel', '_joiningManagedCourseId', '_joiningManagedBranchId'].forEach(key => {
+      ['_joiningRegistrationExtras', '_joiningStudentFeeDetails', '_joiningProgramLevel', '_joiningManagedCourseId', '_joiningManagedBranchId', '_joiningReservation'].forEach(key => {
         if (joiningLeadData[key] != null) {
           leadDataSnapshot[key] = joiningLeadData[key];
         }
       });
+    }
+    const reservationMetaFromJoining = buildJoiningReservationMeta(formattedJoining?.reservation);
+    if (reservationMetaFromJoining) {
+      leadDataSnapshot._joiningReservation = reservationMetaFromJoining;
     }
     delete leadDataSnapshot._id;
     delete leadDataSnapshot.id;

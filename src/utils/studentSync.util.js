@@ -27,6 +27,8 @@ import {
   resolveBranchScope,
 } from './studentRollNumber.util.js';
 import { syncStudentFeesToFeeManagement } from '../services/feeManagementStudentFeeSync.service.js';
+import { getTableColumnSet } from './secondarySchema.util.js';
+import { resolveSecondaryStudentCasteFields } from './casteCatalog.util.js';
 
 const normalizeChecklistItemStatus = (entry) => {
   if (typeof entry === 'string') {
@@ -586,7 +588,23 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       return parsed;
     };
 
-    const reservationGeneral = toText(admissionData?.reservation?.general).toUpperCase();
+    const reservationGeneral = toText(admissionData?.reservation?.general);
+    const reservationMeta =
+      admissionData?.leadData &&
+      typeof admissionData.leadData === 'object' &&
+      admissionData.leadData._joiningReservation &&
+      typeof admissionData.leadData._joiningReservation === 'object'
+        ? admissionData.leadData._joiningReservation
+        : {};
+    const resolvedCasteFields = await resolveSecondaryStudentCasteFields({
+      general: reservationGeneral,
+      categoryId:
+        admissionData?.reservation?.categoryId ?? reservationMeta.categoryId ?? null,
+      casteId: admissionData?.reservation?.casteId ?? reservationMeta.casteId ?? null,
+    });
+    const secondaryCaste = resolvedCasteFields.caste;
+    const secondaryCategoryId = resolvedCasteFields.categoryId;
+    const secondaryCasteId = resolvedCasteFields.casteId;
     const courseLabelRaw = admissionData?.courseInfo?.course || '';
     const courseLabelNorm = normalizeCourseNameForSecondarySync(courseLabelRaw);
     const isDegreeProgram =
@@ -783,7 +801,22 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       return student.length === 10 ? student : null;
     })();
 
-    const studentParams = [
+    const studentCols = await getTableColumnSet(secondaryPool, 'students');
+    const hasCategoryIdColumn = studentCols.has('category_id');
+    const hasCasteIdColumn = studentCols.has('caste_id');
+
+    const casteWriteColumns = ['caste'];
+    const casteWriteValues = [secondaryCaste];
+    if (hasCategoryIdColumn) {
+      casteWriteColumns.push('category_id');
+      casteWriteValues.push(secondaryCategoryId);
+    }
+    if (hasCasteIdColumn) {
+      casteWriteColumns.push('caste_id');
+      casteWriteValues.push(secondaryCasteId);
+    }
+
+    const studentCoreParams = [
       resolvedAdmissionNumber,
       resolvedAdmissionNumber,
       admissionData.studentInfo?.name || '',
@@ -812,7 +845,9 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
         toNullableText(registrationExtras?.college),
       studType,
       toNullableText(registrationExtras?.scholar_status),
-      reservationGeneral || null,
+    ];
+
+    const studentTailParams = [
       toNullableText(admissionData?.remarks ?? registrationExtras?.remarks),
       toNullableText(registrationExtras?.previous_college),
       certificatesStatus,
@@ -824,6 +859,11 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
       new Date().toISOString().split('T')[0],
       secondaryStudentStatus,
     ];
+
+    const studentParams = [...studentCoreParams, ...casteWriteValues, ...studentTailParams];
+    const casteUpdateSql = casteWriteColumns.map((col) => `${col} = ?`).join(',\n          ');
+    const casteInsertColsSql = casteWriteColumns.join(',\n          ');
+    const casteInsertPlaceholders = casteWriteColumns.map(() => '?').join(', ');
 
     if (existingStudents.length > 0) {
       await secondaryPool.execute(
@@ -850,7 +890,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           college = ?,
           stud_type = ?,
           scholar_status = ?,
-          caste = ?,
+          ${casteUpdateSql},
           remarks = ?,
           previous_college = ?,
           certificates_status = ?,
@@ -893,7 +933,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           college,
           stud_type,
           scholar_status,
-          caste,
+          ${casteInsertColsSql},
           remarks,
           previous_college,
           certificates_status,
@@ -906,7 +946,7 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
           updated_at,
           admission_date,
           student_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${casteInsertPlaceholders}, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?)`,
         studentParams
       );
       console.log(`Synced new student ${resolvedAdmissionNumber} to secondary DB`);

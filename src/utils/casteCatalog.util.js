@@ -154,3 +154,134 @@ export async function fetchCasteCatalogForJoining() {
     source: 'secondary',
   };
 }
+
+/**
+ * Coerce Settings / castes ids to a DB-friendly value (number when numeric).
+ * @param {string|number|null|undefined} value
+ * @returns {number|string|null}
+ */
+function toSecondaryId(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const trimmed = String(value).trim();
+  const asNum = Number(trimmed);
+  if (Number.isFinite(asNum) && String(asNum) === trimmed) return asNum;
+  return trimmed;
+}
+
+/**
+ * Build lead_data._joiningReservation sidecar from a reservation payload.
+ * categoryId / casteId are Settings DB ids (category required for sync; nested caste optional).
+ */
+export function buildJoiningReservationMeta(reservation = {}) {
+  const categoryId =
+    reservation?.categoryId != null && String(reservation.categoryId).trim() !== ''
+      ? String(reservation.categoryId).trim()
+      : null;
+  const casteId =
+    reservation?.casteId != null && String(reservation.casteId).trim() !== ''
+      ? String(reservation.casteId).trim()
+      : null;
+  if (!categoryId && !casteId) return null;
+  return { categoryId, casteId };
+}
+
+/**
+ * Resolve students.caste / category_id / caste_id per shared RDS write contract:
+ *   caste        = category name string (caste_categories.name)
+ *   category_id  = caste_categories.id for that name
+ *   caste_id     = castes.id if nested caste chosen, else NULL
+ * Never invent free-text categories. Never put a category id in caste_id.
+ *
+ * @param {{ general?: string|null, categoryId?: string|number|null, casteId?: string|number|null }} input
+ * @returns {Promise<{ caste: string|null, categoryId: number|string|null, casteId: number|string|null }>}
+ */
+export async function resolveSecondaryStudentCasteFields(input = {}) {
+  const general = String(input.general ?? '').trim();
+  const explicitCategoryId =
+    input.categoryId != null && String(input.categoryId).trim() !== ''
+      ? String(input.categoryId).trim()
+      : '';
+  const explicitCasteId =
+    input.casteId != null && String(input.casteId).trim() !== ''
+      ? String(input.casteId).trim()
+      : '';
+
+  const [categories, castes] = await Promise.all([
+    fetchActiveCasteCategories(),
+    fetchActiveCastes(),
+  ]);
+
+  const findCategoryById = (id) =>
+    categories.find((c) => String(c.id) === String(id || ''));
+  const findCategoryByName = (name) => {
+    const key = normalizeCasteKey(name);
+    if (!key) return null;
+    return categories.find((c) => normalizeCasteKey(c.name) === key) || null;
+  };
+  const findCasteById = (id) => castes.find((c) => String(c.id) === String(id || ''));
+  const findCasteByName = (name, categoryId) => {
+    const key = normalizeCasteKey(name);
+    if (!key) return null;
+    const scoped = categoryId
+      ? castes.filter((c) => String(c.categoryId) === String(categoryId))
+      : castes;
+    return scoped.find((c) => normalizeCasteKey(c.name) === key) || null;
+  };
+
+  let category = explicitCategoryId ? findCategoryById(explicitCategoryId) : null;
+
+  // Prefer category-name match on reservation.general (students.caste must be category).
+  if (!category && general) {
+    category = findCategoryByName(general);
+  }
+
+  // Legacy: general held a nested caste name — map to parent category.
+  let legacyNestedCaste = null;
+  if (!category && general) {
+    legacyNestedCaste = findCasteByName(general);
+    if (legacyNestedCaste?.categoryId) {
+      category = findCategoryById(legacyNestedCaste.categoryId);
+    }
+  }
+
+  let nestedCaste = explicitCasteId ? findCasteById(explicitCasteId) : null;
+
+  // Never treat a category id as caste_id.
+  if (nestedCaste && findCategoryById(explicitCasteId)) {
+    nestedCaste = null;
+  }
+
+  // Legacy repair: only when general was a nested caste (not a category name).
+  if (!nestedCaste && legacyNestedCaste && category) {
+    if (normalizeCasteKey(legacyNestedCaste.name) !== normalizeCasteKey(category.name)) {
+      nestedCaste = legacyNestedCaste;
+    }
+  }
+
+  // Reject nested caste that mirrors the category name (BC-A → BC-A row).
+  if (nestedCaste && category) {
+    if (normalizeCasteKey(nestedCaste.name) === normalizeCasteKey(category.name)) {
+      nestedCaste = null;
+    }
+  }
+
+  // Reject nested caste under a different category than the resolved one.
+  if (nestedCaste && category && nestedCaste.categoryId) {
+    if (String(nestedCaste.categoryId) !== String(category.id)) {
+      nestedCaste = null;
+    }
+  }
+
+  // If caste resolves a category we didn't have yet, adopt its parent.
+  if (!category && nestedCaste?.categoryId) {
+    category = findCategoryById(nestedCaste.categoryId);
+  }
+
+  const casteName = category?.name ? String(category.name).trim() : null;
+
+  return {
+    caste: casteName || null,
+    categoryId: category?.id != null ? toSecondaryId(category.id) : null,
+    casteId: nestedCaste?.id != null ? toSecondaryId(nestedCaste.id) : null,
+  };
+}
