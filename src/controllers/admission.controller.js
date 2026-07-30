@@ -8,6 +8,10 @@ import { syncToSecondaryDatabase, warnIfSecondaryStudentSyncMissed } from '../ut
 import { buildJoiningReservationMeta } from '../utils/casteCatalog.util.js';
 import { updatePerformanceMetric } from '../services/userPerformance.service.js';
 import smsService from '../services/sms.service.js';
+import {
+  normalizeMobileDigits,
+  suggestPreferredMobileDigits,
+} from '../utils/parentPhone.util.js';
 import ExcelJS from 'exceljs';
 import {
   FATHER_PHOTO_REG_KEYS,
@@ -3132,7 +3136,8 @@ const resolveImportantPendingDocumentsForRow = (admission, certRoot) => {
 
 const loadAdmissionForDocumentSms = async (pool, admissionId) => {
   const [rows] = await pool.execute(
-    `SELECT id, status, student_name, student_phone, lead_id, lead_data, qualification_merit,
+    `SELECT id, status, student_name, student_phone, preferred_mobile_number,
+            father_phone, mother_phone, lead_id, lead_data, qualification_merit,
             document_ssc, document_inter, document_ug_pg_cmm,
             document_transfer_certificate, document_study_certificate,
             JSON_UNQUOTE(JSON_EXTRACT(lead_data, '$._joiningProgramLevel')) AS program_level,
@@ -3146,20 +3151,42 @@ const loadAdmissionForDocumentSms = async (pool, admissionId) => {
   return rows[0] || null;
 };
 
+/**
+ * Recipient for document + pending-fee SMS: preferred mobile (usually parent),
+ * then suggested parent line, then student phone, then lead phone.
+ */
 const resolveStudentContactForDocumentSms = async (pool, admission) => {
   let studentName = String(admission.student_name || '').trim();
   let studentPhone = String(admission.student_phone || '').trim();
-  if ((!studentName || !studentPhone) && admission.lead_id) {
+  let fatherPhone = String(admission.father_phone || '').trim();
+  let motherPhone = String(admission.mother_phone || '').trim();
+  let preferredMobile = String(admission.preferred_mobile_number || '').trim();
+
+  if (
+    (!studentName || !studentPhone || !fatherPhone || !preferredMobile) &&
+    admission.lead_id
+  ) {
     const [leadRows] = await pool.execute(
-      'SELECT name, phone FROM leads WHERE id = ? LIMIT 1',
+      'SELECT name, phone, father_phone FROM leads WHERE id = ? LIMIT 1',
       [admission.lead_id]
     );
     if (leadRows.length > 0) {
       if (!studentName) studentName = String(leadRows[0].name || '').trim();
       if (!studentPhone) studentPhone = String(leadRows[0].phone || '').trim();
+      if (!fatherPhone) fatherPhone = String(leadRows[0].father_phone || '').trim();
     }
   }
-  return { studentName, studentPhone };
+
+  const preferredDigits = normalizeMobileDigits(preferredMobile);
+  const suggestedDigits = suggestPreferredMobileDigits(studentPhone, fatherPhone, motherPhone);
+  const studentDigits = normalizeMobileDigits(studentPhone);
+
+  let smsPhone = '';
+  if (preferredDigits.length === 10) smsPhone = preferredDigits;
+  else if (suggestedDigits.length === 10) smsPhone = suggestedDigits;
+  else if (studentDigits.length === 10) smsPhone = studentDigits;
+
+  return { studentName, studentPhone: smsPhone };
 };
 
 /**
@@ -3192,7 +3219,7 @@ const sendImportantDocumentsSmsForAdmission = async ({
       skipped: true,
       admissionId: admission.id,
       error: 'missing_phone',
-      message: 'Student phone is not on file.',
+      message: 'Preferred / parent mobile number is not on file.',
     };
   }
 
@@ -3475,6 +3502,7 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
 
       // Send Admission Confirmation Pending SMS when there is a pending fee amount.
       // Uses template id + message defined in sms.service.js.
+      // Same preferred-mobile recipient as document SMS (parent line when set).
       let confirmationResult = null;
       const pendingAmountFromClient = Number(pendingFeeAmountsByAdmissionId?.[String(admission.id)] ?? 0);
       const pendingAmountFromServer = Number(pendingAmountByAdmissionId.get(String(admission.id)) || 0);
@@ -3488,19 +3516,30 @@ export const sendDocumentNotificationSmsBulk = async (req, res) => {
         hasMatchingMinimumFeeConfig &&
         admission.status !== ADMISSION_CANCELLED_STATUS
       ) {
-        confirmationResult = await smsService.sendAdmissionConfirmationPending(
-          admission.student_phone,
-          admission.student_name,
-          pendingAmount,
-          DOCUMENT_SMS_COLLEGE_PHONE,
-          {
-            meritYes:
-              admission.qualification_merit === 1 || admission.qualification_merit === true,
-          }
-        );
-        if (confirmationResult?.success) confirmationSent += 1;
-        else if (confirmationResult?.skipped) confirmationSkipped += 1;
-        else confirmationFailed += 1;
+        const { studentName: feeSmsName, studentPhone: feeSmsPhone } =
+          await resolveStudentContactForDocumentSms(pool, admission);
+        if (!feeSmsPhone) {
+          confirmationResult = {
+            success: false,
+            skipped: true,
+            error: 'missing_phone',
+          };
+          confirmationSkipped += 1;
+        } else {
+          confirmationResult = await smsService.sendAdmissionConfirmationPending(
+            feeSmsPhone,
+            feeSmsName || admission.student_name,
+            pendingAmount,
+            DOCUMENT_SMS_COLLEGE_PHONE,
+            {
+              meritYes:
+                admission.qualification_merit === 1 || admission.qualification_merit === true,
+            }
+          );
+          if (confirmationResult?.success) confirmationSent += 1;
+          else if (confirmationResult?.skipped) confirmationSkipped += 1;
+          else confirmationFailed += 1;
+        }
       } else {
         confirmationSkipped += 1;
       }
