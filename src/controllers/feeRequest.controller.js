@@ -435,12 +435,78 @@ export const submitFeeRequest = async (req, res) => {
     if (!joiningRows.length) {
       return errorResponse(res, 'Joining not found', 404);
     }
-    const joining = joiningRows[0];
-    if (joining.status !== 'approved') {
-      return errorResponse(res, 'Fee requests can only be submitted for approved joinings', 400);
+    let joining = joiningRows[0];
+    if (
+      joining.status !== 'approved' &&
+      joining.status !== 'draft' &&
+      joining.status !== 'pending_approval'
+    ) {
+      return errorResponse(
+        res,
+        'Fee requests can only be submitted for draft or approved joinings',
+        400
+      );
     }
 
-    const admissionNumber = await resolveJoiningAdmissionNumberFromDb(pool, joining);
+    // Determine revised lines first — admission number is minted only when amounts exist.
+    let revisedLines = [];
+    const rawLines = Array.isArray(studentFeeDetails?.lines) ? studentFeeDetails.lines : [];
+    revisedLines = rawLines
+      .filter((line) =>
+        isPersistableBuilderConcessionLine(line) &&
+        (line.concessionType === 'CONCESSION' || line.concessionType === 'REVISED_FEE')
+      )
+      .map((line) => ({
+        feeHeadId:      line.feeHeadId || '',
+        feeHeadCode:    line.feeHeadCode || '',
+        feeHeadName:    line.feeHeadName || '',
+        studentYear:    Number(line.studentYear) || 1,
+        amount:         Number(line.amount) || 0,
+        concessionType: line.concessionType,
+        isRevised:      true,
+      }));
+
+    if (revisedLines.length === 0) {
+      return errorResponse(
+        res,
+        'No revised fees to submit — add at least one concession or revised fee amount in the builder',
+        400
+      );
+    }
+
+    // Mint admission number on Submit Fee Request when revised amounts are present
+    // (not on collect payment). Approves draft/pending joinings if needed.
+    let admissionNumber = await resolveJoiningAdmissionNumberFromDb(pool, joining);
+    if (!admissionNumber) {
+      if (!req.user?.id) {
+        return errorResponse(res, 'Authentication required to generate admission number', 401);
+      }
+      try {
+        const { ensureAdmissionForFeeCollection } = await import('./joining.controller.js');
+        const ensured = await ensureAdmissionForFeeCollection(joiningId, req.user.id);
+        admissionNumber = String(ensured.admissionNumber || '').trim();
+      } catch (ensureErr) {
+        return errorResponse(
+          res,
+          ensureErr.message || 'Failed to generate admission number for fee request',
+          ensureErr.statusCode || 422
+        );
+      }
+      if (!admissionNumber) {
+        return errorResponse(
+          res,
+          'Admission number could not be generated for this fee request',
+          500
+        );
+      }
+      const [refreshedJoinings] = await pool.execute(
+        'SELECT * FROM joinings WHERE id = ? LIMIT 1',
+        [joiningId]
+      );
+      if (refreshedJoinings.length) {
+        joining = refreshedJoinings[0];
+      }
+    }
 
     const syncContext = buildJoiningFeeSyncContext(
       joining,
@@ -448,6 +514,25 @@ export const submitFeeRequest = async (req, res) => {
       registrationExtras,
       admissionNumber
     );
+
+    // Prefer catalog sync plan when available (more accurate fee-head matching).
+    try {
+      const syncResult = await buildJoiningStepFourSyncPlan({
+        joiningId,
+        leadId: joining.lead_id,
+        studentFeeDetails,
+        joiningContext: syncContext,
+      });
+      const catalogRevised = (syncResult?.lines || []).filter((line) => line.isRevised);
+      if (catalogRevised.length > 0) {
+        revisedLines = catalogRevised;
+      }
+    } catch (syncErr) {
+      console.warn(
+        '[submitFeeRequest] buildJoiningStepFourSyncPlan failed, using raw builder lines:',
+        syncErr?.message
+      );
+    }
 
     // Fetch student metadata from secondary DB for the Mongo document
     let studentPinNo = '';
@@ -466,49 +551,6 @@ export const submitFeeRequest = async (req, res) => {
       }
     } catch (secErr) {
       console.warn('[submitFeeRequest] Secondary DB lookup skipped:', secErr?.message);
-    }
-
-    // Determine revised lines: first try the catalog sync plan (accurate),
-    // but fall back to raw builder lines when the catalog lookup yields nothing.
-    // This ensures the request is never blocked just because catalog matching fails.
-    let revisedLines = [];
-    try {
-      const syncResult = await buildJoiningStepFourSyncPlan({
-        joiningId,
-        leadId: joining.lead_id,
-        studentFeeDetails,
-        joiningContext: syncContext,
-      });
-      revisedLines = (syncResult?.lines || []).filter((line) => line.isRevised);
-    } catch (syncErr) {
-      console.warn('[submitFeeRequest] buildJoiningStepFourSyncPlan failed, falling back to raw lines:', syncErr?.message);
-    }
-
-    // Fallback: use raw builder lines that have a concession/revised type + amount
-    if (revisedLines.length === 0) {
-      const rawLines = Array.isArray(studentFeeDetails?.lines) ? studentFeeDetails.lines : [];
-      revisedLines = rawLines
-        .filter((line) =>
-          isPersistableBuilderConcessionLine(line) &&
-          (line.concessionType === 'CONCESSION' || line.concessionType === 'REVISED_FEE')
-        )
-        .map((line) => ({
-          feeHeadId:      line.feeHeadId || '',
-          feeHeadCode:    line.feeHeadCode || '',
-          feeHeadName:    line.feeHeadName || '',
-          studentYear:    Number(line.studentYear) || 1,
-          amount:         Number(line.amount) || 0,
-          concessionType: line.concessionType,
-          isRevised:      true,
-        }));
-    }
-
-    if (revisedLines.length === 0) {
-      return errorResponse(
-        res,
-        'No revised fees to submit — add at least one concession or revised fee amount in the builder',
-        400
-      );
     }
 
     const transportDetails =

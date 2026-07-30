@@ -385,7 +385,7 @@ export const listFeeManagementTransactions = async (req, res) => {
     }
     if (!studentId) studentId = fallbackStudentId;
     if (!studentId) {
-      // Draft joinings have no admission number until first fee collect — return empty list.
+      // Draft joinings have no admission number until Submit Fee Request — return empty list.
       return successResponse(res, {
         transactions: [],
         data: [],
@@ -491,28 +491,11 @@ export const recordFeeManagementTransaction = async (req, res) => {
     }
 
     let studentId = String(admission?.admission_number || '').trim();
-    // Mint admission number on first fee collect (not on submit/approve alone).
-    if (!studentId) {
-      if (!req.user?.id) {
-        return errorResponse(res, 'Authentication required to generate admission number', 401);
-      }
-      try {
-        const { ensureAdmissionForFeeCollection } = await import('./joining.controller.js');
-        const ensured = await ensureAdmissionForFeeCollection(joiningId, req.user.id);
-        admission = ensured.admission || admission;
-        studentId = String(ensured.admissionNumber || '').trim();
-      } catch (ensureErr) {
-        return errorResponse(
-          res,
-          ensureErr.message || 'Failed to generate admission number for fee collection',
-          ensureErr.statusCode || 422
-        );
-      }
-    }
+    // Admission number is minted on Submit Fee Request (revised amounts), not on collect.
     if (!studentId) {
       return errorResponse(
         res,
-        'Admission number could not be generated for this fee payment',
+        'No admission number yet. Submit a fee request with revised fee amounts first to generate the admission number.',
         422
       );
     }
@@ -1845,31 +1828,11 @@ export const verifyRazorpayQR = async (req, res) => {
     }
 
     let studentId = String(admission?.admission_number || '').trim();
-    if (!studentId) {
-      const actorId = req.user?.id || transaction.collected_by;
-      if (!actorId) {
-        return errorResponse(res, 'Authentication required to generate admission number', 401);
-      }
-      try {
-        const { ensureAdmissionForFeeCollection } = await import('./joining.controller.js');
-        const ensured = await ensureAdmissionForFeeCollection(joiningId, actorId);
-        admission = ensured.admission || admission;
-        studentId = String(ensured.admissionNumber || '').trim();
-        if (ensured.admissionId && !admissionId) {
-          admissionId = ensured.admissionId;
-        }
-      } catch (ensureErr) {
-        return errorResponse(
-          res,
-          ensureErr.message || 'Failed to generate admission number for fee collection',
-          ensureErr.statusCode || 422
-        );
-      }
-    }
+    // Admission number is minted on Submit Fee Request (revised amounts), not on collect/verify.
     if (!studentId) {
       return errorResponse(
         res,
-        'Admission number could not be generated for this fee payment',
+        'No admission number yet. Submit a fee request with revised fee amounts first to generate the admission number.',
         422
       );
     }

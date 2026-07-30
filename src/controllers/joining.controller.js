@@ -1145,6 +1145,119 @@ const formatJoining = async (joiningData, pool, options = {}) => {
   };
 };
 
+/**
+ * Lightweight list DTO — avoids shipping lead_data, photos, fee lines, and documents.
+ * Used by Self Registration / pipeline tables (detail views still call getByLeadId).
+ */
+const formatJoiningListItem = (joiningData) => {
+  if (!joiningData) return null;
+
+  const fromRowManagedCourse = normalizeManagedIdForDb(joiningData.managed_course_id);
+  const fromRowManagedBranch = normalizeManagedIdForDb(joiningData.managed_branch_id);
+  const rawJoiningCourseId =
+    fromRowManagedCourse != null
+      ? fromRowManagedCourse
+      : joiningData.list_managed_course_id != null &&
+          String(joiningData.list_managed_course_id).trim() !== ''
+        ? joiningData.list_managed_course_id
+        : joiningData.course_id;
+  const rawJoiningBranchId =
+    fromRowManagedBranch != null
+      ? fromRowManagedBranch
+      : joiningData.list_managed_branch_id != null &&
+          String(joiningData.list_managed_branch_id).trim() !== ''
+        ? joiningData.list_managed_branch_id
+        : joiningData.branch_id;
+  const normalizedJoiningCourseId =
+    rawJoiningCourseId != null && String(rawJoiningCourseId).trim() !== ''
+      ? String(rawJoiningCourseId).trim()
+      : null;
+  const normalizedJoiningBranchId =
+    rawJoiningBranchId != null && String(rawJoiningBranchId).trim() !== ''
+      ? String(rawJoiningBranchId).trim()
+      : null;
+
+  const admissionNumber = joiningData.list_admission_number
+    ? String(joiningData.list_admission_number).trim()
+    : '';
+  const studentStatus = String(
+    joiningData.list_student_status || joiningData.list_student_status_alt || ''
+  ).trim();
+  const courseLabel = resolveBtechCourseDisplayName(
+    joiningData.course || '',
+    studentStatus ? { student_status: studentStatus } : {},
+    admissionNumber
+  );
+
+  const hasCollege = Number(joiningData.list_has_college) === 1;
+
+  return {
+    _id: joiningData.id,
+    id: joiningData.id,
+    leadId: joiningData.lead_id,
+    status: joiningData.status,
+    courseInfo: {
+      courseId: normalizedJoiningCourseId,
+      branchId: normalizedJoiningBranchId,
+      course: courseLabel,
+      branch: joiningData.branch || '',
+      quota: joiningData.quota || '',
+    },
+    studentInfo: {
+      name: joiningData.student_name || '',
+      phone: joiningData.student_phone || '',
+    },
+    paymentSummary: {
+      totalFee: Number(joiningData.payment_total_fee) || 0,
+      totalPaid: Number(joiningData.payment_total_paid) || 0,
+      balance: Number(joiningData.payment_balance) || 0,
+      currency: joiningData.payment_currency || 'INR',
+      status: joiningData.payment_status || 'not_started',
+    },
+    // Minimal extras so Approve gate (`joiningHasManagedCourseAndBranch`) still works.
+    registrationFormData: hasCollege ? { college_id: '1' } : {},
+    hasCollege,
+    ...(joiningData.lead_id &&
+    (joiningData.lead_name != null ||
+      joiningData.lead_enquiry_number != null ||
+      joiningData.lead_phone != null)
+      ? {
+          lead: {
+            name: joiningData.lead_name || '',
+            phone: joiningData.lead_phone || '',
+            enquiryNumber: joiningData.lead_enquiry_number || '',
+            hallTicketNumber: joiningData.lead_hall_ticket_number || '',
+            leadStatus: joiningData.lead_lead_status || '',
+            courseInterested: joiningData.lead_course_interested || '',
+            mandal: joiningData.lead_mandal || '',
+            district: joiningData.lead_district || '',
+            quota: joiningData.lead_quota || '',
+            fatherPhone: joiningData.lead_father_phone || '',
+          },
+        }
+      : {}),
+    updatedAt: joiningData.updated_at,
+    createdAt: joiningData.created_at,
+    ...(Object.prototype.hasOwnProperty.call(joiningData, 'list_admission_id')
+      ? {
+          admissionId: joiningData.list_admission_id
+            ? String(joiningData.list_admission_id)
+            : undefined,
+          admissionNumber,
+          admissionStatus: joiningData.list_admission_status
+            ? String(joiningData.list_admission_status).trim()
+            : '',
+          admissionConfirmed: Boolean(
+            joiningData.list_admission_id &&
+              admissionNumber &&
+              String(joiningData.list_admission_status || '').trim().toLowerCase() !==
+                'admission cancelled'
+          ),
+        }
+      : {}),
+  };
+};
+
 export const listJoinings = async (req, res) => {
   try {
     const {
@@ -1188,19 +1301,22 @@ export const listJoinings = async (req, res) => {
       params.push(leadStatus, leadStatus);
     }
 
-    // Search filtering
+    // Search: prefer denormalized columns (indexed-friendly) over lead_data JSON LIKE.
     if (search) {
       const searchPattern = `%${search}%`;
       conditions.push(`(
-        l.name LIKE ? OR l.phone LIKE ? OR l.hall_ticket_number LIKE ? OR l.enquiry_number LIKE ?
-        OR JSON_EXTRACT(j.lead_data, "$.name") LIKE ? OR JSON_EXTRACT(j.lead_data, "$.phone") LIKE ?
-        OR JSON_EXTRACT(j.lead_data, "$.hallTicketNumber") LIKE ? OR JSON_EXTRACT(j.lead_data, "$.enquiryNumber") LIKE ?
-        OR j.student_name LIKE ? OR j.student_phone LIKE ?
+        j.student_name LIKE ? OR j.student_phone LIKE ?
+        OR l.name LIKE ? OR l.phone LIKE ? OR l.enquiry_number LIKE ? OR l.hall_ticket_number LIKE ?
+        OR l.father_phone LIKE ?
       )`);
       params.push(
-        searchPattern, searchPattern, searchPattern, searchPattern,
-        searchPattern, searchPattern, searchPattern, searchPattern,
-        searchPattern, searchPattern
+        searchPattern,
+        searchPattern,
+        searchPattern,
+        searchPattern,
+        searchPattern,
+        searchPattern,
+        searchPattern
       );
     }
 
@@ -1279,10 +1395,27 @@ export const listJoinings = async (req, res) => {
       }
     }
 
-    // Get paginated results
+    // Slim list SELECT — never load lead_data / photo LONGTEXTs (multi-MB per page).
     // Note: Using string interpolation for LIMIT/OFFSET as mysql2 has issues with placeholders for these
     const [joinings] = await pool.execute(
-      `SELECT j.*, l.name as lead_name, l.phone as lead_phone, l.hall_ticket_number as lead_hall_ticket_number,
+      `SELECT j.id, j.lead_id, j.status, j.student_name, j.student_phone, j.course, j.branch, j.quota,
+              j.course_id, j.branch_id, j.managed_course_id, j.managed_branch_id,
+              j.payment_total_fee, j.payment_total_paid, j.payment_balance, j.payment_currency, j.payment_status,
+              j.created_at, j.updated_at,
+              JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningManagedCourseId')) AS list_managed_course_id,
+              JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningManagedBranchId')) AS list_managed_branch_id,
+              JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.student_status')) AS list_student_status,
+              JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.studentStatus')) AS list_student_status_alt,
+              CASE
+                WHEN NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.college_id'))), '') IS NOT NULL
+                  OR NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.collegeId'))), '') IS NOT NULL
+                  OR NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.school_or_college_id'))), '') IS NOT NULL
+                  OR NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.schoolOrCollegeId'))), '') IS NOT NULL
+                  OR NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.school_or_college_name'))), '') IS NOT NULL
+                  OR NULLIF(TRIM(JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$._joiningRegistrationExtras.college'))), '') IS NOT NULL
+                THEN 1 ELSE 0
+              END AS list_has_college,
+              l.name as lead_name, l.phone as lead_phone, l.hall_ticket_number as lead_hall_ticket_number,
               l.enquiry_number as lead_enquiry_number, l.lead_status as lead_lead_status,
               l.course_interested as lead_course_interested, l.mandal as lead_mandal, l.district as lead_district,
               l.quota as lead_quota, l.father_phone as lead_father_phone,
@@ -1297,10 +1430,7 @@ export const listJoinings = async (req, res) => {
       params
     );
 
-    // List view: skip relatives / education / siblings queries (3 round-trips per row).
-    const formattedJoinings = await Promise.all(
-      joinings.map((j) => formatJoining(j, pool, { listMode: true }))
-    );
+    const formattedJoinings = joinings.map((j) => formatJoiningListItem(j));
 
     return successResponse(
       res,
@@ -3311,7 +3441,7 @@ export const approveJoining = async (req, res) => {
       return errorResponse(res, 'Joining draft not found', 404);
     }
 
-    // draft → first fee collect / explicit approve; pending_approval kept for legacy queue rows
+    // draft → Submit Fee Request / explicit approve; pending_approval kept for legacy queue rows
     if (
       joining.status !== 'draft' &&
       joining.status !== 'pending_approval' &&
@@ -3860,9 +3990,9 @@ export const approveJoining = async (req, res) => {
 };
 
 /**
- * Ensures an admission row + admission number exist before fee portal collection.
+ * Ensures an admission row + admission number exist (e.g. on Submit Fee Request).
  * Idempotent when already approved with a number. Otherwise runs the approve path
- * (draft / pending → approved) so the number is minted only at first payment.
+ * (draft / pending → approved) so the number is minted when revised fee amounts are submitted.
  *
  * @param {string} joiningId
  * @param {string} userId
@@ -3912,7 +4042,7 @@ export async function ensureAdmissionForFeeCollection(joiningId, userId) {
       },
       json(body) {
         if (body?.success === false || (this.statusCode && this.statusCode >= 400)) {
-          const err = new Error(body?.message || 'Failed to create admission for fee collection');
+          const err = new Error(body?.message || 'Failed to create admission for fee request');
           err.statusCode = this.statusCode || 400;
           reject(err);
           return body;
@@ -3929,7 +4059,7 @@ export async function ensureAdmissionForFeeCollection(joiningId, userId) {
   ).trim();
   const admissionId = result?.data?.admissionId || result?.admissionId || null;
   if (!admissionNumber) {
-    const err = new Error('Admission number was not generated during fee collection');
+    const err = new Error('Admission number was not generated during fee request submit');
     err.statusCode = 500;
     throw err;
   }

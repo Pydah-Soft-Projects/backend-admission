@@ -1892,18 +1892,22 @@ const parseReferenceNameFromRow = (row) => {
   if (fromJoin) return fromJoin;
   try {
     const rawDyn = row.lead_dynamic_fields;
-    const dyn =
-      Buffer.isBuffer(rawDyn)
-        ? JSON.parse(rawDyn.toString('utf8') || '{}')
-        : typeof rawDyn === 'string'
-          ? JSON.parse(rawDyn || '{}')
-          : rawDyn && typeof rawDyn === 'object'
-            ? rawDyn
-            : {};
-    return readReference1FromDynamicFields(dyn);
+    if (rawDyn != null && (typeof rawDyn === 'string' || Buffer.isBuffer(rawDyn) || typeof rawDyn === 'object')) {
+      const dyn =
+        Buffer.isBuffer(rawDyn)
+          ? JSON.parse(rawDyn.toString('utf8') || '{}')
+          : typeof rawDyn === 'string'
+            ? JSON.parse(rawDyn || '{}')
+            : rawDyn && typeof rawDyn === 'object'
+              ? rawDyn
+              : {};
+      const fromDynObj = readReference1FromDynamicFields(dyn);
+      if (fromDynObj) return fromDynObj;
+    }
   } catch {
-    return '';
+    // fall through to extracted column
   }
+  return String(row.lead_dyn_reference1 || '').trim();
 };
 
 const registrationExtrasFromLeadDataRaw = (leadDataRaw) => {
@@ -1913,6 +1917,8 @@ const registrationExtrasFromLeadDataRaw = (leadDataRaw) => {
 };
 
 const registrationExtrasFromListRow = (row) => {
+  const studentStatus = String(row.list_student_status || row.list_student_status_alt || '').trim();
+  if (studentStatus) return { student_status: studentStatus };
   const raw = row.lead_data_registration_extras;
   if (!raw) return registrationExtrasFromLeadDataRaw(parseListRowLeadDataRaw(row));
   if (typeof raw === 'string') {
@@ -2426,26 +2432,22 @@ export const listAdmissions = async (req, res) => {
         if (!hasJoiningRevised) missingForSecondary.push(admissionNumber);
       }
 
-      // overall_concessions only for rows without joining builder lines (cheap secondary pass).
+      // One secondary scan for concession rows (cheaper than IN-chunking every no-builder admission).
       if (missingForSecondary.length > 0) {
         try {
           const secondaryPool = getSecondaryPool();
-          const chunkSize = 500;
-          for (let i = 0; i < missingForSecondary.length; i += chunkSize) {
-            const chunk = missingForSecondary.slice(i, i + chunkSize);
-            const placeholders = chunk.map(() => '?').join(',');
-            const [ocRows] = await secondaryPool.execute(
-              `SELECT admission_number
-               FROM overall_concessions
-               WHERE admission_number IN (${placeholders})
-                 AND revised_fees IS NOT NULL
-                 AND TRIM(CAST(revised_fees AS CHAR)) NOT IN ('', 'null', 'NULL', '[]')
-                 AND LENGTH(TRIM(CAST(revised_fees AS CHAR))) > 2`,
-              chunk
-            );
-            for (const oc of ocRows || []) {
-              const admissionNumber = String(oc.admission_number || '').trim();
-              if (admissionNumber) hasRevisedFeeByAdmission.set(admissionNumber, true);
+          const missingSet = new Set(missingForSecondary);
+          const [ocRows] = await secondaryPool.execute(
+            `SELECT admission_number
+             FROM overall_concessions
+             WHERE revised_fees IS NOT NULL
+               AND TRIM(CAST(revised_fees AS CHAR)) NOT IN ('', 'null', 'NULL', '[]')
+               AND LENGTH(TRIM(CAST(revised_fees AS CHAR))) > 2`
+          );
+          for (const oc of ocRows || []) {
+            const admissionNumber = String(oc.admission_number || '').trim();
+            if (admissionNumber && missingSet.has(admissionNumber)) {
+              hasRevisedFeeByAdmission.set(admissionNumber, true);
             }
           }
         } catch (error) {
@@ -2510,12 +2512,13 @@ export const listAdmissions = async (req, res) => {
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.source')) AS lead_data_source,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.utmSource')) AS lead_data_utm_source,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.leadSource')) AS lead_data_lead_source,
-                JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras') AS lead_data_registration_extras,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.student_status')) AS list_student_status,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.studentStatus')) AS list_student_status_alt,
                 JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.reference1')) AS joining_lead_reference1,
                 JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.referenceName')) AS joining_lead_reference_name,
                 l.name as lead_name, l.phone as lead_phone, l.source as lead_source,
                 l.upload_batch_id as upload_batch_id,
-                l.dynamic_fields as lead_dynamic_fields
+                JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.reference1')) AS lead_dyn_reference1
          FROM admissions a
          LEFT JOIN joinings j ON j.id = a.joining_id
          LEFT JOIN leads l ON a.lead_id = l.id
@@ -2541,28 +2544,22 @@ export const listAdmissions = async (req, res) => {
       joining_id: row.joining_id,
       id: row.id,
     }));
-    const [yearOnePaidByAdmissionNumber, feeSummaries, hasRevisedFeeByAdmission] =
-      await Promise.all([
-        fetchPaidByAdmissionRowsForDesk(deskFeeRows),
-        buildTuitionAndOtherFeeSummariesForAdmissionRows(deskFeeRows),
-        buildHasStepFourRevisedFeeEntriesByAdmissionRows(pool, deskFeeRows, {
-          getSecondaryPool,
-        }),
-      ]);
+    // List needs year-1 paid + revised-fee flag only (paid/unpaid tuition summary is unused by the table).
+    const [yearOnePaidByAdmissionNumber, hasRevisedFeeByAdmission] = await Promise.all([
+      fetchPaidByAdmissionRowsForDesk(deskFeeRows),
+      buildHasStepFourRevisedFeeEntriesByAdmissionRows(pool, deskFeeRows, {
+        getSecondaryPool,
+      }),
+    ]);
     const formattedAdmissions = admissions.map((row) => {
       const item = formatAdmissionListItem(row);
       const admissionNumber = String(row.admission_number || '').trim();
       const yearOnePaid = yearOnePaidByAdmissionNumber.get(admissionNumber) ?? 0;
-      const feeSummary = feeSummaries.get(admissionNumber);
       // Student Info: No Fee Entry = no Step 4 revised/concession fee amounts.
       const hasRevisedFeeEntry = Boolean(hasRevisedFeeByAdmission.get(admissionNumber));
       const isNoFeeEntry = !hasRevisedFeeEntry;
       const hasFeeEntry = hasRevisedFeeEntry;
-      const feeStatus = isNoFeeEntry
-        ? 'no_entry'
-        : feeSummary?.feeStatus === 'paid'
-          ? 'paid'
-          : 'unpaid';
+      const feeStatus = isNoFeeEntry ? 'no_entry' : 'unpaid';
       return {
         ...item,
         hasFeeEntry,
