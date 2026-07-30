@@ -83,7 +83,8 @@ const joiningSchema = new Schema(
     reservation: {
       general: {
         type: String,
-        enum: ['oc', 'ews', 'bc-a', 'bc-b', 'bc-c', 'bc-d', 'bc-e', 'sc', 'st'],
+        trim: true,
+        default: '',
         required: true,
       },
       isEws: { type: Boolean, default: false },

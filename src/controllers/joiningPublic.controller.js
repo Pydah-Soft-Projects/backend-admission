@@ -12,7 +12,7 @@ import {
   ensureJoiningDraftForLead,
 } from './joining.controller.js';
 import { listRegistrationForms, getRegistrationForm } from './registrationForm.controller.js';
-import { listCourseProgramLevels, listStudentQuotas } from './secondaryJoiningContext.controller.js';
+import { listCourseProgramLevels, listStudentQuotas, listCastes } from './secondaryJoiningContext.controller.js';
 import { SELF_REGISTRATION_ROUTE_KEY } from '../utils/joiningSelfRegistration.util.js';
 import { ensureSelfRegistrationPublicLink } from '../services/joiningSelfRegistrationLink.service.js';
 import { findLeadByMobileNumbers } from '../utils/leadPhoneLookup.util.js';
@@ -546,6 +546,20 @@ export const getJoiningPublicBootstrap = async (req, res) => {
     const studentQuotasBody = await captureControllerJson(listStudentQuotas, () => ({}));
     const studentQuotas = Array.isArray(studentQuotasBody?.data) ? studentQuotasBody.data : [];
 
+    const casteCatalogBody = await captureControllerJson(listCastes, () => ({ query: {} }));
+    const casteCatalog =
+      casteCatalogBody?.data && typeof casteCatalogBody.data === 'object'
+        ? {
+            categories: Array.isArray(casteCatalogBody.data.categories)
+              ? casteCatalogBody.data.categories
+              : [],
+            castes: Array.isArray(casteCatalogBody.data.castes)
+              ? casteCatalogBody.data.castes
+              : [],
+            source: 'secondary',
+          }
+        : { categories: [], castes: [], source: 'secondary' };
+
     const listBody = await captureControllerJson(listRegistrationForms, () => ({
       query: { showInactive: 'false', includeFieldCount: 'true' },
     }));
@@ -584,6 +598,7 @@ export const getJoiningPublicBootstrap = async (req, res) => {
         courseSettings,
         programLevels,
         studentQuotas,
+        casteCatalog,
         registrationForms,
         registrationForm,
         certificateGuidance,

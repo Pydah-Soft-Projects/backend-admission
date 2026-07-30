@@ -17,7 +17,7 @@ export const SQL_JOINING_IS_SELF_REGISTRATION = `(
   OR TRIM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(l.dynamic_fields, '$.createdFrom')), '')) = 'self_registration'
 )`;
 
-const DEFAULT_GENERAL_RESERVATION = 'oc';
+const DEFAULT_GENERAL_RESERVATION = '';
 
 const STUDENT_PHONE_REG_KEYS = [
   'student_phone',

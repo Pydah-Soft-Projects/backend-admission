@@ -52,7 +52,7 @@ import {
   suggestPreferredMobileDigits,
 } from '../utils/parentPhone.util.js';
 
-const DEFAULT_GENERAL_RESERVATION = 'oc';
+const DEFAULT_GENERAL_RESERVATION = '';
 
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
@@ -1043,7 +1043,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       },
     },
     reservation: {
-      general: joiningData.reservation_general || 'oc',
+      general: joiningData.reservation_general || '',
       isEws: joiningData.reservation_is_ews === 1 || joiningData.reservation_is_ews === true,
       other: reservationOther,
     },
@@ -3657,7 +3657,7 @@ export const approveJoining = async (req, res) => {
           })(),
           String(formattedJoining.parents?.mother?.photo || '').trim() || null,
           formattedJoining.parents?.mother?.occupation || '',
-          formattedJoining.reservation?.general || 'oc',
+          formattedJoining.reservation?.general || '',
           JSON.stringify(formattedJoining.reservation?.other || []),
           formattedJoining.address?.communication?.doorOrStreet || '',
           formattedJoining.address?.communication?.landmark || '',
@@ -3746,7 +3746,7 @@ export const approveJoining = async (req, res) => {
           })(), // preferred_mobile_number
           String(formattedJoining.parents?.mother?.photo || '').trim() || null, // 26
           formattedJoining.parents?.mother?.occupation || '',
-          formattedJoining.reservation?.general || 'oc', // 27
+          formattedJoining.reservation?.general || '', // 27
           JSON.stringify(formattedJoining.reservation?.other || []), // 28
           formattedJoining.address?.communication?.doorOrStreet || '', // 27
           formattedJoining.address?.communication?.landmark || '', // 28

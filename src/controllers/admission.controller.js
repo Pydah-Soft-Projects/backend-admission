@@ -1715,7 +1715,7 @@ export const formatAdmission = async (admissionData, pool) => {
       },
     },
     reservation: {
-      general: admissionData.reservation_general || 'oc',
+      general: admissionData.reservation_general || '',
       isEws: admissionData.reservation_is_ews === 1 || admissionData.reservation_is_ews === true,
       other: reservationOther,
     },
@@ -2080,7 +2080,7 @@ const formatAdmissionListItem = (row) => {
     phone: row.student_phone || row.lead_phone || '',
   },
   reservation: {
-    general: row.reservation_general || 'oc',
+    general: row.reservation_general || '',
     isEws: row.reservation_is_ews === 1 || row.reservation_is_ews === true,
     other: row.reservation_other ? (typeof row.reservation_other === 'string' ? JSON.parse(row.reservation_other) : row.reservation_other) : [],
   },
@@ -3581,7 +3581,7 @@ export const updateAdmissionById = async (req, res) => {
     if (payload.reservation !== undefined) {
       if (payload.reservation.general !== undefined) {
         updateFields.push('reservation_general = ?');
-        updateParams.push(payload.reservation.general || 'oc');
+        updateParams.push(payload.reservation.general || '');
       }
       if (payload.reservation.other !== undefined) {
         updateFields.push('reservation_other = ?');
@@ -3885,7 +3885,7 @@ export const updateAdmissionByLead = async (req, res) => {
     if (payload.reservation !== undefined) {
       if (payload.reservation.general !== undefined) {
         updateFields.push('reservation_general = ?');
-        updateParams.push(payload.reservation.general || 'oc');
+        updateParams.push(payload.reservation.general || '');
       }
       if (payload.reservation.other !== undefined) {
         updateFields.push('reservation_other = ?');

@@ -10,6 +10,8 @@ import {
   listCourseProgramLevels,
   getCertificateGuidanceForLevel,
   listStudentQuotas,
+  listCasteCategories,
+  listCastes,
 } from '../controllers/secondaryJoiningContext.controller.js';
 import { protect } from '../middleware/auth.middleware.js';
 
@@ -23,6 +25,8 @@ router.get('/branches', listBranches);
 router.get('/', listCourses);
 router.get('/program-levels', protect, listCourseProgramLevels);
 router.get('/student-quotas', protect, listStudentQuotas);
+router.get('/caste-categories', protect, listCasteCategories);
+router.get('/castes', protect, listCastes);
 router.get('/certificate-guidance', protect, getCertificateGuidanceForLevel);
 router.get('/:courseId/admit-card-assets', protect, getAdmitCardAssets);
 router.get('/:courseId/fee-qr-image', protect, getCourseFeeQrImage);

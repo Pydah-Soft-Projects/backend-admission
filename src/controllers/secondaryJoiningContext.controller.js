@@ -3,6 +3,11 @@ import { successResponse, errorResponse } from '../utils/response.util.js';
 import { getTableColumnSet } from '../utils/secondarySchema.util.js';
 import { normalizeJsonObject, resolveCourseLevelFromRow } from '../utils/secondaryCourseLevel.util.js';
 import { fetchActiveStudentQuotas } from '../utils/studentQuotas.util.js';
+import {
+  fetchActiveCasteCategories,
+  fetchActiveCastes,
+  fetchCasteCatalogForJoining,
+} from '../utils/casteCatalog.util.js';
 
 const isMissingTableError = (err) =>
   err?.code === 'ER_NO_SUCH_TABLE' ||
@@ -19,6 +24,55 @@ export const listStudentQuotas = async (req, res) => {
   } catch (error) {
     console.error('listStudentQuotas error:', error);
     return errorResponse(res, error.message || 'Failed to load student quotas', 500);
+  }
+};
+
+/**
+ * Active caste categories from secondary `caste_categories` only.
+ * Options are maintained in the student database — this app does not seed defaults.
+ */
+export const listCasteCategories = async (req, res) => {
+  try {
+    const categories = await fetchActiveCasteCategories();
+    return successResponse(res, {
+      categories,
+      source: 'secondary',
+    });
+  } catch (error) {
+    console.error('listCasteCategories error:', error);
+    return errorResponse(res, error.message || 'Failed to load caste categories', 500);
+  }
+};
+
+/**
+ * Active castes from secondary `castes` (optional ?categoryId=).
+ * Without categoryId returns the full joining catalog (categories + castes).
+ */
+export const listCastes = async (req, res) => {
+  try {
+    const categoryId = String(req.query.categoryId || req.query.category_id || '').trim();
+    if (!categoryId) {
+      const catalog = await fetchCasteCatalogForJoining();
+      return successResponse(res, {
+        categories: catalog.categories,
+        castes: catalog.castes,
+        source: 'secondary',
+      });
+    }
+
+    const [categories, castes] = await Promise.all([
+      fetchActiveCasteCategories(),
+      fetchActiveCastes({ categoryId }),
+    ]);
+
+    return successResponse(res, {
+      categories,
+      castes,
+      source: 'secondary',
+    });
+  } catch (error) {
+    console.error('listCastes error:', error);
+    return errorResponse(res, error.message || 'Failed to load castes', 500);
   }
 };
 
