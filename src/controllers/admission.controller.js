@@ -1780,8 +1780,14 @@ const validateAdmissionPayload = (payload = {}) => {
   if (!payload.studentInfo?.name) {
     errors.push('Student name is required');
   }
-  if (!payload.reservation?.general) {
-    errors.push('General reservation category is required');
+  const reservation = payload.reservation;
+  if (reservation !== undefined && reservation !== null) {
+    const hasCategory =
+      Boolean(String(reservation.categoryId ?? '').trim()) ||
+      Boolean(String(reservation.general ?? '').trim());
+    if (!hasCategory) {
+      errors.push('Reservation category is required');
+    }
   }
   if (payload.courseInfo !== undefined && payload.courseInfo !== null && typeof payload.courseInfo === 'object') {
     const cid = String(payload.courseInfo.courseId ?? '').trim();

@@ -3325,7 +3325,7 @@ const validateBeforeSubmit = (joining) => {
   }
 
   if (!joining.reservation_general) {
-    errors.push('General reservation category is required');
+    errors.push('Reservation category is required');
   }
 
   return errors;
