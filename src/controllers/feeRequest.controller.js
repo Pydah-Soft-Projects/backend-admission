@@ -538,8 +538,8 @@ export const submitFeeRequest = async (req, res) => {
       );
     }
 
-    // Admission number is minted only when every selected Step 4 fee head has amounts
-    // for all required years (not just one head filled).
+    // Admission number is minted only when at least one selected Step 4 fee head
+    // has amounts for all required years (other heads may stay empty).
     const builderFeeHeadCheck =
       body.builderFeeHeadCheck && typeof body.builderFeeHeadCheck === 'object'
         ? body.builderFeeHeadCheck
@@ -552,7 +552,7 @@ export const submitFeeRequest = async (req, res) => {
     if (!builderFeeHeadCheck || !Array.isArray(builderFeeHeadCheck.heads) || !Array.isArray(builderFeeHeadCheck.years)) {
       return errorResponse(
         res,
-        'Fill revised/concession amounts for all selected fee heads and years before submitting the fee request',
+        'Enter amounts for all years on at least one fee head before submitting the fee request',
         400
       );
     }
@@ -562,7 +562,8 @@ export const submitFeeRequest = async (req, res) => {
         .join(', ');
       return errorResponse(
         res,
-        `Fill revised/concession amounts for all selected fee heads before generating the admission number: ${missingLabel}`,
+        `Enter amounts for all years on at least one fee head before generating the admission number` +
+          (missingLabel ? ` — still missing: ${missingLabel}` : ''),
         400
       );
     }
