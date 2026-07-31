@@ -43,8 +43,9 @@ const lineMatchesBuilderHead = (line, head) => {
 };
 
 /**
- * Step 4: every selected builder fee head must have a revised/concession amount
- * for every displayed year before admission number may be minted on submit.
+ * Step 4: at least one selected builder fee head must have a revised/concession
+ * amount for every displayed year before admission number may be minted on submit.
+ * Other heads may remain empty.
  * @returns {{ complete: boolean, missing: Array<{ headName: string, headCode: string, year: number }> }}
  */
 export const getMissingBuilderHeadYearAmounts = ({
@@ -57,11 +58,22 @@ export const getMissingBuilderHeadYearAmounts = ({
     .filter((y) => Number.isFinite(y) && y > 0);
   const headList = Array.isArray(heads) ? heads : [];
   const lineList = Array.isArray(lines) ? lines : [];
-  const missing = [];
+
+  if (headList.length === 0 || yearList.length === 0) {
+    return { complete: false, missing: [] };
+  }
+
+  let bestHead = null;
+  let bestMissing = yearList.map((year) => ({
+    headName: String(headList[0]?.name || headList[0]?.feeHeadName || headList[0]?.code || headList[0]?.id || 'Fee head'),
+    headCode: normalizeFeeHeadCode(headList[0]?.code || headList[0]?.feeHeadCode),
+    year,
+  }));
 
   for (const head of headList) {
     const headName = String(head?.name || head?.feeHeadName || head?.code || head?.id || 'Fee head');
     const headCode = normalizeFeeHeadCode(head?.code || head?.feeHeadCode);
+    const missingForHead = [];
     for (const year of yearList) {
       const found = lineList.some(
         (line) =>
@@ -70,16 +82,19 @@ export const getMissingBuilderHeadYearAmounts = ({
           isPersistableBuilderConcessionLine(line)
       );
       if (!found) {
-        missing.push({
-          headName,
-          headCode,
-          year,
-        });
+        missingForHead.push({ headName, headCode, year });
       }
+    }
+    if (missingForHead.length === 0) {
+      return { complete: true, missing: [] };
+    }
+    if (missingForHead.length < bestMissing.length) {
+      bestHead = head;
+      bestMissing = missingForHead;
     }
   }
 
-  return { complete: missing.length === 0, missing };
+  return { complete: false, missing: bestMissing };
 };
 
 /** Canonical overall_concessions.revised_fees JSON line (no catalog computed fields). */
