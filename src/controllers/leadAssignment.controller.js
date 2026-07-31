@@ -236,7 +236,7 @@ function formatAssignedLeadForExport(row, isProRole, dynamicFieldColumns) {
 function appendSourceAndRankFilters(conditions, params, { source, minRank, maxRank }) {
   const src = normalizeAssignmentSource(source);
   if (!src) return;
-  conditions.push('LOWER(TRIM(source)) = LOWER(TRIM(?))');
+  conditions.push('source = ?');
   params.push(src);
   if (minRank != null && minRank !== '') {
     const minR = parseInt(minRank, 10);

@@ -117,6 +117,11 @@ const INDEXES = [
     ddl:
       'CREATE INDEX idx_activity_logs_lead_performed_created ON activity_logs (lead_id, performed_by, created_at)',
   },
+  {
+    table: 'leads',
+    name: 'idx_leads_source',
+    ddl: 'CREATE INDEX idx_leads_source ON leads (source)',
+  },
 ];
 
 const run = async () => {
