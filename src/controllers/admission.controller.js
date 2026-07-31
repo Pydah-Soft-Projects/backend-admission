@@ -47,6 +47,13 @@ import {
   fetchPaidByAdmissionRowsForDesk,
   fetchTuitionPaidByAdmissionNumbers,
 } from '../utils/tuitionPaid.util.js';
+import {
+  applyMinimumFeeAmountsToPendingRow,
+  FEE_UNPAID_TOLERANCE,
+  isFeeStillPending,
+  loadMinimumFeeConfigs,
+  resolveMinimumFeeAmount,
+} from '../utils/minimumFee.util.js';
 import { buildHasStepFourRevisedFeeEntriesByAdmissionRows } from '../utils/overallConcessions.util.js';
 import {
   SQL_IS_CONV_QUOTA,
@@ -5425,16 +5432,27 @@ export const exportAdmissions = async (req, res) => {
 
     const [rows] = await pool.execute(query, params);
 
-    // Format all admissions
-    const formattedAdmissions = await Promise.all(
-      rows.map(row => formatAdmission(row, pool))
-    );
+    // Format admissions + desk Paid (TUI01/OTH1) + minimum fee configs in parallel.
+    const deskFeeRows = rows.map((row) => ({
+      admission_number: row.admission_number,
+      quota: row.quota,
+      course: row.course,
+      branch: row.branch,
+      joining_id: row.joining_id,
+      id: row.id,
+    }));
+    const [formattedAdmissions, yearOnePaidByAdmissionNumber, minimumFeeConfigs] =
+      await Promise.all([
+        Promise.all(rows.map((row) => formatAdmission(row, pool))),
+        fetchPaidByAdmissionRowsForDesk(deskFeeRows),
+        loadMinimumFeeConfigs(pool),
+      ]);
 
     // Create Excel Workbook
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Admissions');
 
-    // Define Columns
+    // Define Columns — Total Fee = configured minimum fee amount for course/branch/quota.
     worksheet.columns = [
       { header: 'Admission #', key: 'admissionNumber', width: 15 },
       { header: 'Timestamp', key: 'createdAt', width: 20 },
@@ -5447,9 +5465,10 @@ export const exportAdmissions = async (req, res) => {
       { header: 'Reservation (Other)', key: 'reservationOther', width: 20 },
       { header: 'EWS', key: 'isEws', width: 10 },
       { header: 'Status', key: 'status', width: 15 },
-      { header: 'Total Fee', key: 'totalFee', width: 15 },
+      { header: 'Total Fee (Min. Fee)', key: 'totalFee', width: 18 },
       { header: 'Total Paid', key: 'totalPaid', width: 15 },
       { header: 'Balance', key: 'balance', width: 15 },
+      { header: 'Min Fee Met', key: 'minFeeMet', width: 12 },
       { header: 'Source', key: 'source', width: 15 },
       { header: 'Reference', key: 'reference', width: 22 },
       { header: 'SSC Result', key: 'sscResult', width: 10 },
@@ -5457,13 +5476,38 @@ export const exportAdmissions = async (req, res) => {
       { header: 'Intermediate Passed Year', key: 'interPassedYear', width: 15 },
     ];
 
-    // Add Rows
-    formattedAdmissions.forEach(record => {
-      const reservationOther = Array.isArray(record.reservation?.other) 
-        ? record.reservation.other.join(', ') 
-        : (record.reservation?.other || '');
+    const exportCollegeId = String(collegeId || '').trim() || undefined;
+    const greenFill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFDCFCE7' }, // light green
+    };
+    const greenFont = { color: { argb: 'FF166534' }, bold: true };
 
-      worksheet.addRow({
+    // Add Rows
+    formattedAdmissions.forEach((record) => {
+      const reservationOther = Array.isArray(record.reservation?.other)
+        ? record.reservation.other.join(', ')
+        : record.reservation?.other || '';
+
+      const admissionNumber = String(record.admissionNumber || '').trim();
+      const totalPaid = Number(yearOnePaidByAdmissionNumber.get(admissionNumber) ?? 0) || 0;
+      const minimumFeeRequired = resolveMinimumFeeAmount(minimumFeeConfigs, {
+        collegeId: exportCollegeId,
+        courseId: record.courseInfo?.courseId,
+        courseName: record.courseInfo?.course,
+        branchId: record.courseInfo?.branchId,
+        branchName: record.courseInfo?.branch,
+        quota: record.courseInfo?.quota,
+      });
+      const hasMinFee = minimumFeeRequired > FEE_UNPAID_TOLERANCE;
+      const totalFee = hasMinFee ? minimumFeeRequired : 0;
+      const balance = hasMinFee ? Math.max(minimumFeeRequired - totalPaid, 0) : 0;
+      // Green mark when student paid at least the configured minimum fee.
+      const metMinimum =
+        hasMinFee && totalPaid + FEE_UNPAID_TOLERANCE >= minimumFeeRequired;
+
+      const excelRow = worksheet.addRow({
         admissionNumber: record.admissionNumber,
         createdAt: record.createdAt ? new Date(record.createdAt).toLocaleString() : '',
         studentName: record.studentInfo?.name || '',
@@ -5475,9 +5519,10 @@ export const exportAdmissions = async (req, res) => {
         reservationOther: reservationOther,
         isEws: record.reservation?.isEws ? 'Yes' : 'No',
         status: record.status || '',
-        totalFee: record.paymentSummary?.totalFee || 0,
-        totalPaid: record.paymentSummary?.totalPaid || 0,
-        balance: (record.paymentSummary?.totalFee || 0) - (record.paymentSummary?.totalPaid || 0),
+        totalFee,
+        totalPaid,
+        balance,
+        minFeeMet: metMinimum ? '✓' : '',
         source: record.leadData?.source || 'Direct',
         reference:
           record.leadData?.reference1 ||
@@ -5488,6 +5533,15 @@ export const exportAdmissions = async (req, res) => {
         sscPassedYear: record.educationHistory?.[0]?.yearOfPassing || '',
         interPassedYear: record.educationHistory?.[1]?.yearOfPassing || '',
       });
+
+      if (metMinimum) {
+        excelRow.eachCell((cell) => {
+          cell.fill = greenFill;
+        });
+        const markCell = excelRow.getCell('minFeeMet');
+        markCell.font = greenFont;
+        markCell.alignment = { horizontal: 'center' };
+      }
     });
 
     // Style the header
@@ -5495,7 +5549,7 @@ export const exportAdmissions = async (req, res) => {
     worksheet.getRow(1).fill = {
       type: 'pattern',
       pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
+      fgColor: { argb: 'FFE0E0E0' },
     };
 
     // Set Response Headers
@@ -5931,6 +5985,9 @@ const formatPendingFeeRow = (row, feeSummary) => {
     quota: row.quota || '',
     course: row.course || '',
     branch: row.branch || '',
+    // Ids used for minimum-fee matching on export (optional on older callers)
+    managedCourseId: row.managed_course_id || row.course_id || '',
+    managedBranchId: row.managed_branch_id || row.branch_id || '',
     // Combined Step 4 totals (Tuition + Other/Special)
     totalPayable: summary.payable,
     totalPaid: summary.paid,
@@ -5963,13 +6020,41 @@ const formatPendingFeeRow = (row, feeSummary) => {
 };
 
 /**
+ * Build min-fee match context for a pending fee row.
+ * Prefer export/list query filters when present (same as PendingAdmissionsDownloadModal),
+ * then per-admission course/branch ids and names.
+ */
+const buildPendingFeeMinFeeMatchContext = (row, query = {}) => ({
+  collegeId: query.collegeId || query.college_id || undefined,
+  courseId:
+    query.courseId ||
+    query.course_id ||
+    row.managedCourseId ||
+    row.managed_course_id ||
+    row.course_id ||
+    undefined,
+  courseName: row.course || query.courseName || query.course_name || undefined,
+  branchId:
+    query.branchId ||
+    query.branch_id ||
+    row.managedBranchId ||
+    row.managed_branch_id ||
+    row.branch_id ||
+    undefined,
+  branchName: row.branch || query.branchName || query.branch_name || undefined,
+  quota: row.quota || query.quota || undefined,
+});
+
+/**
  * Evaluate Year-1 Tuition (TUI01) + Other/Special (OTH1) fee status for filtered
  * active admissions — same heads as Step 4 admission view-details (excluding transport).
- * List + export = students who still have a remaining balance (payable − paid > 0).
+ * List + export base set = students who still have a remaining balance (payable − paid > 0).
+ * Export then applies minimum-fee config for Amount columns / row inclusion.
  */
 const evaluatePendingFees = async (query) => {
   const pool = getPool();
   const { whereClause, params } = await buildPendingCertificatesBaseFilters(query);
+  const minimumFeeConfigs = await loadMinimumFeeConfigs(pool);
 
   const [idRows] = await pool.execute(
     `SELECT a.id
@@ -5989,7 +6074,7 @@ const evaluatePendingFees = async (query) => {
   };
 
   if (!idRows.length) {
-    return { stats: emptyStats, pendingRows: [] };
+    return { stats: emptyStats, pendingRows: [], minimumFeeConfigs };
   }
 
   const orderedIds = idRows.map((row) => row.id);
@@ -6002,7 +6087,8 @@ const evaluatePendingFees = async (query) => {
     const inMarks = chunkIds.map(() => '?').join(',');
     const [pageRows] = await pool.execute(
       `SELECT a.id, a.admission_number, a.student_name, a.student_phone, a.father_phone,
-              a.quota, a.course, a.branch
+              a.quota, a.course, a.branch,
+              a.managed_course_id, a.course_id, a.managed_branch_id, a.branch_id
        FROM admissions a
        WHERE a.id IN (${inMarks})`,
       chunkIds
@@ -6038,6 +6124,7 @@ const evaluatePendingFees = async (query) => {
       pendingStudents: tuitionUnpaidStudents,
     },
     pendingRows,
+    minimumFeeConfigs,
   };
 };
 
@@ -6068,10 +6155,31 @@ export const listPendingFees = async (req, res) => {
   }
 };
 
-/** Excel export — students with unpaid Year-1 Tuition + Other/Special fee. */
+/** Excel export — students with unpaid Year-1 Tuition + Other/Special fee
+ *  (or below configured minimum fee when min-fee configs exist). */
 export const exportPendingFees = async (req, res) => {
   try {
-    const { pendingRows } = await evaluatePendingFees(req.query);
+    const { pendingRows, minimumFeeConfigs = [] } = await evaluatePendingFees(req.query);
+    const usingMinimumFee = Array.isArray(minimumFeeConfigs) && minimumFeeConfigs.length > 0;
+
+    // Align Excel rows + Amount columns with Joining Desk min-fee UI / Print PDF.
+    const exportRows = usingMinimumFee
+      ? pendingRows
+          .filter((row) =>
+            isFeeStillPending(
+              row,
+              minimumFeeConfigs,
+              buildPendingFeeMinFeeMatchContext(row, req.query)
+            )
+          )
+          .map((row) =>
+            applyMinimumFeeAmountsToPendingRow(
+              row,
+              minimumFeeConfigs,
+              buildPendingFeeMinFeeMatchContext(row, req.query)
+            )
+          )
+      : pendingRows;
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Pending Fees');
@@ -6090,14 +6198,22 @@ export const exportPendingFees = async (req, res) => {
       { header: 'Other Payable', key: 'otherPayable', width: 16 },
       { header: 'Other Paid', key: 'otherPaid', width: 16 },
       { header: 'Other Pending', key: 'otherPending', width: 16 },
-      { header: 'Total Payable', key: 'totalPayable', width: 16 },
+      {
+        header: usingMinimumFee ? 'Minimum Fee Required' : 'Total Payable',
+        key: 'totalPayable',
+        width: 18,
+      },
       { header: 'Total Paid', key: 'totalPaid', width: 16 },
-      { header: 'Total Pending', key: 'totalPending', width: 16 },
+      {
+        header: usingMinimumFee ? 'Unpaid vs Minimum' : 'Total Pending',
+        key: 'totalPending',
+        width: 18,
+      },
       { header: 'Fee Status', key: 'feeStatusText', width: 14 },
       { header: 'Amount', key: 'feeAmountText', width: 18 },
     ];
 
-    pendingRows.forEach((row, index) => {
+    exportRows.forEach((row, index) => {
       worksheet.addRow({
         sno: index + 1,
         studentName: row.studentName,
