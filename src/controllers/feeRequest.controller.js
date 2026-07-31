@@ -15,6 +15,7 @@ import {
 import {
   buildOverallConcessionLinesFromBuilder,
   buildOverallConcessionLinesFromPortalLines,
+  getMissingBuilderHeadYearAmounts,
   isPersistableBuilderConcessionLine,
 } from '../utils/overallConcessions.util.js';
 import { connectFeeManagement } from '../config-mongo/feeManagement.js';
@@ -174,6 +175,69 @@ const parseLeadData = (raw) => {
     }
   }
   return typeof raw === 'object' ? raw : {};
+};
+
+/**
+ * Persist Step 4 builder amounts onto joining (+ linked admission) lead_data when a
+ * fee request is submitted. Without this, amounts live only on fee_requests until
+ * approve / a separate Save Configuration — so Student Info shows "No Fee Entry".
+ * overall_concessions / portal sync still wait for approve.
+ */
+const persistStudentFeeDetailsToJoiningBuilder = async ({
+  pool,
+  joiningId,
+  joiningRow,
+  studentFeeDetails,
+  registrationExtras = {},
+  userId,
+}) => {
+  if (!joiningId || !studentFeeDetails) return;
+
+  let leadData = parseLeadData(joiningRow?.lead_data);
+  const prevExtras =
+    leadData._joiningRegistrationExtras && typeof leadData._joiningRegistrationExtras === 'object'
+      ? { ...leadData._joiningRegistrationExtras }
+      : {};
+  const transportDetails =
+    registrationExtras?.transport_details && typeof registrationExtras.transport_details === 'object'
+      ? registrationExtras.transport_details
+      : null;
+  const mergedExtras = {
+    ...prevExtras,
+    ...(transportDetails ? { transport_details: transportDetails } : {}),
+  };
+
+  leadData = {
+    ...leadData,
+    ...(Object.keys(mergedExtras).length > 0
+      ? { _joiningRegistrationExtras: mergedExtras }
+      : {}),
+    _joiningStudentFeeDetails: studentFeeDetails,
+  };
+
+  await pool.execute(
+    `UPDATE joinings SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(leadData), userId || null, joiningId]
+  );
+
+  const [admRows] = await pool.execute(
+    `SELECT id, lead_data FROM admissions WHERE joining_id = ? LIMIT 1`,
+    [joiningId]
+  );
+  if (!admRows.length) return;
+
+  let admLead = parseLeadData(admRows[0].lead_data);
+  admLead = {
+    ...admLead,
+    ...(Object.keys(mergedExtras).length > 0
+      ? { _joiningRegistrationExtras: mergedExtras }
+      : {}),
+    _joiningStudentFeeDetails: studentFeeDetails,
+  };
+  await pool.execute(
+    `UPDATE admissions SET lead_data = ?, updated_by = ?, updated_at = NOW() WHERE id = ?`,
+    [JSON.stringify(admLead), userId || null, admRows[0].id]
+  );
 };
 
 const isProbablyEnquiryNumber = (value) => {
@@ -474,6 +538,35 @@ export const submitFeeRequest = async (req, res) => {
       );
     }
 
+    // Admission number is minted only when every selected Step 4 fee head has amounts
+    // for all required years (not just one head filled).
+    const builderFeeHeadCheck =
+      body.builderFeeHeadCheck && typeof body.builderFeeHeadCheck === 'object'
+        ? body.builderFeeHeadCheck
+        : null;
+    const completeness = getMissingBuilderHeadYearAmounts({
+      heads: Array.isArray(builderFeeHeadCheck?.heads) ? builderFeeHeadCheck.heads : [],
+      years: Array.isArray(builderFeeHeadCheck?.years) ? builderFeeHeadCheck.years : [],
+      lines: Array.isArray(studentFeeDetails?.lines) ? studentFeeDetails.lines : [],
+    });
+    if (!builderFeeHeadCheck || !Array.isArray(builderFeeHeadCheck.heads) || !Array.isArray(builderFeeHeadCheck.years)) {
+      return errorResponse(
+        res,
+        'Fill revised/concession amounts for all selected fee heads and years before submitting the fee request',
+        400
+      );
+    }
+    if (!completeness.complete) {
+      const missingLabel = completeness.missing
+        .map((m) => `${m.headName} (Year ${m.year})`)
+        .join(', ');
+      return errorResponse(
+        res,
+        `Fill revised/concession amounts for all selected fee heads before generating the admission number: ${missingLabel}`,
+        400
+      );
+    }
+
     // Mint admission number on Submit Fee Request when revised amounts are present
     // (not on collect payment). Approves draft/pending joinings if needed.
     let admissionNumber = await resolveJoiningAdmissionNumberFromDb(pool, joining);
@@ -564,6 +657,21 @@ export const submitFeeRequest = async (req, res) => {
       transportDetails && typeof transportDetails === 'object'
         ? transportDetails.accommodationType || null
         : null;
+
+    // Also save builder amounts onto joining/admission lead_data (same as Save Configuration)
+    // so Student Info "Has Fee Entry" is true without a second save click.
+    // Approval still gates overall_concessions / fee-portal final sync.
+    await persistStudentFeeDetailsToJoiningBuilder({
+      pool,
+      joiningId,
+      joiningRow: joining,
+      studentFeeDetails,
+      registrationExtras: {
+        ...registrationExtras,
+        ...(transportDetails ? { transport_details: transportDetails } : {}),
+      },
+      userId: req.user?.id,
+    });
 
     const [existingPending] = await pool.execute(
       `SELECT id FROM fee_requests WHERE joining_id = ? AND status = 'pending_approval' LIMIT 1`,

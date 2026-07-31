@@ -24,6 +24,64 @@ export const isPersistableBuilderConcessionLine = (line) => {
   return readPositiveAmount(line?.amount) !== null;
 };
 
+const normalizeFeeHeadCode = (raw) => {
+  let code = String(raw || '')
+    .trim()
+    .toUpperCase();
+  if (code === 'OTH02') code = 'OTH1';
+  return code;
+};
+
+const lineMatchesBuilderHead = (line, head) => {
+  const headId = String(head?.id || head?.feeHeadId || '').trim();
+  const headCode = normalizeFeeHeadCode(head?.code || head?.feeHeadCode);
+  const lineId = String(line?.feeHeadId || '').trim();
+  const lineCode = normalizeFeeHeadCode(line?.feeHeadCode);
+  if (headId && lineId && headId === lineId) return true;
+  if (headCode && lineCode && headCode === lineCode) return true;
+  return false;
+};
+
+/**
+ * Step 4: every selected builder fee head must have a revised/concession amount
+ * for every displayed year before admission number may be minted on submit.
+ * @returns {{ complete: boolean, missing: Array<{ headName: string, headCode: string, year: number }> }}
+ */
+export const getMissingBuilderHeadYearAmounts = ({
+  heads = [],
+  years = [],
+  lines = [],
+} = {}) => {
+  const yearList = (Array.isArray(years) ? years : [])
+    .map((y) => Number(y))
+    .filter((y) => Number.isFinite(y) && y > 0);
+  const headList = Array.isArray(heads) ? heads : [];
+  const lineList = Array.isArray(lines) ? lines : [];
+  const missing = [];
+
+  for (const head of headList) {
+    const headName = String(head?.name || head?.feeHeadName || head?.code || head?.id || 'Fee head');
+    const headCode = normalizeFeeHeadCode(head?.code || head?.feeHeadCode);
+    for (const year of yearList) {
+      const found = lineList.some(
+        (line) =>
+          lineMatchesBuilderHead(line, head) &&
+          Number(line?.studentYear) === year &&
+          isPersistableBuilderConcessionLine(line)
+      );
+      if (!found) {
+        missing.push({
+          headName,
+          headCode,
+          year,
+        });
+      }
+    }
+  }
+
+  return { complete: missing.length === 0, missing };
+};
+
 /** Canonical overall_concessions.revised_fees JSON line (no catalog computed fields). */
 export const formatOverallConcessionStorageLine = ({
   feeHeadId = null,
