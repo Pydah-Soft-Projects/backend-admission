@@ -53,7 +53,29 @@ import {
   suggestPreferredMobileDigits,
 } from '../utils/parentPhone.util.js';
 
-const DEFAULT_GENERAL_RESERVATION = '';
+const DEFAULT_GENERAL_RESERVATION = 'oc';
+
+/** DB CHECK: reservation_general IN ('oc','ews','bc-a','bc-b','bc-c','bc-d','bc-e','sc','st') */
+const ALLOWED_GENERAL_RESERVATIONS = new Set([
+  'oc',
+  'ews',
+  'bc-a',
+  'bc-b',
+  'bc-c',
+  'bc-d',
+  'bc-e',
+  'sc',
+  'st',
+]);
+
+function normalizeReservationGeneral(value) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (ALLOWED_GENERAL_RESERVATIONS.has(raw)) return raw;
+  // UI may send display labels like "OC" / "BC-A"
+  const compact = raw.replace(/\s+/g, '');
+  if (ALLOWED_GENERAL_RESERVATIONS.has(compact)) return compact;
+  return DEFAULT_GENERAL_RESERVATION;
+}
 
 const sanitizeString = (value) =>
   typeof value === 'string' ? value.trim() : value ?? '';
@@ -2049,8 +2071,9 @@ const normalizeJoiningPayload = (payload) => {
   }
 
   if (safePayload.reservation) {
-    safePayload.reservation.general =
-      safePayload.reservation.general || DEFAULT_GENERAL_RESERVATION;
+    safePayload.reservation.general = normalizeReservationGeneral(
+      safePayload.reservation.general
+    );
     safePayload.reservation.other =
       safePayload.reservation.other?.map((entry) => sanitizeString(entry)) || [];
     if (safePayload.reservation.categoryId != null) {
@@ -2798,7 +2821,7 @@ export const saveJoiningDraft = async (req, res) => {
         parents.father?.occupation || '',
         parents.mother?.occupation || '',
         studentPhotoForRow,
-        reservation.general || DEFAULT_GENERAL_RESERVATION,
+        normalizeReservationGeneral(reservation.general),
         JSON.stringify(reservation.other || []),
         address.communication?.doorOrStreet || '',
         address.communication?.landmark || '',

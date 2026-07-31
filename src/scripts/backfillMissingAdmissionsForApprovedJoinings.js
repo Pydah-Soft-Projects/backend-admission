@@ -5,7 +5,7 @@ import { generateAdmissionNumber } from '../utils/admissionNumber.util.js';
 
 dotenv.config();
 
-const DEFAULT_GENERAL_RESERVATION = '';
+const DEFAULT_GENERAL_RESERVATION = 'oc';
 
 async function main() {
   const conn = await mysql.createConnection({
