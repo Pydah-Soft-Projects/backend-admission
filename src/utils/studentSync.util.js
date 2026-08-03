@@ -804,6 +804,9 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     const studentCols = await getTableColumnSet(secondaryPool, 'students');
     const hasCategoryIdColumn = studentCols.has('category_id');
     const hasCasteIdColumn = studentCols.has('caste_id');
+    const hasCollegeIdColumn = studentCols.has('college_id');
+    const hasCourseIdColumn = studentCols.has('course_id');
+    const hasBranchIdColumn = studentCols.has('branch_id');
 
     const casteWriteColumns = ['caste'];
     const casteWriteValues = [secondaryCaste];
@@ -814,6 +817,20 @@ export const syncToSecondaryDatabase = async (admissionData, admissionNumber, ex
     if (hasCasteIdColumn) {
       casteWriteColumns.push('caste_id');
       casteWriteValues.push(secondaryCasteId);
+    }
+    if (hasCollegeIdColumn) {
+      casteWriteColumns.push('college_id');
+      casteWriteValues.push(resolvedCollegeId ?? null);
+    }
+    if (hasCourseIdColumn) {
+      casteWriteColumns.push('course_id');
+      const mcid = Number.parseInt(String(managedCourseIdForCollege ?? '').trim(), 10);
+      casteWriteValues.push(Number.isFinite(mcid) ? mcid : null);
+    }
+    if (hasBranchIdColumn) {
+      casteWriteColumns.push('branch_id');
+      const mbid = Number.parseInt(String(admissionData?.courseInfo?.branchId ?? registrationExtras?.managed_branch_id ?? registrationExtras?.managedBranchId ?? '').trim(), 10);
+      casteWriteValues.push(Number.isFinite(mbid) ? mbid : null);
     }
 
     const studentCoreParams = [
