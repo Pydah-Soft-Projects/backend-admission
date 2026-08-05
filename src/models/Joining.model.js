@@ -153,6 +153,7 @@ const joiningSchema = new Schema(
         { _id: false }
       ),
     ],
+    hasSiblings: { type: Boolean, default: null },
     siblings: [
       new Schema(
         {
