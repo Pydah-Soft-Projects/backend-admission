@@ -570,6 +570,8 @@ export const recordFeeManagementTransaction = async (req, res) => {
       doc.depositedToAccount = String(depositedToAccount).trim();
     }
 
+    await enrichTransactionMetadata(doc, admission, joining);
+
     const result = await conn.db.collection('transactions').insertOne(doc);
 
     return successResponse(
@@ -592,6 +594,38 @@ export const recordFeeManagementTransaction = async (req, res) => {
       error.message || 'Failed to record fee payment transaction',
       error.statusCode || 500
     );
+  }
+};
+
+const enrichTransactionMetadata = async (doc, admission = null, joining = null) => {
+  const studentId = doc.studentId;
+  if (!studentId) return;
+
+  // Set default fallbacks from admission/joining first
+  doc.college = String(admission?.college || joining?.college || '').trim() || null;
+  doc.course = String(admission?.course || joining?.course || '').trim() || null;
+  doc.branch = String(admission?.branch || joining?.branch || '').trim() || null;
+  doc.admissionNumber = studentId;
+  doc.pinNo = null;
+
+  try {
+    const secondaryPool = getSecondaryPool();
+    const [rows] = await secondaryPool.execute(
+      'SELECT student_name, college, course, branch, pin_no, admission_number, current_year FROM students WHERE admission_number = ? OR pin_no = ? LIMIT 1',
+      [studentId, studentId]
+    );
+    if (rows && rows.length > 0) {
+      const s = rows[0];
+      if (s.student_name) doc.studentName = String(s.student_name).trim();
+      if (s.college) doc.college = String(s.college).trim();
+      if (s.course) doc.course = String(s.course).trim();
+      if (s.branch) doc.branch = String(s.branch).trim();
+      if (s.pin_no) doc.pinNo = String(s.pin_no).trim();
+      if (s.admission_number) doc.admissionNumber = String(s.admission_number).trim();
+      if (s.current_year) doc.studentYear = String(s.current_year).trim();
+    }
+  } catch (err) {
+    console.error('[enrichTransactionMetadata] Failed to fetch student metadata from SQL:', err);
   }
 };
 
@@ -1878,6 +1912,7 @@ export const verifyRazorpayQR = async (req, res) => {
           createdAt: now,
           updatedAt: now,
         };
+        await enrichTransactionMetadata(doc, admission, joining);
         await conn.db.collection('transactions').insertOne(doc);
       }
     } else {
@@ -1912,6 +1947,7 @@ export const verifyRazorpayQR = async (req, res) => {
           createdAt: now,
           updatedAt: now,
         };
+        await enrichTransactionMetadata(doc, admission, joining);
         await conn.db.collection('transactions').insertOne(doc);
       }
     }
