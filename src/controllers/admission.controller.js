@@ -2395,6 +2395,7 @@ export const listAdmissions = async (req, res) => {
       source,
       feeEntry,
       quota,
+      merit,
     } = req.query;
 
     const pool = getPool();
@@ -2421,6 +2422,14 @@ export const listAdmissions = async (req, res) => {
       conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
       params.push(quotaFilter);
     }
+    
+    const meritFilter = String(merit ?? '').trim().toLowerCase();
+    if (meritFilter === 'yes' || meritFilter === '1' || meritFilter === 'true') {
+      conditions.push('a.qualification_merit = 1');
+    } else if (meritFilter === 'no' || meritFilter === '0' || meritFilter === 'false') {
+      conditions.push('a.qualification_merit = 0');
+    }
+
     const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
     appendManagedCollegeCourseFilter(
       conditions,
@@ -5313,6 +5322,7 @@ export const exportAdmissions = async (req, res) => {
       branchName,
       source,
       quota,
+      merit,
     } = req.query;
 
     const conditions = [];
@@ -5326,6 +5336,13 @@ export const exportAdmissions = async (req, res) => {
     if (quotaFilter) {
       conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
       params.push(quotaFilter);
+    }
+    
+    const meritFilter = String(merit ?? '').trim().toLowerCase();
+    if (meritFilter === 'yes' || meritFilter === '1' || meritFilter === 'true') {
+      conditions.push('a.qualification_merit = 1');
+    } else if (meritFilter === 'no' || meritFilter === '0' || meritFilter === 'false') {
+      conditions.push('a.qualification_merit = 0');
     }
 
     const collegeCourseIds = await loadManagedCourseIdsForCollege(collegeId);
