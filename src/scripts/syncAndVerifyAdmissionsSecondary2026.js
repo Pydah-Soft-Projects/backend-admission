@@ -42,6 +42,7 @@ function branchEquivalent(primaryBranch, secondaryBranch) {
     ['FISHERIES', 'FISHERIE'],
     ['DCSEAIML', 'DAIML'],
     ['DAPPTV', 'DAP'],
+    ['CAIM', 'DAIM'],
   ];
   return pairs.some(([a, b]) => (p.includes(a) && s.includes(b)) || (p.includes(b) && s.includes(a)));
 }

@@ -38,6 +38,7 @@ export const mapCourseAndBranch = (course, branch) => {
     else if (/^CSE$/i.test(b)) b = 'DCSE';
     else if (/^DMECH$/i.test(b)) b = 'DMEC';
     else if (/^DCME$/i.test(b)) b = 'DMEC';
+    else if (/^CAIM$/i.test(b) || /^DAIM$/i.test(b)) b = 'DAIM';
     else if (/DCSE.*AIML/i.test(b)) b = 'DCSE(AIML)';
   }
 
@@ -62,6 +63,7 @@ export const SECONDARY_COURSE_BRANCH_IDS = {
   'B.TECH|ECE': { courseId: '1', branchId: '40' },
   'DIPLOMA|DCSE': { courseId: '2', branchId: '50' },
   'DIPLOMA|DCSE(AIML)': { courseId: '2', branchId: '214' },
+  'DIPLOMA|DAIM': { courseId: '2', branchId: '51' },
   'DIPLOMA|DECE': { courseId: '2', branchId: '52' },
   'DIPLOMA|DMEC': { courseId: '2', branchId: '53' },
   'DEGREE|AGRICULTURE & RURAL DEVELOPMENT': { courseId: '4', branchId: '46' },
