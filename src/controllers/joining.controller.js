@@ -1068,6 +1068,7 @@ const formatJoining = async (joiningData, pool, options = {}) => {
       notes: joiningData.student_notes || '',
       aadhaarNumber: joiningData.student_aadhaar_number || '',
       photo: studentPortrait,
+      isScholarApplicable: joiningData.is_scholar_applicable ? true : false,
     },
     parents: {
       father: {
@@ -1258,6 +1259,7 @@ const formatJoiningListItem = (joiningData) => {
     studentInfo: {
       name: joiningData.student_name || '',
       phone: joiningData.student_phone || '',
+      isScholarApplicable: joiningData.is_scholar_applicable ? true : false,
     },
     paymentSummary: {
       totalFee: Number(joiningData.payment_total_fee) || 0,
@@ -2002,6 +2004,9 @@ const normalizeJoiningPayload = (payload) => {
   if (safePayload.studentInfo) {
     safePayload.studentInfo.name = sanitizeString(safePayload.studentInfo.name);
     safePayload.studentInfo.phone = sanitizeString(safePayload.studentInfo.phone);
+    if (safePayload.studentInfo.isScholarApplicable !== undefined) {
+      safePayload.studentInfo.isScholarApplicable = Boolean(safePayload.studentInfo.isScholarApplicable);
+    }
     const preferredFromPayload = normalizeMobileDigits(
       safePayload.studentInfo.preferredMobileNumber
     );
