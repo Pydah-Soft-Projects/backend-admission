@@ -42,6 +42,7 @@ const syncRequestToFeeManagementMongo = async ({
   studentFeeDetails,
   requestedBy,
   requestedByName,
+  remarks,
 }) => {
   try {
     const conn = await connectFeeManagement();
@@ -61,7 +62,7 @@ const syncRequestToFeeManagementMongo = async ({
       }))
       .filter((e) => e.feeHeadId && e.amount > 0);
 
-    if (concessions.length === 0) return;
+    if (concessions.length === 0 && remarks === undefined) return;
 
     const collection = conn.db.collection('overallconcessionrequests');
 
@@ -88,6 +89,7 @@ const syncRequestToFeeManagementMongo = async ({
             batch:           batch || existing.batch,
             requestedBy:     requestedBy || existing.requestedBy,
             requestedByName: requestedByName || existing.requestedByName,
+            remarks:         remarks !== undefined ? String(remarks) : (existing.remarks || ''),
             updatedAt:       new Date(),
           },
         }
@@ -106,6 +108,7 @@ const syncRequestToFeeManagementMongo = async ({
         batch:           batch || '',
         category:        'Regular',
         concessions,
+        remarks:         remarks ? String(remarks) : '',
         status:          'PENDING',
         requestedBy:     requestedBy || 'admissions',
         requestedByName: requestedByName || '',
@@ -763,6 +766,24 @@ export const submitFeeRequest = async (req, res) => {
       reviewer_note: null,
     };
 
+    const remarks =
+      typeof body.remarks === 'string'
+        ? body.remarks.trim()
+        : typeof body.admissionRemarks === 'string'
+          ? body.admissionRemarks.trim()
+          : '';
+
+    if (remarks && admissionNumber) {
+      try {
+        await pool.execute(
+          'UPDATE admissions SET remarks = ?, updated_by = ?, updated_at = NOW() WHERE admission_number = ?',
+          [remarks, req.user?.id || null, admissionNumber]
+        );
+      } catch (admRemErr) {
+        console.warn('[submitFeeRequest] SQL admissions remarks sync skipped:', admRemErr?.message);
+      }
+    }
+
     if (existingPending.length > 0) {
       await pool.execute(
         `UPDATE fee_requests SET
@@ -801,6 +822,7 @@ export const submitFeeRequest = async (req, res) => {
         studentFeeDetails,
         requestedBy:     String(req.user?.id || ''),
         requestedByName: String(req.user?.name || ''),
+        remarks:         remarks,
       });
 
       return successResponse(res, formatFeeRequestRowWithHeads(updated[0], feeHeads), 'Fee request updated', 200);
@@ -845,6 +867,7 @@ export const submitFeeRequest = async (req, res) => {
       studentFeeDetails,
       requestedBy:     String(req.user?.id || ''),
       requestedByName: String(req.user?.name || ''),
+      remarks:         remarks,
     });
 
     return successResponse(res, formatFeeRequestRowWithHeads(created[0], feeHeads), 'Fee request submitted', 201);

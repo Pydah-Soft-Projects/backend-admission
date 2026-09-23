@@ -358,9 +358,25 @@ export const getOverallConcessions = async (req, res) => {
       return line;
     });
 
-    if (!row && enrichedRevisedFees.length === 0) {
+    let feeMongoRemarks = '';
+    try {
+      const { connectFeeManagement } = await import('../config-mongo/feeManagement.js');
+      const conn = await connectFeeManagement();
+      const mongoReq = await conn.db.collection('overallconcessionrequests').findOne(
+        { admissionNumber },
+        { sort: { updatedAt: -1 } }
+      );
+      if (mongoReq && typeof mongoReq.remarks === 'string') {
+        feeMongoRemarks = mongoReq.remarks;
+      }
+    } catch (mErr) {
+      console.warn('[getOverallConcessions] Fee Mongo remarks lookup skipped:', mErr?.message);
+    }
+
+    if (!row && enrichedRevisedFees.length === 0 && !feeMongoRemarks) {
       return successResponse(res, {
         admissionNumber,
+        remarks: '',
         revisedFees: [],
       });
     }
@@ -372,6 +388,7 @@ export const getOverallConcessions = async (req, res) => {
       batch: row?.batch || '',
       course: row?.course || '',
       branch: row?.branch || '',
+      remarks: feeMongoRemarks || '',
       revisedFees: enrichedRevisedFees,
       updatedAt: row?.updated_at || null,
     });

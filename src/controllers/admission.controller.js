@@ -4607,6 +4607,20 @@ export const patchAdmissionRemarksById = async (req, res) => {
     );
     warnIfSecondaryStudentSyncMissed('patchAdmissionRemarksById', { admissionId }, syncResult);
 
+    // Sync remarks to Fee Management Mongo overallconcessionrequests
+    if (formattedAdmission?.admissionNumber) {
+      try {
+        const { connectFeeManagement } = await import('../config-mongo/feeManagement.js');
+        const conn = await connectFeeManagement();
+        await conn.db.collection('overallconcessionrequests').updateMany(
+          { admissionNumber: formattedAdmission.admissionNumber },
+          { $set: { remarks: String(req.body.remarks || ''), updatedAt: new Date() } }
+        );
+      } catch (mongoErr) {
+        console.warn('[patchAdmissionRemarksById] Failed to sync remarks to Fee Mongo:', mongoErr?.message);
+      }
+    }
+
     await appendAdmissionApplicationEditHistory(pool, {
       admissionId,
       leadId: formattedAdmission.leadId,
