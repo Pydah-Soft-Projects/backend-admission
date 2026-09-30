@@ -6726,3 +6726,166 @@ export const exportPendingCertificates = async (req, res) => {
     }
   }
 };
+
+/** Excel export — combined students with pending fee OR pending documents. */
+export const exportPendingCombined = async (req, res) => {
+  try {
+    const { pendingRows: rawFeeRows, minimumFeeConfigs = [] } = await evaluatePendingFees(req.query);
+    const usingMinimumFee = Array.isArray(minimumFeeConfigs) && minimumFeeConfigs.length > 0;
+
+    const allFeeRows = usingMinimumFee
+      ? rawFeeRows.map((row) =>
+          applyMinimumFeeAmountsToPendingRow(
+            row,
+            minimumFeeConfigs,
+            buildPendingFeeMinFeeMatchContext(row, req.query)
+          )
+        )
+      : rawFeeRows;
+
+    const feePendingRows = usingMinimumFee
+      ? allFeeRows.filter((row) =>
+          isFeeStillPending(
+            row,
+            minimumFeeConfigs,
+            buildPendingFeeMinFeeMatchContext(row, req.query)
+          )
+        )
+      : allFeeRows;
+
+    const docRows = await fetchPendingCertificateRows(req.query);
+
+    const feeMap = new Map();
+    allFeeRows.forEach((r) => feeMap.set(String(r.id), r));
+
+    const combinedRows = [];
+    const addedIds = new Set();
+
+    docRows.forEach((docRow) => {
+      const id = String(docRow.id);
+      addedIds.add(id);
+      const matchingFee = feeMap.get(id);
+      combinedRows.push({
+        ...(matchingFee || {
+          id: docRow.id,
+          admissionNumber: docRow.admissionNumber,
+          studentName: docRow.studentName,
+          parentMobile: docRow.parentMobile,
+          studentMobile: docRow.studentMobile,
+          quota: docRow.quota,
+          course: docRow.course,
+          branch: docRow.branch,
+          tuitionPayable: 0,
+          tuitionPaid: 0,
+          tuitionPending: 0,
+          otherPayable: 0,
+          otherPaid: 0,
+          otherPending: 0,
+          totalPayable: 0,
+          totalPaid: 0,
+          totalPending: 0,
+          feeStatusText: 'Pending',
+          feeAmountText: 'Pending — 0',
+        }),
+        ...docRow,
+      });
+    });
+
+    feePendingRows.forEach((feeRow) => {
+      const id = String(feeRow.id);
+      if (!addedIds.has(id)) {
+        addedIds.add(id);
+        combinedRows.push({
+          ...feeRow,
+          importantDocumentsPendingText: 'Completed',
+          otherDocumentsPendingText: 'Completed',
+        });
+      }
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Combined Pending');
+    worksheet.columns = [
+      { header: 'S. No.', key: 'sno', width: 8 },
+      { header: 'Student Name', key: 'studentName', width: 25 },
+      { header: 'Admission No', key: 'admissionNumber', width: 15 },
+      { header: 'Course', key: 'course', width: 20 },
+      { header: 'Branch', key: 'branch', width: 20 },
+      { header: 'Parent Mobile No', key: 'parentMobile', width: 16 },
+      { header: 'Student Mobile No', key: 'studentMobile', width: 16 },
+      { header: 'Quota', key: 'quota', width: 15 },
+      { header: 'Tuition Payable', key: 'tuitionPayable', width: 16 },
+      { header: 'Tuition Paid', key: 'tuitionPaid', width: 16 },
+      { header: 'Tuition Pending', key: 'tuitionPending', width: 16 },
+      { header: 'Other Payable', key: 'otherPayable', width: 16 },
+      { header: 'Other Paid', key: 'otherPaid', width: 16 },
+      { header: 'Other Pending', key: 'otherPending', width: 16 },
+      {
+        header: usingMinimumFee ? 'Minimum Fee Required' : 'Total Payable',
+        key: 'totalPayable',
+        width: 18,
+      },
+      { header: 'Total Paid', key: 'totalPaid', width: 16 },
+      {
+        header: usingMinimumFee ? 'Unpaid vs Minimum' : 'Total Pending',
+        key: 'totalPending',
+        width: 18,
+      },
+      { header: 'Fee Status', key: 'feeStatusText', width: 14 },
+      { header: 'Amount', key: 'feeAmountText', width: 18 },
+      { header: 'Important Documents', key: 'importantDocumentsPendingText', width: 45 },
+      { header: 'Other Documents Pending', key: 'otherDocumentsPendingText', width: 55 },
+    ];
+
+    combinedRows.forEach((row, index) => {
+      worksheet.addRow({
+        sno: index + 1,
+        studentName: row.studentName,
+        admissionNumber: row.admissionNumber,
+        course: row.course,
+        branch: row.branch,
+        parentMobile: row.parentMobile,
+        studentMobile: row.studentMobile,
+        quota: row.quota,
+        tuitionPayable: row.tuitionPayable,
+        tuitionPaid: row.tuitionPaid,
+        tuitionPending: row.tuitionPending,
+        otherPayable: row.otherPayable,
+        otherPaid: row.otherPaid,
+        otherPending: row.otherPending,
+        totalPayable: row.totalPayable,
+        totalPaid: row.totalPaid,
+        totalPending: row.totalPending,
+        feeStatusText: row.feeStatusText,
+        feeAmountText: row.feeAmountText,
+        importantDocumentsPendingText: row.importantDocumentsPendingText || 'Completed',
+        otherDocumentsPendingText: row.otherDocumentsPendingText || 'Completed',
+      });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' },
+    };
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=pending_combined.xlsx'
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Error exporting combined pending records:', error);
+    if (!res.headersSent) {
+      return errorResponse(res, error.message || 'Failed to export combined pending records', 500);
+    }
+  }
+};
+

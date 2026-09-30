@@ -35,6 +35,7 @@ import {
   exportPendingCertificates,
   listPendingFees,
   exportPendingFees,
+  exportPendingCombined,
   sendAdmissionConfirmationSmsById,
   sendDocumentNotificationSmsById,
   sendDocumentNotificationSmsBulk,
@@ -70,6 +71,7 @@ router.get('/pending-certificates/export', exportPendingCertificates);
 router.get('/pending-certificates', listPendingCertificates);
 router.get('/pending-fees/export', exportPendingFees);
 router.get('/pending-fees', listPendingFees);
+router.get('/pending-combined/export', exportPendingCombined);
 router.get('/minimum-fee-configs', listMinimumFeeConfigs);
 router.put('/minimum-fee-configs/course', upsertMinimumFeeConfigsForCourse);
 router.delete('/minimum-fee-configs/course', clearMinimumFeeConfigsForCourse);
