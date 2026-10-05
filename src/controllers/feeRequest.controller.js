@@ -1145,9 +1145,58 @@ export const getPendingFeeRequestForJoining = async (req, res) => {
     }
 
     const pool = getPool();
+
+    // Resolve admission number from SQL if possible
+    let admissionNumber = '';
+    try {
+      const [admRows] = await pool.execute(
+        `SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1`,
+        [joiningId]
+      );
+      if (admRows[0]?.admission_number) {
+        admissionNumber = admRows[0].admission_number;
+      } else {
+        const [leadRows] = await pool.execute(
+          `SELECT admission_number FROM leads WHERE id = (SELECT lead_id FROM joinings WHERE id = ? LIMIT 1) LIMIT 1`,
+          [joiningId]
+        );
+        if (leadRows[0]?.admission_number) {
+          admissionNumber = leadRows[0].admission_number;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Check Fee Management Mongo overallconcessionrequests collection first
+    try {
+      const conn = await connectFeeManagement();
+      if (conn && conn.db) {
+        const mongoOr = [{ joiningId }];
+        if (admissionNumber) mongoOr.push({ admissionNumber });
+
+        const mongoReq = await conn.db.collection('overallconcessionrequests').findOne(
+          { $or: mongoOr },
+          { sort: { updatedAt: -1 } }
+        );
+
+        if (mongoReq && (mongoReq.status === 'APPROVED' || mongoReq.status === 'REJECTED')) {
+          // Self-heal SQL fee_requests if stale
+          await pool.execute(
+            `UPDATE fee_requests SET status = ? WHERE (joining_id = ? OR (admission_number = ? AND admission_number != '')) AND status = 'pending_approval'`,
+            [mongoReq.status.toLowerCase(), joiningId, admissionNumber]
+          ).catch(() => null);
+
+          return successResponse(res, null);
+        }
+      }
+    } catch (mErr) {
+      console.warn('Mongo pending check failed in getPendingFeeRequestForJoining:', mErr?.message);
+    }
+
     const [rows] = await pool.execute(
-      `SELECT * FROM fee_requests WHERE joining_id = ? AND status = 'pending_approval' ORDER BY submitted_at DESC LIMIT 1`,
-      [joiningId]
+      `SELECT * FROM fee_requests WHERE (joining_id = ? OR (admission_number = ? AND admission_number != '')) AND status = 'pending_approval' ORDER BY submitted_at DESC LIMIT 1`,
+      [joiningId, admissionNumber]
     );
 
     let feeHeads = [];

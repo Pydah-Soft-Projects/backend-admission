@@ -231,93 +231,236 @@ const serializeFeeMongoTransaction = (doc, feeHeadDetails = null) => ({
 export const getOverallConcessions = async (req, res) => {
   try {
     const admissionNumber = String(req.query.admissionNumber || '').trim();
-    if (!admissionNumber) {
-      return errorResponse(res, 'admissionNumber is required', 422);
+    const joiningId = String(req.query.joiningId || '').trim();
+
+    if (!admissionNumber && !joiningId) {
+      return errorResponse(res, 'admissionNumber or joiningId is required', 422);
     }
 
-    const secondaryPool = getSecondaryPool();
-    const [rows] = await secondaryPool.execute(
-      `SELECT admission_number, pin_no, student_name, batch, course, branch, revised_fees, updated_at
-       FROM overall_concessions
-       WHERE admission_number = ?
-       LIMIT 1`,
-      [admissionNumber]
-    );
-
-    const row = rows[0] || null;
-
-    // Parse approved revised fees from the secondary overall_concessions table
     let approvedRevisedFees = [];
-    if (row) {
+    let studentName = '';
+    let batch = '';
+    let course = '';
+    let branch = '';
+    let pinNo = '';
+    let updatedAt = null;
+    let feeMongoRemarks = '';
+    let foundInMongo = false;
+    let mongoApprovedRequest = null;
+
+    // Resolve admission number from SQL if only joiningId is provided
+    let resolvedAdmissionNumber = admissionNumber;
+    if (!resolvedAdmissionNumber && joiningId) {
       try {
-        const raw =
-          typeof row.revised_fees === 'string'
-            ? JSON.parse(row.revised_fees || '[]')
-            : Array.isArray(row.revised_fees)
-              ? row.revised_fees
-              : [];
-        approvedRevisedFees = normalizeOverallConcessionLinesForStorage(
-          Array.isArray(raw) ? raw : []
+        const primaryPool = getPool();
+        const [admRows] = await primaryPool.execute(
+          `SELECT admission_number FROM admissions WHERE joining_id = ? LIMIT 1`,
+          [joiningId]
         );
-      } catch {
-        approvedRevisedFees = [];
+        if (admRows[0]?.admission_number) {
+          resolvedAdmissionNumber = admRows[0].admission_number;
+        } else {
+          const [leadRows] = await primaryPool.execute(
+            `SELECT admission_number FROM leads WHERE id = (SELECT lead_id FROM joinings WHERE id = ? LIMIT 1) LIMIT 1`,
+            [joiningId]
+          );
+          if (leadRows[0]?.admission_number) {
+            resolvedAdmissionNumber = leadRows[0].admission_number;
+          }
+        }
+      } catch (err) {
+        console.warn('[getOverallConcessions] Failed resolving admission_number from joiningId:', err.message);
       }
     }
 
-    // Also check for a pending fee_request for this admission number.
-    // If one exists, extract its concession lines and include them tagged with
-    // pending:true so the builder and print can display them even before approval.
-    let pendingRevisedFees = [];
+    const mongoOr = [];
+    if (resolvedAdmissionNumber) {
+      mongoOr.push({ admissionNumber: resolvedAdmissionNumber });
+      mongoOr.push({ studentId: resolvedAdmissionNumber });
+    }
+    if (joiningId) {
+      mongoOr.push({ joiningId });
+    }
+
+    // 1. Try reading directly from MongoDB first (Fee Management DB mirror, studentfees, & overallconcessionrequests)
     try {
-      const primaryPool = getPool();
-      const [pendingRows] = await primaryPool.execute(
-        `SELECT student_fee_details, request_lines
-         FROM fee_requests
-         WHERE admission_number = ? AND status = 'pending_approval'
-         ORDER BY submitted_at DESC
-         LIMIT 1`,
-        [admissionNumber]
-      );
-      if (pendingRows.length > 0) {
-        const pr = pendingRows[0];
-        let sfd = null;
-        try {
-          sfd =
-            typeof pr.student_fee_details === 'string'
-              ? JSON.parse(pr.student_fee_details || 'null')
-              : pr.student_fee_details || null;
-        } catch {
-          sfd = null;
+      const { connectFeeManagement } = await import('../config-mongo/feeManagement.js');
+      const conn = await connectFeeManagement();
+      if (conn && conn.db) {
+        const db = conn.db;
+
+        // A) Check crm_joining_student_fee_details collection
+        const crmDoc = mongoOr.length > 0
+          ? await db.collection('crm_joining_student_fee_details').findOne({ $or: mongoOr })
+          : null;
+
+        if (crmDoc) {
+          foundInMongo = true;
+          studentName = crmDoc.studentName || '';
+          batch = crmDoc.batch || '';
+          course = crmDoc.course || '';
+          branch = crmDoc.branch || '';
+          updatedAt = crmDoc.updatedAt || null;
+
+          const { buildOverallConcessionLinesFromPortalLines, buildOverallConcessionLinesFromBuilder } =
+            await import('../utils/overallConcessions.util.js');
+
+          let fromLines = [];
+          if (Array.isArray(crmDoc.lines) && crmDoc.lines.length > 0) {
+            fromLines = buildOverallConcessionLinesFromPortalLines(crmDoc.lines);
+          }
+          if (fromLines.length === 0 && Array.isArray(crmDoc.legacyLines) && crmDoc.legacyLines.length > 0) {
+            fromLines = buildOverallConcessionLinesFromBuilder({ lines: crmDoc.legacyLines });
+          }
+          approvedRevisedFees = fromLines;
         }
 
-        // Build canonical lines from builder studentFeeDetails (preferred) or request_lines (fallback)
-        const { buildOverallConcessionLinesFromBuilder, buildOverallConcessionLinesFromPortalLines } =
-          await import('../utils/overallConcessions.util.js');
-
-        const fromBuilder = sfd ? buildOverallConcessionLinesFromBuilder(sfd) : [];
-        if (fromBuilder.length > 0) {
-          pendingRevisedFees = fromBuilder.map((line) => ({ ...line, pending: true }));
-        } else {
-          let requestLines = [];
-          try {
-            requestLines =
-              typeof pr.request_lines === 'string'
-                ? JSON.parse(pr.request_lines || '[]')
-                : pr.request_lines || [];
-          } catch {
-            requestLines = [];
+        // B) Check studentfees collection in Mongo for any direct edits/concessions made in Fee Management
+        if (mongoOr.length > 0) {
+          const sfRows = await db.collection('studentfees').find({ $or: mongoOr }).toArray();
+          if (sfRows && sfRows.length > 0) {
+            const { buildOverallConcessionLinesFromPortalLines } = await import('../utils/overallConcessions.util.js');
+            const portalConcessions = buildOverallConcessionLinesFromPortalLines(sfRows);
+            if (portalConcessions.length > 0) {
+              // Merge: portalConcessions from live studentfees override or supplement
+              const map = new Map();
+              for (const line of approvedRevisedFees) {
+                const k = `${line.feeHeadId || line.feeHeadCode}::${line.studentYear || 1}`;
+                map.set(k, line);
+              }
+              for (const line of portalConcessions) {
+                const k = `${line.feeHeadId || line.feeHeadCode}::${line.studentYear || 1}`;
+                map.set(k, line);
+              }
+              approvedRevisedFees = Array.from(map.values());
+              foundInMongo = true;
+            }
           }
-          pendingRevisedFees = buildOverallConcessionLinesFromPortalLines(requestLines).map(
-            (line) => ({ ...line, pending: true })
+        }
+
+        // C) Check overallconcessionrequests for remarks and approved concessions
+        if (mongoOr.length > 0) {
+          const mongoReq = await db.collection('overallconcessionrequests').findOne(
+            { $or: mongoOr },
+            { sort: { updatedAt: -1 } }
+          );
+          if (mongoReq) {
+            if (typeof mongoReq.remarks === 'string') {
+              feeMongoRemarks = mongoReq.remarks;
+            }
+            if (mongoReq.status === 'APPROVED' && Array.isArray(mongoReq.concessions) && mongoReq.concessions.length > 0) {
+              mongoApprovedRequest = mongoReq;
+              const { buildOverallConcessionLinesFromPortalLines } = await import('../utils/overallConcessions.util.js');
+              const ocrLines = mongoReq.concessions.map((c) => ({
+                feeHeadId: String(c.feeHeadId || '').trim(),
+                feeHeadCode: String(c.feeHeadCode || '').trim(),
+                studentYear: Number(c.studentYear) || 1,
+                concessionType: (c.concessionType === 'REVISED' || c.concessionType === 'REVISED_FEE') ? 'REVISED_FEE' : 'CONCESSION',
+                amount: Number(c.amount) || 0,
+                revisedAmount: (c.concessionType === 'REVISED' || c.concessionType === 'REVISED_FEE') ? (Number(c.amount) || 0) : undefined,
+                concessionAmount: c.concessionType === 'CONCESSION' ? (Number(c.amount) || 0) : undefined,
+                remarks: c.remarks || '',
+              }));
+              approvedRevisedFees = buildOverallConcessionLinesFromPortalLines(ocrLines);
+              foundInMongo = true;
+            }
+          }
+        }
+      }
+    } catch (mongoErr) {
+      console.warn('[getOverallConcessions] Fee Mongo direct lookup failed/skipped:', mongoErr?.message);
+    }
+
+    // 2. Fallback to SQL secondary database overall_concessions table if not found in Mongo
+    if (!foundInMongo) {
+      try {
+        const secondaryPool = getSecondaryPool();
+        const sqlQueryVal = admissionNumber || joiningId;
+        const sqlQueryCol = admissionNumber ? 'admission_number' : 'joining_id';
+        const [rows] = await secondaryPool.execute(
+          `SELECT admission_number, pin_no, student_name, batch, course, branch, revised_fees, updated_at
+           FROM overall_concessions
+           WHERE ${sqlQueryCol} = ?
+           LIMIT 1`,
+          [sqlQueryVal]
+        );
+
+        const row = rows[0] || null;
+        if (row) {
+          pinNo = row.pin_no || '';
+          studentName = row.student_name || '';
+          batch = row.batch || '';
+          course = row.course || '';
+          branch = row.branch || '';
+          updatedAt = row.updated_at || null;
+
+          const raw =
+            typeof row.revised_fees === 'string'
+              ? JSON.parse(row.revised_fees || '[]')
+              : Array.isArray(row.revised_fees)
+                ? row.revised_fees
+                : [];
+          approvedRevisedFees = normalizeOverallConcessionLinesForStorage(
+            Array.isArray(raw) ? raw : []
           );
         }
+      } catch (sqlErr) {
+        console.warn('[getOverallConcessions] SQL secondary fallback skipped:', sqlErr?.message);
       }
-    } catch (pendingErr) {
-      console.error('[getOverallConcessions] Failed to fetch pending fee request lines:', pendingErr?.message || pendingErr);
+    }
+
+    // 3. Also check for a pending fee_request in primary SQL if any (only if not already approved in Mongo)
+    let pendingRevisedFees = [];
+    if (admissionNumber && !mongoApprovedRequest) {
+      try {
+        const primaryPool = getPool();
+        const [pendingRows] = await primaryPool.execute(
+          `SELECT student_fee_details, request_lines
+           FROM fee_requests
+           WHERE admission_number = ? AND status = 'pending_approval'
+           ORDER BY submitted_at DESC
+           LIMIT 1`,
+          [admissionNumber]
+        );
+        if (pendingRows.length > 0) {
+          const pr = pendingRows[0];
+          let sfd = null;
+          try {
+            sfd =
+              typeof pr.student_fee_details === 'string'
+                ? JSON.parse(pr.student_fee_details || 'null')
+                : pr.student_fee_details || null;
+          } catch {
+            sfd = null;
+          }
+
+          const { buildOverallConcessionLinesFromBuilder, buildOverallConcessionLinesFromPortalLines } =
+            await import('../utils/overallConcessions.util.js');
+
+          const fromBuilder = sfd ? buildOverallConcessionLinesFromBuilder(sfd) : [];
+          if (fromBuilder.length > 0) {
+            pendingRevisedFees = fromBuilder.map((line) => ({ ...line, pending: true }));
+          } else {
+            let requestLines = [];
+            try {
+              requestLines =
+                typeof pr.request_lines === 'string'
+                  ? JSON.parse(pr.request_lines || '[]')
+                  : pr.request_lines || [];
+            } catch {
+              requestLines = [];
+            }
+            pendingRevisedFees = buildOverallConcessionLinesFromPortalLines(requestLines).map(
+              (line) => ({ ...line, pending: true })
+            );
+          }
+        }
+      } catch (pendingErr) {
+        console.error('[getOverallConcessions] Failed to fetch pending fee request lines:', pendingErr?.message || pendingErr);
+      }
     }
 
     // Merge: approved lines take precedence; pending lines fill in any heads not yet approved.
-    // Key: feeHeadId (or feeHeadCode) + studentYear
     const keyFor = (line) => {
       const head = String(line.feeHeadId || line.feeHeadCode || '').trim().toUpperCase();
       const year = Number(line.studentYear) || 1;
@@ -330,7 +473,6 @@ export const getOverallConcessions = async (req, res) => {
     }
     for (const line of pendingRevisedFees) {
       const k = keyFor(line);
-      // Only add pending line if no approved line already covers it
       if (k !== '::1' && !mergedMap.has(k)) mergedMap.set(k, line);
     }
     const revisedFees = Array.from(mergedMap.values());
@@ -358,39 +500,17 @@ export const getOverallConcessions = async (req, res) => {
       return line;
     });
 
-    let feeMongoRemarks = '';
-    try {
-      const { connectFeeManagement } = await import('../config-mongo/feeManagement.js');
-      const conn = await connectFeeManagement();
-      const mongoReq = await conn.db.collection('overallconcessionrequests').findOne(
-        { admissionNumber },
-        { sort: { updatedAt: -1 } }
-      );
-      if (mongoReq && typeof mongoReq.remarks === 'string') {
-        feeMongoRemarks = mongoReq.remarks;
-      }
-    } catch (mErr) {
-      console.warn('[getOverallConcessions] Fee Mongo remarks lookup skipped:', mErr?.message);
-    }
-
-    if (!row && enrichedRevisedFees.length === 0 && !feeMongoRemarks) {
-      return successResponse(res, {
-        admissionNumber,
-        remarks: '',
-        revisedFees: [],
-      });
-    }
-
     return successResponse(res, {
-      admissionNumber: row?.admission_number || admissionNumber,
-      pinNo: row?.pin_no || '',
-      studentName: row?.student_name || '',
-      batch: row?.batch || '',
-      course: row?.course || '',
-      branch: row?.branch || '',
+      admissionNumber: admissionNumber || '',
+      joiningId: joiningId || '',
+      pinNo,
+      studentName,
+      batch,
+      course,
+      branch,
       remarks: feeMongoRemarks || '',
       revisedFees: enrichedRevisedFees,
-      updatedAt: row?.updated_at || null,
+      updatedAt,
     });
   } catch (error) {
     console.error('Error fetching overall concessions:', error);
