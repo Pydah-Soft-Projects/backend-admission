@@ -7,6 +7,7 @@ import { sendEmail } from '../services/unifiedEmail.service.js';
 import axios from 'axios';
 import { connectHRMS } from '../config-mongo/hrms.js';
 import { matchHrmsEmployeePassword } from '../utils/employeePasswordAuth.util.js';
+import { recordUserLoginLog } from '../utils/recordUserLoginLog.js';
 
 const escapeHtml = (value = '') =>
   String(value)
@@ -385,6 +386,12 @@ export const getMe = async (req, res) => {
 // @access  Private
 export const logout = async (req, res) => {
   try {
+    if (req.user?.id) {
+      await recordUserLoginLog(req.user.id, 'logout', {
+        ipAddress: req.ip || req.headers['x-forwarded-for'],
+        userAgent: req.headers['user-agent'],
+      });
+    }
     return successResponse(res, null, 'Logged out successfully', 200);
   } catch (error) {
     return errorResponse(res, error.message || 'Logout failed', 500);
@@ -491,6 +498,7 @@ export const createSSOSession = async (req, res) => {
       permissions,
       isActive: userData.is_active === 1 || userData.is_active === true,
       timeTrackingEnabled,
+      isSSO: true,
       createdAt: userData.created_at,
       updatedAt: userData.updated_at,
     };
