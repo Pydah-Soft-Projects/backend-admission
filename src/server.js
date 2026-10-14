@@ -155,6 +155,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/leads', leadGroupUpdateRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/auth', authRoutes); // Fallback if reverse proxy (Nginx) strips /api prefix
 app.use('/api/users', userRoutes);
 app.use('/api/leads', leadRoutes);
 app.use('/api/communications', communicationRoutes);

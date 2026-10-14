@@ -403,17 +403,17 @@ export const logout = async (req, res) => {
 // @access  Public (but requires valid SSO token verification)
 export const createSSOSession = async (req, res) => {
   try {
-    const { userId, role, portalId, ssoToken } = req.body;
+    const { userId, role, portalId, ssoToken, email } = req.body;
 
-    console.log('SSO session creation request for userId:', userId);
+    console.log('[SSO Session] Request received:', { userId, email, role, portalId, hasToken: !!ssoToken });
 
-    // Validate input
-    if (!userId || !ssoToken) {
-      return errorResponse(res, 'User ID and SSO token are required', 400);
+    // Validate input: token is required
+    if (!ssoToken) {
+      return errorResponse(res, 'SSO token is required', 400);
     }
 
-    // Optional: Verify the SSO token again with CRM backend for extra security
-    const CRM_BACKEND_URL = process.env.CRM_BACKEND_URL || 'http://localhost:3000';
+    let crmPayload = null;
+    const CRM_BACKEND_URL = process.env.CRM_BACKEND_URL || 'https://pydah-crm-backend.pydah.edu.in';
 
     try {
       const verifyResponse = await axios.post(`${CRM_BACKEND_URL}/auth/verify-token`, {
@@ -427,21 +427,16 @@ export const createSSOSession = async (req, res) => {
       const verifyResult = verifyResponse.data;
 
       if (!verifyResult.success || !verifyResult.valid) {
-        console.log('SSO token verification failed:', verifyResult.message);
-        return errorResponse(res, 'Invalid SSO token', 401);
+        console.log('[SSO Session] Token verification failed:', verifyResult.message);
+        return errorResponse(res, verifyResult.message || 'Invalid SSO token', 401);
       }
 
-      // Verify the userId matches
-      if (verifyResult.data.userId !== userId) {
-        console.log('User ID mismatch in SSO token');
-        return errorResponse(res, 'Token user ID mismatch', 401);
-      }
+      crmPayload = verifyResult.data || {};
     } catch (verifyError) {
-      console.error('Error verifying SSO token with CRM backend:', verifyError.message);
-      // Continue anyway if CRM backend is not available (for development)
-      // In production, you might want to fail here
-      if (process.env.NODE_ENV === 'production') {
-        return errorResponse(res, 'SSO token verification failed', 500);
+      console.error('[SSO Session] Error verifying SSO token with CRM backend:', verifyError.message);
+      // In production, only fail if verification is required and errored
+      if (process.env.NODE_ENV === 'production' && !crmPayload) {
+        return errorResponse(res, 'SSO token verification failed with CRM backend', 500);
       }
     }
 
@@ -450,19 +445,47 @@ export const createSSOSession = async (req, res) => {
     try {
       pool = getPool();
     } catch (error) {
-      console.error('Database connection error:', error);
+      console.error('[SSO Session] Database connection error:', error);
       return errorResponse(res, 'Database connection failed', 500);
     }
 
-    // Find user in admissions database
-    const [users] = await pool.execute(
-      'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ? AND is_active = 1',
-      [userId]
-    );
+    // Find user in admissions database by ID, email, or emp_no
+    const targetId = crmPayload?.id || crmPayload?.userId || userId;
+    const targetEmail = crmPayload?.email || email;
+    const targetEmpNo = crmPayload?.emp_no || crmPayload?.employeeId;
+
+    let users = [];
+
+    // 1. Try by ID
+    if (targetId) {
+      const [rows] = await pool.execute(
+        'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE id = ? AND (is_active = 1 OR is_active IS NULL) LIMIT 1',
+        [targetId]
+      );
+      if (rows && rows.length > 0) users = rows;
+    }
+
+    // 2. Fallback by Email
+    if (users.length === 0 && targetEmail) {
+      const [rows] = await pool.execute(
+        'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE LOWER(email) = LOWER(?) AND (is_active = 1 OR is_active IS NULL) LIMIT 1',
+        [targetEmail]
+      );
+      if (rows && rows.length > 0) users = rows;
+    }
+
+    // 3. Fallback by Employee Number
+    if (users.length === 0 && targetEmpNo) {
+      const [rows] = await pool.execute(
+        'SELECT id, hrms_id, emp_no, name, email, role_name, managed_by, is_manager, designation, permissions, is_active, time_tracking_enabled, created_at, updated_at FROM users WHERE emp_no = ? AND (is_active = 1 OR is_active IS NULL) LIMIT 1',
+        [targetEmpNo]
+      );
+      if (rows && rows.length > 0) users = rows;
+    }
 
     if (users.length === 0) {
-      console.log('User not found in admissions database:', userId);
-      return errorResponse(res, 'User not found in admissions database', 404);
+      console.log('[SSO Session] User not found in admissions database. targetId:', targetId, 'targetEmail:', targetEmail);
+      return errorResponse(res, 'User identity could not be found in Admissions database', 404);
     }
 
     const userData = users[0];
