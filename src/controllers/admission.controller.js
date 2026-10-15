@@ -2600,7 +2600,7 @@ export const listAdmissions = async (req, res) => {
       conditions.push('a.status = ?');
       params.push(status);
     }
-    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, null);
     if (quotaFilterClause) {
       conditions.push(quotaFilterClause.condition);
       params.push(...quotaFilterClause.params);
@@ -5723,7 +5723,7 @@ export const exportAdmissions = async (req, res) => {
       conditions.push('a.status = ?');
       params.push(status);
     }
-    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, null);
     if (quotaFilterClause) {
       conditions.push(quotaFilterClause.condition);
       params.push(...quotaFilterClause.params);
@@ -6170,7 +6170,7 @@ const buildPendingCertificatesBaseFilters = async (query) => {
     }
   }
 
-  const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+  const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, null);
   if (quotaFilterClause) {
     conditions.push(quotaFilterClause.condition);
     params.push(...quotaFilterClause.params);
