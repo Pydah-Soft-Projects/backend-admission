@@ -17,6 +17,7 @@ import {
   mergeQuotaOptionLabels,
   quotaNamesFromCatalog,
 } from '../utils/studentQuotas.util.js';
+import { buildSqlQuotaFilterCondition } from '../utils/quotaClassification.util.js';
 import { applyReference1OnCallStatusConfirm, isCallStatusConfirmedValue } from '../utils/joiningReference.util.js';
 import { managerCanAccessLead } from '../utils/managerLeadAccess.util.js';
 import { SELF_REGISTRATION_SOURCE } from '../utils/joiningSelfRegistration.util.js';
@@ -160,7 +161,13 @@ const buildLeadFilterConditions = (req, alias = 'l') => {
     }
   }
 
-  if (quota) { conditions.push(`${p}quota = ?`); params.push(quota); }
+  if (quota) {
+    const quotaFilterClause = buildSqlQuotaFilterCondition(`${p}quota`, quota, null);
+    if (quotaFilterClause) {
+      conditions.push(quotaFilterClause.condition);
+      params.push(...quotaFilterClause.params);
+    }
+  }
   if (leadStatus) {
     conditions.push(`${p}lead_status = ?`);
     params.push(leadStatus);

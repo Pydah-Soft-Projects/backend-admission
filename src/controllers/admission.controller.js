@@ -61,6 +61,7 @@ import {
   SQL_IS_SPOT_QUOTA,
   SQL_IS_LATER_QUOTA,
   SQL_IS_LSPOT_QUOTA,
+  buildSqlQuotaFilterCondition,
 } from '../utils/quotaClassification.util.js';
 import {
   isDirectReference,
@@ -2356,7 +2357,7 @@ const formatAdmissionListItem = (row) => {
     ...effectiveIds,
     course: courseLabel,
     branch: row.branch || '',
-    quota: row.quota || '',
+    quota: row.quota || row.lead_data_quota || '',
   },
   studentInfo: {
     name: row.student_name || row.lead_name || '',
@@ -2599,10 +2600,10 @@ export const listAdmissions = async (req, res) => {
       conditions.push('a.status = ?');
       params.push(status);
     }
-    const quotaFilter = String(quota ?? '').trim();
-    if (quotaFilter) {
-      conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
-      params.push(quotaFilter);
+    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+    if (quotaFilterClause) {
+      conditions.push(quotaFilterClause.condition);
+      params.push(...quotaFilterClause.params);
     }
     
     const meritFilter = String(merit ?? '').trim().toLowerCase();
@@ -2810,6 +2811,7 @@ export const listAdmissions = async (req, res) => {
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.source')) AS lead_data_source,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.utmSource')) AS lead_data_utm_source,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.leadSource')) AS lead_data_lead_source,
+                JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$.quota')) AS lead_data_quota,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.student_status')) AS list_student_status,
                 JSON_UNQUOTE(JSON_EXTRACT(a.lead_data, '$._joiningRegistrationExtras.studentStatus')) AS list_student_status_alt,
                 JSON_UNQUOTE(JSON_EXTRACT(j.lead_data, '$.reference1')) AS joining_lead_reference1,
@@ -2836,7 +2838,7 @@ export const listAdmissions = async (req, res) => {
 
     const deskFeeRows = admissions.map((row) => ({
       admission_number: row.admission_number,
-      quota: row.quota,
+      quota: row.quota || row.lead_data_quota || '',
       course: row.course,
       branch: row.branch,
       joining_id: row.joining_id,
@@ -5721,10 +5723,10 @@ export const exportAdmissions = async (req, res) => {
       conditions.push('a.status = ?');
       params.push(status);
     }
-    const quotaFilter = String(quota ?? '').trim();
-    if (quotaFilter) {
-      conditions.push(`LOWER(TRIM(COALESCE(a.quota, ''))) = LOWER(?)`);
-      params.push(quotaFilter);
+    const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+    if (quotaFilterClause) {
+      conditions.push(quotaFilterClause.condition);
+      params.push(...quotaFilterClause.params);
     }
     
     const meritFilter = String(merit ?? '').trim().toLowerCase();
@@ -6168,10 +6170,10 @@ const buildPendingCertificatesBaseFilters = async (query) => {
     }
   }
 
-  const quotaFilter = String(quota ?? '').trim();
-  if (quotaFilter) {
-    conditions.push('LOWER(TRIM(COALESCE(a.quota, \'\'))) = LOWER(?)');
-    params.push(quotaFilter);
+  const quotaFilterClause = buildSqlQuotaFilterCondition('a.quota', quota, 'a.lead_data');
+  if (quotaFilterClause) {
+    conditions.push(quotaFilterClause.condition);
+    params.push(...quotaFilterClause.params);
   }
 
   return {
