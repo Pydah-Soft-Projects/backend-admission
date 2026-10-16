@@ -1,6 +1,6 @@
 # Pydah Universal Portal Switcher - Integration Guide (CDN)
 
-The **Pydah Universal Portal Switcher** is a floating widget packaged as a lightweight, zero-dependency CDN script. It allows authenticated users in any Pydah portal (Fee Management, HRMS, SDMS, Transport, Hostel, Academics, EMS, Admissions) to seamlessly switch between their permitted portals with one click.
+The **Pydah Universal Portal Switcher** is a floating widget packaged as a lightweight, zero-dependency CDN script. It allows authenticated users in any Pydah portal (Fee Management, HRMS, SDMS, Transport, [Hostel](), Academics, EMS, Admissions) to seamlessly switch between their permitted portals with one click.
 
 ---
 
@@ -31,7 +31,9 @@ Add this script tag right before the closing `</body>` tag of your application's
 > 💡 **Important:** Replace `data-current-portal="fee-management"` with that specific app's ID (see [Portal IDs Reference](#-portal-ids-reference)).
 
 ### For Local Development Testing:
+
 If you are developing or running portals locally on `localhost`:
+
 ```html
 <script 
   src="http://localhost:5173/portal-switcher.js" 
@@ -45,12 +47,15 @@ If you are developing or running portals locally on `localhost`:
 ## ⚛️ 2. React / Next.js / Vite / Vue Integration
 
 ### Option A: In `index.html` (Recommended)
+
 Simply place the `<script>` tag in your frontend's `index.html`. The widget will automatically:
+
 1. Detect any active auth token (`accessToken`, `token`, `jwt`) and `user` object in `localStorage`.
 2. Detect cross-portal authorized portals passed from the CRM launcher.
 3. Automatically render the floating switcher button.
 
 ### Option B: Programmatic Initialization via JavaScript (App.jsx / AuthProvider)
+
 If your application loads the user session asynchronously or uses custom state management:
 
 ```javascript
@@ -80,14 +85,14 @@ function App() {
 
 You can configure the widget using `data-*` attributes on the `<script>` tag or via `window.PydahSwitcher.init({})`:
 
-| Attribute | Script Tag Attribute | Type | Default | Description |
-|---|---|---|---|---|
-| `currentPortal` | `data-current-portal` | `string` | `null` | **Required.** The portal ID of the current app (e.g. `'fee-management'`). |
-| `apiBaseUrl` | `data-api-base-url` | `string` | `https://pydah-crm-backend.pydah.edu.in` (prod) / `http://localhost:8000` (dev) | Base URL of the CRM Auth Gateway. |
-| `landingUrl` | `data-landing-url` | `string` | `https://crm.pydah.edu.in` | URL for the "Central Hub" link. |
-| `position` | `data-position` | `string` | `'bottom-right'` | Initial corner (`'bottom-right'`, `'bottom-left'`). |
-| `token` | N/A (JS only) | `string` | Auto-detected | The host portal's JWT auth token. |
-| `user` | N/A (JS only) | `object` | Auto-detected | The host portal's authenticated user object. |
+| Attribute         | Script Tag Attribute    | Type       | Default                                                                             | Description                                                                       |
+| ----------------- | ----------------------- | ---------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `currentPortal` | `data-current-portal` | `string` | `null`                                                                            | **Required.** The portal ID of the current app (e.g. `'fee-management'`). |
+| `apiBaseUrl`    | `data-api-base-url`   | `string` | `https://pydah-crm-backend.pydah.edu.in` (prod) / `http://localhost:8000` (dev) | Base URL of the CRM Auth Gateway.                                                 |
+| `landingUrl`    | `data-landing-url`    | `string` | `https://crm.pydah.edu.in`                                                        | URL for the "Central Hub" link.                                                   |
+| `position`      | `data-position`       | `string` | `'bottom-right'`                                                                  | Initial corner (`'bottom-right'`, `'bottom-left'`).                           |
+| `token`         | N/A (JS only)           | `string` | Auto-detected                                                                       | The host portal's JWT auth token.                                                 |
+| `user`          | N/A (JS only)           | `object` | Auto-detected                                                                       | The host portal's authenticated user object.                                      |
 
 ---
 
@@ -95,16 +100,16 @@ You can configure the widget using `data-*` attributes on the `<script>` tag or 
 
 Use these exact portal IDs for `data-current-portal`:
 
-| Portal ID | Portal Name | Category | Production URL |
-|---|---|---|---|
-| `academic-portal` | Academic Portal | Academics & Faculty | `https://acad.pydah.edu.in` |
-| `admissions-crm` | Admission Portal | Enrollment Management | `https://admissions.pydah.edu.in` |
-| `examination-portal`| Examination Management (EMS) | Exams & Assessment | `https://ems.pydah.edu.in` |
-| `fee-management` | Fee Management | Financial Operations | `https://fees.pydah.edu.in` |
-| `hostel-automation` | Hostel Automation (HMS) | Facility Management | `https://hms.pydahsoft.in` |
-| `hrms` | HRMS & Payroll | Staff Operations | `https://hrms.pydah.edu.in` |
-| `student-portal` | Student Portal (SDMS) | Learning & Academics | `https://sdms.pydah.edu.in` |
-| `transport-management` | Transport Management | Logistics Hub | `https://transport.pydah.edu.in` |
+| Portal ID                | Portal Name                  | Category              | Production URL                      |
+| ------------------------ | ---------------------------- | --------------------- | ----------------------------------- |
+| `academic-portal`      | Academic Portal              | Academics & Faculty   | `https://acad.pydah.edu.in`       |
+| `admissions-crm`       | Admission Portal             | Enrollment Management | `https://admissions.pydah.edu.in` |
+| `examination-portal`   | Examination Management (EMS) | Exams & Assessment    | `https://ems.pydah.edu.in`        |
+| `fee-management`       | Fee Management               | Financial Operations  | `https://fees.pydah.edu.in`       |
+| `hostel-automation`    | Hostel Automation (HMS)      | Facility Management   | `https://hms.pydahsoft.in`        |
+| `hrms`                 | HRMS & Payroll               | Staff Operations      | `https://hrms.pydah.edu.in`       |
+| `student-portal`       | Student Portal (SDMS)        | Learning & Academics  | `https://sdms.pydah.edu.in`       |
+| `transport-management` | Transport Management         | Logistics Hub         | `https://transport.pydah.edu.in`  |
 
 ---
 
